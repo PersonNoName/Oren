@@ -9,6 +9,13 @@ describe("parseModelSpec", () => {
     });
   });
 
+  it("parses openai models", () => {
+    expect(parseModelSpec("openai:gpt-4o-mini")).toEqual({
+      provider: "openai",
+      modelId: "gpt-4o-mini",
+    });
+  });
+
   it("defaults provider when bare id", () => {
     expect(parseModelSpec("claude-sonnet-4-5")).toEqual({
       provider: "anthropic",

@@ -41,26 +41,58 @@ Inspect:
 Uses `@earendil-works/pi-ai` (Models collection API, v0.80+).
 
 ```bash
-npm install   # includes @earendil-works/pi-ai
 export OREN_LLM=pi
-export OREN_MODEL=anthropic:claude-sonnet-4-5   # default
-# one of:
-export ANTHROPIC_API_KEY=...
-# or Claude-style:
-export ANTHROPIC_AUTH_TOKEN=...   # mapped to ANTHROPIC_OAUTH_TOKEN
-# optional gateway:
-export ANTHROPIC_BASE_URL=https://your-gateway.example/api
+npm run oren -- tick --force-mode contemplate
+```
+
+### A) OpenAI 官方
+
+```bash
+export OREN_LLM=pi
+export OREN_MODEL=openai:gpt-4o-mini   # 或 gpt-4o / gpt-4.1-mini 等
+export OPENAI_API_KEY=sk-...
 
 npm run oren -- tick --force-mode contemplate
 ```
 
-Live test (integration):
+### B) OpenAI 兼容接口（Chat Completions 格式 / 自定义网关）
+
+很多中转、硅基流动、DeepSeek OpenAI 模式、自建 vLLM 都属于这类：
 
 ```bash
-OREN_LIVE_LLM=1 OREN_LLM=pi npm test -- tests/llm/pi-ai-live.test.ts
+export OREN_LLM=pi
+export OREN_MODEL=openai:你的模型名          # 网关文档里的 model id
+export OPENAI_API_KEY=sk-...                 # 或网关发的 key
+export OPENAI_BASE_URL=https://api.xxx.com/v1  # 必须带到 /v1 这一层（按网关文档）
+
+npm run oren -- tick --force-mode contemplate
 ```
 
-Without a provider key / with `OREN_LLM=fake`, CLI uses the fake completer.
+说明：
+
+- **只要设置了 `OPENAI_BASE_URL`**，Oren 会走 **OpenAI Completions 兼容通道**（`openai-completions`），而不是官方 Responses API。
+- `OREN_MODEL` 的 `openai:` 后面填网关要求的模型名，例如 `deepseek-chat`、`gpt-4o-mini`、`qwen-plus`。
+- Key 也可用 `OPENAI_COMPAT_API_KEY`（与 `OPENAI_API_KEY` 二选一即可）。
+
+### C) Anthropic / Claude 风格
+
+```bash
+export OREN_LLM=pi
+export OREN_MODEL=anthropic:claude-sonnet-4-5
+export ANTHROPIC_API_KEY=...
+# 或 Claude Code 风格：
+export ANTHROPIC_AUTH_TOKEN=...   # 会映射为 ANTHROPIC_OAUTH_TOKEN
+# 可选 Messages 网关：
+export ANTHROPIC_BASE_URL=https://your-gateway.example/api
+```
+
+### Live 测试
+
+```bash
+OREN_LIVE_LLM=1 OREN_LLM=pi OREN_MODEL=openai:gpt-4o-mini npm test -- tests/llm/pi-ai-live.test.ts
+```
+
+未配置 key 时，或 `OREN_LLM=fake` 时，使用本地 Fake 沉思。
 
 ## Scheduling
 
