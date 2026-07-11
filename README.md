@@ -33,19 +33,26 @@ npm run oren -- doctor
 
 ## Durable life + heartbeat (recommended)
 
-```bash
-# uses project .env + creates .oren-life/
-bash scripts/setup-life.sh
+Default durable home (launchd-friendly):
 
-export OREN_HOME=/Users/robot/Documents/Projects/Oren/.oren-life
+`~/Library/Application Support/Oren`
+
+```bash
+bash scripts/setup-life.sh
+export OREN_HOME="$HOME/Library/Application Support/Oren"
+
 npm run oren -- doctor
 npm run oren -- tick
 npm run oren -- visit "evening presence"
+npm run oren -- say "what are you thinking about?"
 
-# install launchd agent (prints load commands; does not force-load)
+# install + load LaunchAgent (every 30m, OREN_TICK_LLM=fake by default — cheap)
 bash scripts/install-heartbeat.sh
-# then run the printed launchctl bootstrap lines if you want background ticks
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.oren.tick.plist
+# logs: /tmp/oren-tick.out.log
 ```
+
+Uses compiled `dist/cli.js` under launchd (no `tsx`, avoids macOS Documents sandbox issues).
 
 `oren visit [note]` marks companion contact (absence clock). Contemplation may feel the absence as background texture only — not chat.
 
@@ -61,6 +68,17 @@ npm run oren -- history 20
 ```
 
 Artifacts: `data/life/dialogue.jsonl` + stream events `user_message` / `oren_reply` / `inner_share`.
+
+Relationship cognition (`relation.json`): cold/warm topics from reception — **does not rewrite Oren's interests**, only calibrates how often to share.
+
+### Dual LLM (cost control)
+
+```bash
+# cheap unsupervised life + live conversation
+export OREN_TICK_LLM=fake
+export OREN_SAY_LLM=pi
+export OREN_MODEL=deepseek:deepseek-v4-flash
+```
 
 Inspect:
 

@@ -4,11 +4,10 @@ import path from "node:path";
 import { sayToOren } from "./dialogue/reply.js";
 import { readDialogueTail } from "./dialogue/store.js";
 import { runDoctor } from "./doctor.js";
-import { FakeLlmCompleter } from "./llm/fake.js";
-import { PiAiCompleter } from "./llm/pi-ai.js";
-import type { LlmCompleter } from "./llm/types.js";
+import { selectLlm } from "./llm/select.js";
 import { loadDotEnv } from "./load-env.js";
 import { resolveHome } from "./paths.js";
+import { loadRelation } from "./relation/cognition.js";
 import { recordVisit } from "./relation/visit.js";
 import { LifeStore } from "./store/life-store.js";
 import { runTick } from "./tick/engine.js";
@@ -49,7 +48,7 @@ async function main(argv: string[]): Promise<number> {
     } catch {
       // load failure handled in runTick
     }
-    const llm = selectLlm(model);
+    const llm = selectLlm(model, "tick");
     const result = await runTick({ home, forceMode, llm });
     console.log(result.message);
     return result.exitCode;
@@ -61,6 +60,7 @@ async function main(argv: string[]): Promise<number> {
       const state = await store.load();
       const tail = await store.readStreamTail(20);
       const active = Object.values(state.threads).filter((t) => t.status === "active");
+      const rel = await loadRelation(store);
       console.log(`oren_id: ${state.meta.oren_id}`);
       console.log(`tick_count: ${state.meta.tick_count}`);
       console.log(`last_tick_at: ${state.meta.last_tick_at ?? "(never)"}`);
@@ -70,6 +70,9 @@ async function main(argv: string[]): Promise<number> {
       }
       const last = state.affect.absence.last_user_contact_at;
       console.log(`last_visit: ${last ?? "(never)"} count=${state.affect.absence.visit_count}`);
+      console.log(
+        `relation: cold=${rel.cold_topics.length} warm=${rel.warm_topics.length} notes=${rel.notes.length}`,
+      );
       console.log("recent_stream:");
       for (const ev of tail.slice(-5)) {
         console.log(`  ${ev.ts} ${ev.type}`);
@@ -106,7 +109,7 @@ async function main(argv: string[]): Promise<number> {
       const store = new LifeStore(home);
       const state = await store.load();
       const model = process.env.OREN_MODEL?.trim() || state.config.model;
-      const llm = selectLlm(model);
+      const llm = selectLlm(model, "say");
       const result = await sayToOren({ store, text, llm });
       console.log(`you: ${result.userTurn.text}`);
       console.log(`oren: ${result.orenTurn.text}`);
@@ -114,6 +117,8 @@ async function main(argv: string[]): Promise<number> {
         console.log(
           `  [share] thread=${result.artifact.share.thread_id ?? "?"} — ${result.artifact.share.snippet ?? ""}`,
         );
+      } else if (result.artifact.share.reason) {
+        console.log(`  [gate] ${result.artifact.share.reason}`);
       }
       return 0;
     } catch (err) {
@@ -206,30 +211,6 @@ function parseForceMode(args: string[]): Mode | undefined {
   return undefined;
 }
 
-function selectLlm(model: string): LlmCompleter {
-  const mode = (process.env.OREN_LLM ?? "").toLowerCase();
-  if (mode === "fake") {
-    return new FakeLlmCompleter();
-  }
-  if (mode === "pi" || mode === "live") {
-    return new PiAiCompleter(model);
-  }
-  const hasKey = !!(
-    process.env.ANTHROPIC_API_KEY ||
-    process.env.ANTHROPIC_OAUTH_TOKEN ||
-    process.env.ANTHROPIC_AUTH_TOKEN ||
-    process.env.OPENAI_API_KEY ||
-    process.env.OPENAI_COMPAT_API_KEY ||
-    process.env.DEEPSEEK_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GEMINI_API_KEY
-  );
-  if (!hasKey) {
-    return new FakeLlmCompleter();
-  }
-  return new PiAiCompleter(model);
-}
-
 function printHelp(): void {
   console.log(`oren — continuous-presence agent runtime (v1)
 
@@ -238,12 +219,14 @@ Usage:
   oren tick [--force-mode idle|organize|contemplate]
   oren status | doctor | history [n]
   oren visit [optional note...]
-  oren say <message>          # talk; seepage + optional inner share
+  oren say <message>
 
 Env:
-  OREN_HOME     life root (default: cwd) — use a fixed path for heartbeat
-  OREN_LLM      fake | pi | auto
-  OREN_MODEL    provider:modelId  (e.g. deepseek:deepseek-v4-flash)
+  OREN_HOME       life root (fixed path for heartbeat)
+  OREN_LLM        fake | pi | auto   (default for both)
+  OREN_TICK_LLM   override for ticks (cheap: fake)
+  OREN_SAY_LLM    override for dialogue (live: pi)
+  OREN_MODEL      provider:modelId
 `);
 }
 

@@ -16,6 +16,8 @@ export async function runDoctor(home: string): Promise<DoctorReport> {
 
   lines.push(`OREN_HOME=${home}`);
   lines.push(`OREN_LLM=${process.env.OREN_LLM ?? "(auto)"}`);
+  lines.push(`OREN_TICK_LLM=${process.env.OREN_TICK_LLM ?? "(same as OREN_LLM)"}`);
+  lines.push(`OREN_SAY_LLM=${process.env.OREN_SAY_LLM ?? "(same as OREN_LLM)"}`);
   lines.push(`OREN_MODEL=${process.env.OREN_MODEL ?? "(from config/default)"}`);
 
   const hasKey = !!(

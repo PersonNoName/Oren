@@ -83,6 +83,12 @@ export class LifeStore {
     await atomicWriteJson(p.corpusIndex, { docs: [], updated_at: now });
     await fs.writeFile(p.stream, "", "utf8");
     await fs.writeFile(p.dialogue, "", "utf8");
+    await atomicWriteJson(p.relation, {
+      updated_at: now,
+      cold_topics: [],
+      warm_topics: [],
+      notes: [],
+    });
 
     const corpusReadme = path.resolve(home, "data/corpus/README.md");
     try {

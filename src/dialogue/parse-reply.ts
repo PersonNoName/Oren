@@ -43,11 +43,20 @@ export function parseDialogueReply(raw: string): DialogueReplyArtifact {
     };
   }
 
+  let reception: DialogueReplyArtifact["reception"] = "unknown";
+  if (typeof obj.reception === "string") {
+    const r = obj.reception.toLowerCase();
+    if (r === "warm" || r === "neutral" || r === "cold" || r === "unknown") {
+      reception = r;
+    }
+  }
+
   return {
     reply,
     share,
     relation_note:
       typeof obj.relation_note === "string" ? obj.relation_note.trim() : undefined,
+    reception,
   };
 }
 

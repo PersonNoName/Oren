@@ -124,6 +124,25 @@ export interface DialogueReplyArtifact {
   };
   /** Optional relationship cognition (e.g. user cold to a topic). */
   relation_note?: string;
+  /**
+   * How the companion received the last share / seepage topic.
+   * Does not change Oren's own excitement — only future share amount.
+   */
+  reception?: "warm" | "neutral" | "cold" | "unknown";
+}
+
+/** Durable relationship cognition (not user profile dump). */
+export interface RelationState {
+  updated_at: string;
+  /** Topics/thread themes the companion seems cold toward. */
+  cold_topics: { key: string; hits: number; last_at: string; note?: string }[];
+  /** Topics they engage warmly. */
+  warm_topics: { key: string; hits: number; last_at: string; note?: string }[];
+  notes: string[];
+}
+
+export function defaultRelation(now: string): RelationState {
+  return { updated_at: now, cold_topics: [], warm_topics: [], notes: [] };
 }
 
 export interface StreamEvent {

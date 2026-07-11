@@ -1,32 +1,19 @@
 #!/usr/bin/env bash
-# Install macOS launchd agent for Oren ticks. Does not start until load.
+# Install macOS LaunchAgent using compiled dist/cli.js (no tsx, no Documents chdir).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OREN_HOME="${OREN_HOME:-$ROOT/.oren-life}"
+DEFAULT_HOME="$HOME/Library/Application Support/Oren"
+OREN_HOME="${OREN_HOME:-$DEFAULT_HOME}"
 NODE_BIN="$(command -v node)"
-INTERVAL="${INTERVAL:-1800}" # seconds
+INTERVAL="${INTERVAL:-1800}"
 LABEL="com.oren.tick"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
-mkdir -p "$HOME/Library/LaunchAgents" "$OREN_HOME"
+cd "$ROOT"
+npm run build >/dev/null
 
-# Ensure life exists
 export OREN_HOME
-if [[ -f "$ROOT/.env" ]]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$ROOT/.env"
-  set +a
-fi
-export OREN_HOME
-node --import tsx "$ROOT/src/cli.ts" setup-life >/dev/null
-
-# Prefer life-local .env
-if [[ -f "$ROOT/.env" && ! -f "$OREN_HOME/.env" ]]; then
-  cp "$ROOT/.env" "$OREN_HOME/.env"
-fi
-
-TICK_CMD="cd '$ROOT' && set -a && [ -f '$OREN_HOME/.env' ] && source '$OREN_HOME/.env'; set +a; export OREN_HOME='$OREN_HOME'; exec '$NODE_BIN' --import tsx '$ROOT/src/cli.ts' tick"
+bash "$ROOT/scripts/setup-life.sh" >/tmp/oren-setup-life.log
 
 cat >"$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -37,10 +24,12 @@ cat >"$PLIST" <<EOF
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>${TICK_CMD}</string>
+    <string>${NODE_BIN}</string>
+    <string>${ROOT}/dist/cli.js</string>
+    <string>tick</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>${OREN_HOME}</string>
   <key>StartInterval</key>
   <integer>${INTERVAL}</integer>
   <key>RunAtLoad</key>
@@ -51,26 +40,23 @@ cat >"$PLIST" <<EOF
   <string>/tmp/oren-tick.err.log</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>OREN_HOME</key>
+    <string>${OREN_HOME}</string>
     <key>PATH</key>
     <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>NODE_PATH</key>
+    <string>${ROOT}/node_modules</string>
   </dict>
 </dict>
 </plist>
 EOF
 
 echo "Wrote $PLIST"
-echo "Interval=${INTERVAL}s OREN_HOME=$OREN_HOME"
+echo "OREN_HOME=$OREN_HOME  interval=${INTERVAL}s  binary=$ROOT/dist/cli.js"
+echo "OREN_TICK_LLM should be fake (cheap) in $OREN_HOME/.env"
 echo ""
-echo "Load (starts heartbeat):"
+echo "Reload:"
 echo "  launchctl bootout gui/\$(id -u) $PLIST 2>/dev/null || true"
 echo "  launchctl bootstrap gui/\$(id -u) $PLIST"
-echo "  launchctl enable gui/\$(id -u)/$LABEL"
 echo "  launchctl kickstart -k gui/\$(id -u)/$LABEL"
-echo ""
-echo "Unload:"
-echo "  launchctl bootout gui/\$(id -u) $PLIST"
-echo ""
-echo "Logs: /tmp/oren-tick.out.log  /tmp/oren-tick.err.log"
-echo ""
-echo "NOTE: live LLM ticks cost money. Set OREN_LLM=fake in $OREN_HOME/.env for free heartbeat,"
-echo "      or keep OREN_LLM=pi with DeepSeek for real contemplation."
+echo "Logs: /tmp/oren-tick.out.log /tmp/oren-tick.err.log"

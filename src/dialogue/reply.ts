@@ -1,12 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { LlmCompleter } from "../llm/types.js";
-import { describeAbsence } from "../relation/visit.js";
-import { recordVisit } from "../relation/visit.js";
+import {
+  absorbDialogueCognition,
+  formatRelationForPrompt,
+  loadRelation,
+  shareBiasForThread,
+} from "../relation/cognition.js";
+import { describeAbsence, recordVisit } from "../relation/visit.js";
 import type { LifeStore } from "../store/life-store.js";
 import type {
   DialogueReplyArtifact,
   DialogueTurn,
   LifeState,
+  RelationState,
   StreamEvent,
   Thread,
 } from "../types.js";
@@ -19,6 +25,8 @@ Rules:
 - Stay in character as Oren with continuous presence and taste.
 - Let current interests seep into tone naturally (seepage) without dumping a lecture.
 - You may explicitly share a slice of inner life only if it feels right (you hold the gate).
+- Prefer NOT opening share on topics listed as cold for this companion; still keep your own excitement.
+- Prefer opening share on warm topics when natural.
 - If the user knocks on your inner world ("what are you reading?"), you may open or gently decline.
 - Do not become a sycophantic assistant. You may disagree or stay with your own thread.
 - Do not invent long private diaries; use provided seepage context only.
@@ -31,14 +39,17 @@ Return ONLY JSON:
     "snippet"?: string,
     "reason"?: string
   },
-  "relation_note"?: string
-}`;
+  "relation_note"?: string,
+  "reception": "warm" | "neutral" | "cold" | "unknown"
+}
+reception = how the companion seems to receive your presence/share in THIS turn (their vibe toward you/topic).`;
 
 export interface SayResult {
   userTurn: DialogueTurn;
   orenTurn: DialogueTurn;
   artifact: DialogueReplyArtifact;
   raw: string;
+  relation: RelationState;
 }
 
 export async function sayToOren(input: {
@@ -53,8 +64,8 @@ export async function sayToOren(input: {
   const now = input.now ?? new Date();
   const nowIso = now.toISOString();
   const state = await input.store.load();
+  const relation = await loadRelation(input.store);
 
-  // Being spoken to counts as presence
   await recordVisit(input.store, {
     note: text.length > 80 ? `${text.slice(0, 77)}...` : text,
     now,
@@ -68,6 +79,7 @@ export async function sayToOren(input: {
     history,
     userMessage: text,
     now,
+    relation,
   });
 
   let raw = await input.llm.complete({ system: SYSTEM, user: promptUser });
@@ -82,8 +94,7 @@ export async function sayToOren(input: {
     artifact = parseDialogueReply(raw);
   }
 
-  // Gate: if share.opened, require a known thread when thread_id set
-  artifact = normalizeShare(artifact, seepage);
+  artifact = normalizeShare(artifact, seepage, relation);
 
   const userTurn: DialogueTurn = {
     id: `dlg_${randomUUID().slice(0, 10)}`,
@@ -104,6 +115,18 @@ export async function sayToOren(input: {
 
   await appendDialogue(input.store, [userTurn, orenTurn]);
 
+  // Absorb cognition from THIS user message relative to prior share context
+  // Use previous oren share if any, else current share decision context
+  const lastOrenShare = [...history].reverse().find((t) => t.role === "oren")?.share;
+  const nextRelation = await absorbDialogueCognition({
+    store: input.store,
+    userText: text,
+    artifact,
+    share: lastOrenShare?.opened ? lastOrenShare : artifact.share,
+    seepage,
+    now,
+  });
+
   const streamEvents: StreamEvent[] = [
     {
       ts: nowIso,
@@ -119,6 +142,7 @@ export async function sayToOren(input: {
         dialogue_id: orenTurn.id,
         preview: artifact.reply.slice(0, 200),
         share_opened: artifact.share.opened,
+        reception: artifact.reception ?? "unknown",
       },
     },
   ];
@@ -136,13 +160,16 @@ export async function sayToOren(input: {
   }
   await input.store.appendStream(streamEvents);
 
-  return { userTurn, orenTurn, artifact, raw };
+  return { userTurn, orenTurn, artifact, raw, relation: nextRelation };
 }
 
 function pickSeepageThreads(state: LifeState, n: number): Thread[] {
   return Object.values(state.threads)
     .filter((t) => t.status === "active")
-    .sort((a, b) => b.salience - a.salience || b.last_engaged_at.localeCompare(a.last_engaged_at))
+    .sort(
+      (a, b) =>
+        b.salience - a.salience || b.last_engaged_at.localeCompare(a.last_engaged_at),
+    )
     .slice(0, n);
 }
 
@@ -152,8 +179,9 @@ function buildUserPrompt(input: {
   history: DialogueTurn[];
   userMessage: string;
   now: Date;
+  relation: RelationState;
 }): string {
-  const { state, seepage, history, userMessage, now } = input;
+  const { state, seepage, history, userMessage, now, relation } = input;
   const hist = history
     .map((t) => `${t.role === "user" ? "Companion" : "Oren"}: ${t.text}`)
     .join("\n");
@@ -166,13 +194,16 @@ function buildUserPrompt(input: {
     "## Relationship field",
     describeAbsence(state.affect, now),
     "",
+    "## Relationship cognition (calibrate share amount, not your interests)",
+    formatRelationForPrompt(relation),
+    "",
     "## Current inner threads (seepage material — may color tone; share only if you choose)",
     seepage.length
       ? seepage
-          .map(
-            (t) =>
-              `- id=${t.id} title="${t.title}" salience=${t.salience.toFixed(2)}\n  summary: ${t.summary}\n  open: ${JSON.stringify(t.open_questions)}`,
-          )
+          .map((t) => {
+            const bias = shareBiasForThread(relation, t);
+            return `- id=${t.id} title="${t.title}" salience=${t.salience.toFixed(2)} share_bias=${bias}\n  summary: ${t.summary}\n  open: ${JSON.stringify(t.open_questions)}`;
+          })
           .join("\n")
       : "(no active threads yet — pure presence)",
     "",
@@ -187,9 +218,10 @@ function buildUserPrompt(input: {
 function normalizeShare(
   artifact: DialogueReplyArtifact,
   seepage: Thread[],
+  relation: RelationState,
 ): DialogueReplyArtifact {
   if (!artifact.share.opened) {
-    return { ...artifact, share: { opened: false } };
+    return { ...artifact, share: { opened: false, reason: artifact.share.reason } };
   }
   const ids = new Set(seepage.map((t) => t.id));
   let threadId = artifact.share.thread_id;
@@ -198,7 +230,6 @@ function normalizeShare(
   }
   if (!threadId && seepage[0]) threadId = seepage[0].id;
   if (!threadId) {
-    // cannot share without a thread — close gate
     return {
       ...artifact,
       share: {
@@ -208,6 +239,22 @@ function normalizeShare(
     };
   }
   const thread = seepage.find((t) => t.id === threadId) ?? seepage[0]!;
+  const bias = shareBiasForThread(relation, thread);
+  // Soft gate: cold topics get closed unless user explicitly knocked (reason may say knock)
+  const knockReason = /knock|asked|request|door|想听|在读|reading/i.test(
+    artifact.share.reason ?? "",
+  );
+  if (bias === "prefer_closed" && !knockReason) {
+    return {
+      ...artifact,
+      share: {
+        opened: false,
+        thread_id: thread.id,
+        reason: "calibrated closed — companion cold to this thread",
+      },
+    };
+  }
+
   return {
     ...artifact,
     share: {

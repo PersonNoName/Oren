@@ -22,6 +22,7 @@ export interface LifePaths {
   stream: string;
   ticksDir: string;
   dialogue: string;
+  relation: string;
   lock: string;
 }
 
@@ -40,6 +41,7 @@ export function lifePaths(home: string, lifeDirRel = "data/life"): LifePaths {
     stream: path.join(lifeDir, "stream.jsonl"),
     ticksDir: path.join(lifeDir, "ticks"),
     dialogue: path.join(lifeDir, "dialogue.jsonl"),
+    relation: path.join(lifeDir, "relation.json"),
     lock: path.join(lifeDir, ".lock"),
   };
 }
