@@ -136,7 +136,8 @@ export function dashboardHtml(): string {
       <div class="meta" id="header-meta">loading…</div>
     </div>
     <div class="actions">
-      <button type="button" id="btn-tick">Tick</button>
+      <button type="button" id="btn-tick" title="One free-run tick">Tick</button>
+      <button type="button" id="btn-contemplate" title="Force contemplate">Contemplate</button>
       <button type="button" id="btn-refresh">Refresh</button>
     </div>
   </header>
@@ -146,7 +147,8 @@ export function dashboardHtml(): string {
       <div id="threads" class="scroll empty">—</div>
     </section>
     <section>
-      <h2>Relation</h2>
+      <h2>Taste · Relation</h2>
+      <div id="taste" class="empty" style="margin-bottom:0.75rem">—</div>
       <div id="relation" class="empty">—</div>
     </section>
     <section class="span2">
@@ -202,11 +204,22 @@ export function dashboardHtml(): string {
     }
 
     function render(d) {
+      const product = d.product || { version: '0.2.0', tagline: '' };
+      document.querySelector('h1').innerHTML = 'Oren <span>v' + esc(product.version) + '</span>';
       document.getElementById('header-meta').innerHTML =
-        'id <b>' + esc(d.meta.oren_id.slice(0,8)) + '</b> · ticks <b>' + d.meta.tick_count +
+        esc(product.tagline || 'continuous presence') +
+        ' · id <b>' + esc(d.meta.oren_id.slice(0,8)) + '</b> · ticks <b>' + d.meta.tick_count +
         '</b> · last <b>' + esc(d.meta.last_tick_at || 'never') +
         '</b> · model <b>' + esc(d.meta.model) +
         '</b> · corpus <b>' + d.corpus_docs + '</b>';
+
+      const taste = d.taste || { values: [], aesthetics: [] };
+      document.getElementById('taste').innerHTML =
+        '<div class="meta" style="margin-bottom:0.35rem">values</div>' +
+        (taste.values || []).map(v => '<span class="pill">' + esc(v.statement) + '</span>').join('') +
+        '<div class="meta" style="margin:0.5rem 0 0.35rem">aesthetics</div>' +
+        (taste.aesthetics || []).map(a => '<span class="pill warm">' + esc(a.statement) + '</span>').join('') +
+        (taste.notes ? '<div class="sum" style="margin-top:0.5rem">' + esc(taste.notes) + '</div>' : '');
 
       const th = d.threads.active || [];
       document.getElementById('threads').innerHTML = th.length
@@ -314,11 +327,25 @@ export function dashboardHtml(): string {
 
       const st = d.stream || [];
       document.getElementById('stream').innerHTML = st.length
-        ? st.slice().reverse().map(e =>
-            '<div><span class="t">' + esc((e.ts||'').replace('T',' ').slice(11,19)) +
-            '</span><span class="type">' + esc(e.type) + '</span></div>'
+        ? st.slice().reverse().map((e, idx) =>
+            '<div class="stream-row" data-idx="' + idx + '" style="cursor:pointer">' +
+            '<span class="t">' + esc((e.ts||'').replace('T',' ').slice(11,19)) +
+            '</span><span class="type">' + esc(e.type) + '</span>' +
+            '<pre class="stream-payload" style="display:none;margin:0.25rem 0 0;white-space:pre-wrap;color:var(--mono);font-size:0.72rem"></pre>' +
+            '</div>'
           ).join('')
         : '<div class="empty">empty stream</div>';
+      const rev = st.slice().reverse();
+      document.querySelectorAll('.stream-row').forEach(row => {
+        row.onclick = () => {
+          const pre = row.querySelector('.stream-payload');
+          if (!pre) return;
+          const i = Number(row.getAttribute('data-idx'));
+          const open = pre.style.display !== 'none';
+          pre.style.display = open ? 'none' : 'block';
+          if (!open) pre.textContent = JSON.stringify(rev[i] && rev[i].payload, null, 2);
+        };
+      });
 
       document.getElementById('modes').innerHTML =
         (d.modes_recent || []).map(m => '<span class="pill">' + esc(m) + '</span>').join('') ||
@@ -338,6 +365,8 @@ export function dashboardHtml(): string {
       busy = v;
       document.getElementById('btn-say').disabled = v;
       document.getElementById('btn-tick').disabled = v;
+      const bc = document.getElementById('btn-contemplate');
+      if (bc) bc.disabled = v;
       document.getElementById('btn-corp').disabled = v;
       document.getElementById('say-input').disabled = v;
       const st = document.getElementById(el || 'say-status');
@@ -371,13 +400,13 @@ export function dashboardHtml(): string {
       }
     }
 
-    async function tickOnce() {
+    async function tickOnce(forceMode) {
       if (busy) return;
-      setBusy(true, 'Running tick…');
+      setBusy(true, forceMode ? ('Running ' + forceMode + '…') : 'Running tick…');
       try {
         const res = await fetch('/api/tick', {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({}),
+          body: JSON.stringify(forceMode ? { forceMode } : {}),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || data.message || ('tick failed ' + res.status));
@@ -436,7 +465,8 @@ export function dashboardHtml(): string {
 
     document.getElementById('btn-refresh').onclick = () => load().catch(e => setErr(String(e)));
     document.getElementById('btn-say').onclick = say;
-    document.getElementById('btn-tick').onclick = tickOnce;
+    document.getElementById('btn-tick').onclick = () => tickOnce();
+    document.getElementById('btn-contemplate').onclick = () => tickOnce('contemplate');
     document.getElementById('btn-corp').onclick = addCorpus;
     document.getElementById('mono-filter').onchange = (e) => {
       monoFilter = e.target.value;

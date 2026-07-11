@@ -1,7 +1,8 @@
 {
   "name": "oren",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
+  "description": "Continuous-presence agent with its own inner life",
   "type": "module",
   "bin": {
     "oren": "./dist/cli.js"
@@ -10,7 +11,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "oren": "node --import tsx src/cli.ts"
+    "oren": "node --import tsx src/cli.ts",
+    "demo": "node --import tsx src/cli.ts demo",
+    "start": "node --import tsx src/cli.ts serve"
   },
   "engines": {
     "node": ">=20"

@@ -5,7 +5,7 @@ import { readDialogueTail } from "../dialogue/store.js";
 import { loadRelation } from "../relation/cognition.js";
 import { describeAbsence } from "../relation/visit.js";
 import { LifeStore } from "../store/life-store.js";
-import type { DialogueTurn, RelationState, StreamEvent, Thread } from "../types.js";
+import type { DialogueTurn, RelationState, StreamEvent, Taste, Thread } from "../types.js";
 
 export interface MonologueEntry {
   tick_id: string;
@@ -30,6 +30,11 @@ export interface DashboardSnapshot {
   };
   relation_field: string;
   relation: RelationState;
+  taste: {
+    values: { statement: string; weight: number }[];
+    aesthetics: { statement: string; weight: number }[];
+    notes?: string;
+  };
   threads: {
     active: ThreadSummary[];
     dormant: ThreadSummary[];
@@ -40,6 +45,11 @@ export interface DashboardSnapshot {
   corpus: CorpusFileInfo[];
   corpus_docs: number;
   modes_recent: string[];
+  product: {
+    name: string;
+    version: string;
+    tagline: string;
+  };
 }
 
 export interface ThreadSummary {
@@ -100,6 +110,7 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     },
     relation_field: describeAbsence(state.affect),
     relation,
+    taste: summarizeTaste(state.taste),
     threads: { active, dormant },
     stream: stream.slice(-60),
     dialogue,
@@ -107,6 +118,22 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     corpus,
     corpus_docs: corpus.length,
     modes_recent,
+    product: {
+      name: "Oren",
+      version: "0.2.0",
+      tagline: "A continuous presence with its own inner life",
+    },
+  };
+}
+
+function summarizeTaste(taste: Taste) {
+  return {
+    values: taste.values.map((v) => ({ statement: v.statement, weight: v.weight })),
+    aesthetics: taste.aesthetics.map((a) => ({
+      statement: a.statement,
+      weight: a.weight,
+    })),
+    notes: taste.notes,
   };
 }
 

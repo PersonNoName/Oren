@@ -24,6 +24,9 @@ describe("buildDashboardSnapshot", () => {
     expect(snap.home).toBe(home);
     expect(snap.monologues).toEqual([]);
     expect(Array.isArray(snap.corpus)).toBe(true);
+    expect(snap.taste.values.length).toBeGreaterThan(0);
+    expect(snap.product.version).toBeTruthy();
   });
 });
+
 

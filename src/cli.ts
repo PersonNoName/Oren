@@ -156,6 +156,13 @@ async function main(argv: string[]): Promise<number> {
     return report.ok ? 0 : 1;
   }
 
+  if (cmd === "demo") {
+    const port = Number(process.env.OREN_DASH_PORT ?? parsePort(rest) ?? 8787);
+    const { runDemo } = await import("./demo.js");
+    await runDemo({ home, port, serve: true });
+    return 0;
+  }
+
   if (cmd === "serve" || cmd === "dashboard") {
     const port = Number(process.env.OREN_DASH_PORT ?? parsePort(rest) ?? 8787);
     const { startDashboardServer } = await import("./dashboard/server.js");
@@ -233,22 +240,20 @@ function parsePort(args: string[]): number | undefined {
 }
 
 function printHelp(): void {
-  console.log(`oren — continuous-presence agent runtime (v1)
+  console.log(`oren — continuous-presence agent (v0.2)
 
 Usage:
-  oren init | setup-life
+  oren demo [--port 8787]      # seed life, warm ticks, open dashboard
+  oren serve [--port 8787]     # dashboard (chat + tick + corpus)
+  oren setup-life | init | doctor | status
   oren tick [--force-mode idle|organize|contemplate]
-  oren status | doctor | history [n]
-  oren visit [optional note...]
-  oren say <message>
-  oren serve [--port 8787]     # local read-only dashboard
+  oren say <message> | history [n] | visit [note]
 
 Env:
-  OREN_HOME       life root (fixed path for heartbeat)
-  OREN_LLM        fake | pi | auto   (default for both)
-  OREN_TICK_LLM   override for ticks (cheap: fake)
-  OREN_SAY_LLM    override for dialogue (live: pi)
-  OREN_MODEL      provider:modelId
+  OREN_HOME       life root (default for demo: ~/Library/Application Support/Oren)
+  OREN_TICK_LLM   fake | pi   (ticks; default fake for cheap heartbeat)
+  OREN_SAY_LLM    fake | pi   (dialogue)
+  OREN_MODEL      e.g. deepseek:deepseek-v4-flash
   OREN_DASH_PORT  dashboard port (default 8787)
 `);
 }
