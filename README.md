@@ -74,7 +74,7 @@ npm run oren -- tick --force-mode contemplate
 - `OREN_MODEL` 的 `openai:` 后面填网关要求的模型名，例如 `deepseek-chat`、`gpt-4o-mini`、`qwen-plus`。
 - Key 也可用 `OPENAI_COMPAT_API_KEY`（与 `OPENAI_API_KEY` 二选一即可）。
 
-### C) Anthropic / Claude 风格
+### D) Anthropic / Claude 风格
 
 ```bash
 export OREN_LLM=pi

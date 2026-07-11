@@ -101,7 +101,9 @@ function selectLlm(model: string): LlmCompleter {
     process.env.ANTHROPIC_AUTH_TOKEN ||
     process.env.OPENAI_API_KEY ||
     process.env.OPENAI_COMPAT_API_KEY ||
-    process.env.GOOGLE_API_KEY
+    process.env.DEEPSEEK_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GEMINI_API_KEY
   );
   if (!hasKey) {
     return new FakeLlmCompleter();
