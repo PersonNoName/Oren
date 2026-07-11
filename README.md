@@ -80,7 +80,9 @@ npm run oren -- serve
 # npm run oren -- serve --port 8790
 ```
 
-Shows active threads, dialogue, consciousness stream, relation cold/warm. Auto-refreshes every 15s.
+Shows active threads, dialogue, consciousness stream, relation cold/warm.
+Chat box posts to `/api/say`; **Tick** runs one experience loop via `/api/tick`.
+Auto-refreshes every 15s. Bound to `127.0.0.1` only.
 
 ### Dual LLM (cost control)
 
