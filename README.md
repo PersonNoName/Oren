@@ -71,6 +71,17 @@ Artifacts: `data/life/dialogue.jsonl` + stream events `user_message` / `oren_rep
 
 Relationship cognition (`relation.json`): cold/warm topics from reception — **does not rewrite Oren's interests**, only calibrates how often to share.
 
+### Dashboard (read-only)
+
+```bash
+export OREN_HOME="$HOME/Library/Application Support/Oren"
+npm run oren -- serve
+# open http://127.0.0.1:8787
+# npm run oren -- serve --port 8790
+```
+
+Shows active threads, dialogue, consciousness stream, relation cold/warm. Auto-refreshes every 15s.
+
 ### Dual LLM (cost control)
 
 ```bash

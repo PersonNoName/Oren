@@ -156,6 +156,18 @@ async function main(argv: string[]): Promise<number> {
     return report.ok ? 0 : 1;
   }
 
+  if (cmd === "serve" || cmd === "dashboard") {
+    const port = Number(process.env.OREN_DASH_PORT ?? parsePort(rest) ?? 8787);
+    const { startDashboardServer } = await import("./dashboard/server.js");
+    const host = process.env.OREN_DASH_HOST ?? "127.0.0.1";
+    startDashboardServer({ home, port, host });
+    console.log(`Oren dashboard: http://${host}:${port}`);
+    console.log(`OREN_HOME=${home} (read-only UI, Ctrl+C to stop)`);
+    // keep process alive
+    await new Promise(() => {});
+    return 0;
+  }
+
   if (cmd === "setup-life") {
     const { fileURLToPath } = await import("node:url");
     let store = new LifeStore(home);
@@ -211,6 +223,15 @@ function parseForceMode(args: string[]): Mode | undefined {
   return undefined;
 }
 
+function parsePort(args: string[]): number | undefined {
+  for (let i = 0; i < args.length; i++) {
+    if ((args[i] === "--port" || args[i] === "-p") && args[i + 1]) {
+      return Number(args[i + 1]);
+    }
+  }
+  return undefined;
+}
+
 function printHelp(): void {
   console.log(`oren — continuous-presence agent runtime (v1)
 
@@ -220,6 +241,7 @@ Usage:
   oren status | doctor | history [n]
   oren visit [optional note...]
   oren say <message>
+  oren serve [--port 8787]     # local read-only dashboard
 
 Env:
   OREN_HOME       life root (fixed path for heartbeat)
@@ -227,6 +249,7 @@ Env:
   OREN_TICK_LLM   override for ticks (cheap: fake)
   OREN_SAY_LLM    override for dialogue (live: pi)
   OREN_MODEL      provider:modelId
+  OREN_DASH_PORT  dashboard port (default 8787)
 `);
 }
 
