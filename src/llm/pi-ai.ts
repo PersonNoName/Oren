@@ -205,18 +205,19 @@ function normalizeOpenAiBaseUrl(url: string): string {
   return u;
 }
 
+/**
+ * Wrap without breaking prototype methods (completeSimple lives on the class prototype).
+ */
 function wrapAnthropicBaseUrl(models: ModelsLike): ModelsLike {
   const base = process.env.ANTHROPIC_BASE_URL?.trim();
   if (!base) return models;
   const originalGet = models.getModel.bind(models);
-  return {
-    ...models,
-    getModel(provider: string, id: string) {
-      const m = originalGet(provider, id);
-      if (!m || provider !== "anthropic") return m;
-      return { ...m, baseUrl: base.replace(/\/$/, "") };
-    },
+  models.getModel = (provider: string, id: string) => {
+    const m = originalGet(provider, id);
+    if (!m || provider !== "anthropic") return m;
+    return { ...m, baseUrl: base.replace(/\/$/, "") };
   };
+  return models;
 }
 
 function extractText(content: ContentBlock[]): string {
