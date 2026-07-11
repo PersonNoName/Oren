@@ -3,14 +3,19 @@ import path from "node:path";
 import { FakeLlmCompleter } from "./llm/fake.js";
 import { PiAiCompleter } from "./llm/pi-ai.js";
 import type { LlmCompleter } from "./llm/types.js";
+import { loadDotEnv } from "./load-env.js";
 import { resolveHome } from "./paths.js";
 import { LifeStore } from "./store/life-store.js";
 import { runTick } from "./tick/engine.js";
 import type { Mode } from "./types.js";
 
+// Load .env before reading any provider keys
+loadDotEnv();
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   const home = resolveHome();
+  loadDotEnv([home]);
 
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
     printHelp();
