@@ -36,19 +36,31 @@ Inspect:
 - `data/life/stream.jsonl` — consciousness / event log  
 - `data/life/ticks/` — per-tick audit snapshots  
 
-## Live LLM (optional)
+## Live LLM (pi-ai)
 
-Depends on `@earendil-works/pi-ai` (install when you want live mode):
+Uses `@earendil-works/pi-ai` (Models collection API, v0.80+).
 
 ```bash
-npm install @earendil-works/pi-ai
+npm install   # includes @earendil-works/pi-ai
 export OREN_LLM=pi
-export OREN_MODEL=anthropic:claude-sonnet-4-20250514
+export OREN_MODEL=anthropic:claude-sonnet-4-5   # default
+# one of:
 export ANTHROPIC_API_KEY=...
+# or Claude-style:
+export ANTHROPIC_AUTH_TOKEN=...   # mapped to ANTHROPIC_OAUTH_TOKEN
+# optional gateway:
+export ANTHROPIC_BASE_URL=https://your-gateway.example/api
+
 npm run oren -- tick --force-mode contemplate
 ```
 
-Without a provider key, CLI defaults to the fake completer.
+Live test (integration):
+
+```bash
+OREN_LIVE_LLM=1 OREN_LLM=pi npm test -- tests/llm/pi-ai-live.test.ts
+```
+
+Without a provider key / with `OREN_LLM=fake`, CLI uses the fake completer.
 
 ## Scheduling
 

@@ -138,7 +138,7 @@ export function defaultConfig(): Config {
   return {
     corpus_dir: "data/corpus",
     life_dir: "data/life",
-    model: "anthropic:claude-sonnet-4-20250514",
+    model: "anthropic:claude-sonnet-4-5",
     contemplate: {
       max_chunks: 2,
       max_chars: 6000,

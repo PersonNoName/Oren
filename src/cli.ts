@@ -33,7 +33,7 @@ async function main(argv: string[]): Promise<number> {
       return 1;
     }
     const store = new LifeStore(home);
-    let model = "anthropic:claude-sonnet-4-20250514";
+    let model = "anthropic:claude-sonnet-4-5";
     try {
       const state = await store.load();
       model = process.env.OREN_MODEL?.trim() || state.config.model;
@@ -88,14 +88,17 @@ function parseForceMode(args: string[]): Mode | undefined {
 
 function selectLlm(model: string): LlmCompleter {
   const mode = (process.env.OREN_LLM ?? "").toLowerCase();
-  if (mode === "fake" || mode === "1") {
+  if (mode === "fake") {
     return new FakeLlmCompleter();
   }
   if (mode === "pi" || mode === "live") {
     return new PiAiCompleter(model);
   }
+  // auto: use pi when any common auth signal is present
   const hasKey = !!(
     process.env.ANTHROPIC_API_KEY ||
+    process.env.ANTHROPIC_OAUTH_TOKEN ||
+    process.env.ANTHROPIC_AUTH_TOKEN ||
     process.env.OPENAI_API_KEY ||
     process.env.GOOGLE_API_KEY
   );

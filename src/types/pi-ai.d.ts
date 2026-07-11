@@ -1,14 +1,28 @@
 declare module "@earendil-works/pi-ai" {
-  export function getModel(provider: string, modelId: string): unknown;
-  export function streamSimple(
-    model: unknown,
-    context: unknown,
-    opts?: unknown,
-  ): AsyncIterable<Record<string, unknown>> & {
-    result?: () => Promise<{ text?: string }>;
+  export function createModels(options?: unknown): unknown;
+}
+
+declare module "@earendil-works/pi-ai/providers/all" {
+  export function builtinModels(options?: unknown): {
+    getModel(provider: string, id: string):
+      | {
+          id: string;
+          provider?: string;
+          baseUrl?: string;
+          [key: string]: unknown;
+        }
+      | undefined;
+    completeSimple(
+      model: unknown,
+      context: {
+        systemPrompt?: string;
+        messages: { role: "user"; content: string; timestamp: number }[];
+      },
+      options?: Record<string, unknown>,
+    ): Promise<{
+      stopReason?: string;
+      errorMessage?: string;
+      content: { type: string; text?: string }[];
+    }>;
   };
-  export function completeSimple(
-    model: unknown,
-    context: unknown,
-  ): Promise<{ text?: string; content?: string }>;
 }
