@@ -21,6 +21,7 @@ export interface LifePaths {
   corpusIndex: string;
   stream: string;
   ticksDir: string;
+  dialogue: string;
   lock: string;
 }
 
@@ -38,6 +39,7 @@ export function lifePaths(home: string, lifeDirRel = "data/life"): LifePaths {
     corpusIndex: path.join(lifeDir, "index", "corpus-index.json"),
     stream: path.join(lifeDir, "stream.jsonl"),
     ticksDir: path.join(lifeDir, "ticks"),
+    dialogue: path.join(lifeDir, "dialogue.jsonl"),
     lock: path.join(lifeDir, ".lock"),
   };
 }

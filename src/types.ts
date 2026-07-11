@@ -90,7 +90,41 @@ export type StreamEventType =
   | "presence_blank"
   | "tick_finished"
   | "tick_failed"
-  | "warn_empty_corpus";
+  | "warn_empty_corpus"
+  | "user_visit"
+  | "user_message"
+  | "oren_reply"
+  | "inner_share";
+
+export interface DialogueTurn {
+  id: string;
+  ts: string;
+  role: "user" | "oren";
+  text: string;
+  /** Seepage context used (thread ids). */
+  seepage_thread_ids?: string[];
+  /** If Oren chose to open a slice of inner life. */
+  share?: {
+    opened: boolean;
+    thread_id?: string;
+    snippet?: string;
+    reason?: string;
+  };
+  relation_note?: string;
+}
+
+export interface DialogueReplyArtifact {
+  reply: string;
+  /** Whether to explicitly share a bit of current inner life (Oren holds the gate). */
+  share: {
+    opened: boolean;
+    thread_id?: string;
+    snippet?: string;
+    reason?: string;
+  };
+  /** Optional relationship cognition (e.g. user cold to a topic). */
+  relation_note?: string;
+}
 
 export interface StreamEvent {
   ts: string;

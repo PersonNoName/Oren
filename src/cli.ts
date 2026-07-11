@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import fs from "node:fs/promises";
 import path from "node:path";
+import { sayToOren } from "./dialogue/reply.js";
+import { readDialogueTail } from "./dialogue/store.js";
 import { runDoctor } from "./doctor.js";
 import { FakeLlmCompleter } from "./llm/fake.js";
 import { PiAiCompleter } from "./llm/pi-ai.js";
@@ -87,6 +89,54 @@ async function main(argv: string[]): Promise<number> {
         `visit recorded at ${affect.absence.last_user_contact_at} (#${affect.absence.visit_count})`,
       );
       if (note) console.log(`note: ${note}`);
+      return 0;
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      return 3;
+    }
+  }
+
+  if (cmd === "say") {
+    const text = rest.join(" ").trim();
+    if (!text) {
+      console.error("usage: oren say <message>");
+      return 1;
+    }
+    try {
+      const store = new LifeStore(home);
+      const state = await store.load();
+      const model = process.env.OREN_MODEL?.trim() || state.config.model;
+      const llm = selectLlm(model);
+      const result = await sayToOren({ store, text, llm });
+      console.log(`you: ${result.userTurn.text}`);
+      console.log(`oren: ${result.orenTurn.text}`);
+      if (result.artifact.share.opened) {
+        console.log(
+          `  [share] thread=${result.artifact.share.thread_id ?? "?"} — ${result.artifact.share.snippet ?? ""}`,
+        );
+      }
+      return 0;
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      return 1;
+    }
+  }
+
+  if (cmd === "history") {
+    const n = Number(rest[0] ?? "12") || 12;
+    try {
+      const turns = await readDialogueTail(new LifeStore(home), n);
+      if (turns.length === 0) {
+        console.log("(no dialogue yet)");
+        return 0;
+      }
+      for (const t of turns) {
+        const who = t.role === "user" ? "you" : "oren";
+        console.log(`${t.ts} ${who}: ${t.text}`);
+        if (t.share?.opened) {
+          console.log(`  [share] ${t.share.snippet ?? ""}`);
+        }
+      }
       return 0;
     } catch (err) {
       console.error(err instanceof Error ? err.message : String(err));
@@ -186,8 +236,9 @@ function printHelp(): void {
 Usage:
   oren init | setup-life
   oren tick [--force-mode idle|organize|contemplate]
-  oren status | doctor
+  oren status | doctor | history [n]
   oren visit [optional note...]
+  oren say <message>          # talk; seepage + optional inner share
 
 Env:
   OREN_HOME     life root (default: cwd) — use a fixed path for heartbeat

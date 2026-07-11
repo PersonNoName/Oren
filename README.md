@@ -49,6 +49,19 @@ bash scripts/install-heartbeat.sh
 
 `oren visit [note]` marks companion contact (absence clock). Contemplation may feel the absence as background texture only — not chat.
 
+### Talk to Oren (`say`)
+
+Overflow channel — companion speaks; Oren replies with **seepage** from current threads and may **share** a slice of inner life (gate stays with Oren).
+
+```bash
+export OREN_HOME=/path/to/.oren-life
+npm run oren -- say "what have you been thinking about?"
+npm run oren -- say "hey, just checking in"
+npm run oren -- history 20
+```
+
+Artifacts: `data/life/dialogue.jsonl` + stream events `user_message` / `oren_reply` / `inner_share`.
+
 Inspect:
 
 - `data/life/threads/` — self-memory threads  
