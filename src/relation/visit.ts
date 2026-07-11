@@ -50,15 +50,15 @@ export async function recordVisit(
 export function describeAbsence(affect: Affect, now = new Date()): string {
   const last = affect.absence.last_user_contact_at;
   if (!last) {
-    return "No recorded visits yet; the companion relationship has not been marked present.";
+    return "尚未记录到访；这段关系还没有被标记为「在场」。";
   }
   const ms = now.getTime() - Date.parse(last);
   const hours = Math.max(0, Math.round(ms / 3600000));
   const days = Math.floor(hours / 24);
   const ago =
-    days > 1 ? `${days} days` : hours >= 1 ? `${hours} hours` : "moments";
+    days > 1 ? `${days} 天` : hours >= 1 ? `${hours} 小时` : "片刻";
   const note = affect.absence.last_note
-    ? ` Last note: "${affect.absence.last_note}".`
+    ? ` 上次留言：「${affect.absence.last_note}」。`
     : "";
-  return `Last visit was about ${ago} ago (count=${affect.absence.visit_count}).${note}`;
+  return `上次到访约在 ${ago} 前（第 ${affect.absence.visit_count} 次）。${note}`;
 }

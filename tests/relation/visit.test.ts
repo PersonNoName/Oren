@@ -30,11 +30,11 @@ describe("recordVisit", () => {
     expect(tail.some((e) => e.type === "user_visit")).toBe(true);
 
     const line = describeAbsence(state.affect);
-    expect(line.toLowerCase()).toMatch(/visit|moment|hour|day/);
+    expect(line).toMatch(/到访|片刻|小时|天/);
   });
 
   it("describeAbsence with no visits", () => {
     const a = defaultAffect(new Date().toISOString());
-    expect(describeAbsence(a)).toMatch(/No recorded visits/);
+    expect(describeAbsence(a)).toMatch(/尚未记录到访/);
   });
 });

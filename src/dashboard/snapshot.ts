@@ -121,7 +121,7 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     product: {
       name: "Oren",
       version: "0.2.0",
-      tagline: "A continuous presence with its own inner life",
+      tagline: "持续在场 · 拥有自己的内心生活",
     },
   };
 }
