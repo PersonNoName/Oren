@@ -23,12 +23,31 @@ npm test
 ```bash
 export OREN_HOME=/tmp/oren-demo
 export OREN_LLM=fake
-npm run oren -- init
-cp fixtures/corpus/*.md "$OREN_HOME/data/corpus/"
+npm run oren -- setup-life
 npm run oren -- tick --force-mode idle
 npm run oren -- tick --force-mode contemplate
+npm run oren -- visit "checking in"
 npm run oren -- status
+npm run oren -- doctor
 ```
+
+## Durable life + heartbeat (recommended)
+
+```bash
+# uses project .env + creates .oren-life/
+bash scripts/setup-life.sh
+
+export OREN_HOME=/Users/robot/Documents/Projects/Oren/.oren-life
+npm run oren -- doctor
+npm run oren -- tick
+npm run oren -- visit "evening presence"
+
+# install launchd agent (prints load commands; does not force-load)
+bash scripts/install-heartbeat.sh
+# then run the printed launchctl bootstrap lines if you want background ticks
+```
+
+`oren visit [note]` marks companion contact (absence clock). Contemplation may feel the absence as background texture only — not chat.
 
 Inspect:
 

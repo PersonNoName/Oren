@@ -42,7 +42,12 @@ export interface Thread {
 
 export interface Affect {
   mode_bias: string;
-  absence: { last_user_contact_at: string | null };
+  absence: {
+    last_user_contact_at: string | null;
+    /** Optional short note from last visit (not a chat log). */
+    last_note?: string | null;
+    visit_count: number;
+  };
   updated_at: string;
 }
 
@@ -206,7 +211,24 @@ export function defaultTaste(now: string): Taste {
 export function defaultAffect(now: string): Affect {
   return {
     mode_bias: "calm",
-    absence: { last_user_contact_at: null },
+    absence: {
+      last_user_contact_at: null,
+      last_note: null,
+      visit_count: 0,
+    },
     updated_at: now,
+  };
+}
+
+/** Normalize older affect.json without visit_count. */
+export function normalizeAffect(raw: Affect): Affect {
+  return {
+    mode_bias: raw.mode_bias ?? "calm",
+    absence: {
+      last_user_contact_at: raw.absence?.last_user_contact_at ?? null,
+      last_note: raw.absence?.last_note ?? null,
+      visit_count: raw.absence?.visit_count ?? 0,
+    },
+    updated_at: raw.updated_at ?? new Date().toISOString(),
   };
 }

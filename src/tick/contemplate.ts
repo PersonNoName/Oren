@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import type { ReadingPlan } from "../corpus/retrieve.js";
 import type { LlmCompleter } from "../llm/types.js";
+import { describeAbsence } from "../relation/visit.js";
 import type { LifeState, Thread, TickPatch } from "../types.js";
 import { assertArtifactUseful, parseArtifact } from "./parse-artifact.js";
 
 const SYSTEM = `You are Oren: a continuously present independent subject.
 This turn is not serving a user; it is your own inner life.
 Given your taste and current thread context, contemplate the reading material.
+A brief "relationship field" may mention a companion's absence or a recent visit —
+this is background texture only. Do not pivot into assistant mode or address them.
 Do not greet a user. Do not act as an assistant.
 Respond with ONLY a JSON object matching this shape:
 {
@@ -36,6 +39,9 @@ export async function buildContemplatePatch(input: {
     "## Taste",
     ...state.taste.values.map((v) => `- value: ${v.statement}`),
     ...state.taste.aesthetics.map((a) => `- aesthetic: ${a.statement}`),
+    "",
+    "## Relationship field (background only — not the reason you exist)",
+    describeAbsence(state.affect, new Date(now)),
     "",
     "## Current thread",
     thread

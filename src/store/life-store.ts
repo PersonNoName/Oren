@@ -7,6 +7,7 @@ import {
   defaultAffect,
   defaultConfig,
   defaultTaste,
+  normalizeAffect,
   type Affect,
   type Config,
   type LifeState,
@@ -146,7 +147,7 @@ export class LifeStore {
     }
     const config = await readJson<Config>(p.config);
     const taste = await readJson<Taste>(p.taste);
-    const affect = await readJson<Affect>(p.affect);
+    const affect = normalizeAffect(await readJson<Affect>(p.affect));
     const threads = await this.loadThreads();
 
     return { meta, config, taste, affect, threads };

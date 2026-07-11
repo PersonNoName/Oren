@@ -1,15 +1,17 @@
 #!/usr/bin/env node
+import fs from "node:fs/promises";
 import path from "node:path";
+import { runDoctor } from "./doctor.js";
 import { FakeLlmCompleter } from "./llm/fake.js";
 import { PiAiCompleter } from "./llm/pi-ai.js";
 import type { LlmCompleter } from "./llm/types.js";
 import { loadDotEnv } from "./load-env.js";
 import { resolveHome } from "./paths.js";
+import { recordVisit } from "./relation/visit.js";
 import { LifeStore } from "./store/life-store.js";
 import { runTick } from "./tick/engine.js";
 import type { Mode } from "./types.js";
 
-// Load .env before reading any provider keys
 loadDotEnv();
 
 async function main(argv: string[]): Promise<number> {
@@ -64,6 +66,8 @@ async function main(argv: string[]): Promise<number> {
       for (const t of active.slice(0, 10)) {
         console.log(`  - ${t.id} salience=${t.salience.toFixed(2)} ${t.title}`);
       }
+      const last = state.affect.absence.last_user_contact_at;
+      console.log(`last_visit: ${last ?? "(never)"} count=${state.affect.absence.visit_count}`);
       console.log("recent_stream:");
       for (const ev of tail.slice(-5)) {
         console.log(`  ${ev.ts} ${ev.type}`);
@@ -73,6 +77,67 @@ async function main(argv: string[]): Promise<number> {
       console.error(err instanceof Error ? err.message : String(err));
       return 3;
     }
+  }
+
+  if (cmd === "visit") {
+    const note = rest.join(" ").trim() || undefined;
+    try {
+      const { affect } = await recordVisit(new LifeStore(home), { note });
+      console.log(
+        `visit recorded at ${affect.absence.last_user_contact_at} (#${affect.absence.visit_count})`,
+      );
+      if (note) console.log(`note: ${note}`);
+      return 0;
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      return 3;
+    }
+  }
+
+  if (cmd === "doctor") {
+    const report = await runDoctor(home);
+    for (const line of report.lines) console.log(line);
+    console.log(report.ok ? "doctor: OK" : "doctor: ISSUES");
+    return report.ok ? 0 : 1;
+  }
+
+  if (cmd === "setup-life") {
+    const { fileURLToPath } = await import("node:url");
+    let store = new LifeStore(home);
+    try {
+      await store.load();
+    } catch {
+      store = await LifeStore.init(home);
+    }
+    const corpus = path.join(home, "data/corpus");
+    await fs.mkdir(corpus, { recursive: true });
+    const fixtureCandidates = [
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../fixtures/corpus"),
+      path.join(process.cwd(), "fixtures/corpus"),
+    ];
+    let seeded = 0;
+    for (const fix of fixtureCandidates) {
+      try {
+        const names = await fs.readdir(fix);
+        for (const name of names) {
+          if (!/\.(md|txt)$/i.test(name)) continue;
+          const dest = path.join(corpus, name);
+          try {
+            await fs.access(dest);
+          } catch {
+            await fs.copyFile(path.join(fix, name), dest);
+            seeded++;
+          }
+        }
+        break;
+      } catch {
+        // try next
+      }
+    }
+    console.log(`life ready at ${store.paths.lifeDir}`);
+    console.log(`corpus ${corpus} (seeded ${seeded} files)`);
+    console.log(`export OREN_HOME=${home}`);
+    return 0;
   }
 
   console.error(`unknown command: ${cmd}`);
@@ -99,7 +164,6 @@ function selectLlm(model: string): LlmCompleter {
   if (mode === "pi" || mode === "live") {
     return new PiAiCompleter(model);
   }
-  // auto: use pi when any common auth signal is present
   const hasKey = !!(
     process.env.ANTHROPIC_API_KEY ||
     process.env.ANTHROPIC_OAUTH_TOKEN ||
@@ -120,14 +184,15 @@ function printHelp(): void {
   console.log(`oren — continuous-presence agent runtime (v1)
 
 Usage:
-  oren init
+  oren init | setup-life
   oren tick [--force-mode idle|organize|contemplate]
-  oren status
+  oren status | doctor
+  oren visit [optional note...]
 
 Env:
-  OREN_HOME     data root (default: cwd)
-  OREN_LLM      fake | pi | auto (default auto)
-  OREN_MODEL    provider:modelId
+  OREN_HOME     life root (default: cwd) — use a fixed path for heartbeat
+  OREN_LLM      fake | pi | auto
+  OREN_MODEL    provider:modelId  (e.g. deepseek:deepseek-v4-flash)
 `);
 }
 
