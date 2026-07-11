@@ -2,7 +2,7 @@
 
 > 日期：2026-07-12  
 > 类型：技术设计 / 最小可活体（D 切片）  
-> 状态：已批准；v1 runtime 实现中  
+> 状态：已批准；D 最小可活体 + B 机制可演示（fake 全量 / DeepSeek live 抽样）已验证  
 > 上游概念：  
 > - `design/2026-07-11-oren-core-essence.md`  
 > - `discussion/2026-07-10-oren-agent-design.md`

@@ -71,7 +71,7 @@ export async function runTick(opts: {
     const index = await buildCorpusIndex(cDir);
     await store.saveCorpusIndex(index);
 
-    const streamTail = await store.readStreamTail(100);
+    const streamTail = await store.readStreamTail(500);
     const perception = perceive({ state, index, streamTail, now });
 
     let { mode, reason } = chooseMode({

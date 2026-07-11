@@ -65,6 +65,10 @@ export interface Config {
   };
   organize: {
     use_llm: boolean;
+    /** Soft-dormant when last_engaged older than this (ms). Default 7d. */
+    stale_ms: number;
+    /** Max salience eligible for soft-dormant. Default 0.15. */
+    dormant_salience_below: number;
   };
   limits: {
     max_active_threads: number;
@@ -154,6 +158,8 @@ export function defaultConfig(): Config {
     },
     organize: {
       use_llm: false,
+      stale_ms: 7 * 24 * 60 * 60 * 1000,
+      dormant_salience_below: 0.15,
     },
     limits: {
       max_active_threads: 20,

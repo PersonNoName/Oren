@@ -36,4 +36,22 @@ describe("planOrganize", () => {
     expect(r.thread_ops.some((o) => o.op === "dormant")).toBe(true);
     expect(r.thread_ops.length).toBe(1);
   });
+
+  it("soft-dormants stale low-salience threads", () => {
+    const config = defaultConfig();
+    config.organize.stale_ms = 1000;
+    config.organize.dormant_salience_below = 0.2;
+    const old = new Date(Date.now() - 60_000).toISOString();
+    const threads = {
+      a: { ...th("a", 0.1), last_engaged_at: old },
+      b: th("b", 0.9),
+    };
+    const r = planOrganize({
+      threads,
+      config,
+      now: new Date().toISOString(),
+    });
+    expect(r.thread_ops).toEqual([{ op: "dormant", id: "a" }]);
+    expect(r.reason).toBe("soft_dormant_stale");
+  });
 });

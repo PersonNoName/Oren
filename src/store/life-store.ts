@@ -68,6 +68,10 @@ export class LifeStore {
       tick_count: 0,
     };
     const config = defaultConfig();
+    // Prefer env model when initializing a new life
+    if (process.env.OREN_MODEL?.trim()) {
+      config.model = process.env.OREN_MODEL.trim();
+    }
     const taste = defaultTaste(now);
     const affect = defaultAffect(now);
 

@@ -2,6 +2,7 @@ node_modules/
 dist/
 data/life/
 data/corpus/
+.oren-life/
 .DS_Store
 *.log
 .env

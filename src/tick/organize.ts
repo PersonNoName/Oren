@@ -21,12 +21,17 @@ export function planOrganize(input: {
     return { thread_ops: ops, reason: `dormant_excess:${excess}` };
   }
 
-  // Soft-dormant very low salience and stale
-  const staleMs = 7 * 24 * 60 * 60 * 1000;
+  const staleMs =
+    input.config.organize.stale_ms ?? 7 * 24 * 60 * 60 * 1000;
+  const salienceBelow = input.config.organize.dormant_salience_below ?? 0.15;
   const nowMs = Date.parse(input.now);
   for (const t of active) {
     const last = Date.parse(t.last_engaged_at);
-    if (t.salience < 0.15 && Number.isFinite(last) && nowMs - last > staleMs) {
+    if (
+      t.salience < salienceBelow &&
+      Number.isFinite(last) &&
+      nowMs - last > staleMs
+    ) {
       ops.push({ op: "dormant", id: t.id });
     }
   }

@@ -100,13 +100,35 @@ OREN_LIVE_LLM=1 OREN_LLM=pi OREN_MODEL=openai:gpt-4o-mini npm test -- tests/llm/
 
 未配置 key 时，或 `OREN_LLM=fake` 时，使用本地 Fake 沉思。
 
+## Mechanism B demo (multi-tick)
+
+After D works, verify unsupervised multi-tick growth (default **fake** LLM — free):
+
+```bash
+bash scripts/verify-mechanism-b.sh
+# optional: N=12 GAP_SEC=1
+# live DeepSeek (costs tokens): LIVE=1 bash scripts/verify-mechanism-b.sh
+```
+
+Expects: multiple modes, thread re-engagement, `explore` reason, `gap_ms > 0`.
+
 ## Scheduling
 
-v1 is a one-shot CLI. Use cron or launchd:
+v1 is a one-shot CLI. Heartbeat = external scheduler.
+
+**cron** (every 30 minutes):
 
 ```cron
-*/30 * * * * cd /path/to/home && OREN_HOME=/path/to/home OREN_LLM=fake /path/to/node --import tsx /path/to/oren/src/cli.ts tick
+*/30 * * * * cd /Users/robot/Documents/Projects/Oren && OREN_HOME=/Users/robot/Documents/Projects/Oren/.oren-life /usr/bin/env bash -lc 'set -a; source .env; set +a; node --import tsx src/cli.ts tick' >>/tmp/oren-tick.log 2>&1
 ```
+
+**launchd** (macOS): copy `scripts/com.oren.tick.plist.example` to `~/Library/LaunchAgents/com.oren.tick.plist`, edit paths, then:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.oren.tick.plist
+```
+
+Keep a dedicated `OREN_HOME` directory (not the repo root if you prefer) so life state survives.
 
 ## What v1 does not do
 
