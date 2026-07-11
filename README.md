@@ -83,7 +83,10 @@ npm run oren -- serve
 Shows active threads, **recent monologues**, dialogue, corpus, stream, relation.
 - Chat → `/api/say`
 - **Tick** → `/api/tick`
-- Add corpus file → `/api/corpus` `{ name, content }`
+- Corpus add → `POST /api/corpus` `{ name, content }`
+- Corpus preview → `GET /api/corpus?name=`
+- Corpus delete → `DELETE /api/corpus?name=`
+- Monologues filterable by thread in the UI
 Auto-refreshes every 15s. Bound to `127.0.0.1` only.
 
 ### Dual LLM (cost control)

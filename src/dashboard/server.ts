@@ -1,5 +1,9 @@
 import http from "node:http";
-import { writeCorpusFile } from "../corpus/manage.js";
+import {
+  deleteCorpusFile,
+  readCorpusFile,
+  writeCorpusFile,
+} from "../corpus/manage.js";
 import { sayToOren } from "../dialogue/reply.js";
 import { selectLlm } from "../llm/select.js";
 import { loadDotEnv } from "../load-env.js";
@@ -26,20 +30,21 @@ export function startDashboardServer(opts: ServeOptions): http.Server {
       const method = (req.method ?? "GET").toUpperCase();
 
       if (method === "GET" && url.pathname === "/api/snapshot") {
-        const snap = await buildDashboardSnapshot(opts.home);
-        return json(res, 200, snap);
+        return json(res, 200, await buildDashboardSnapshot(opts.home));
       }
 
       if (method === "POST" && url.pathname === "/api/say") {
         const body = await readJsonBody<{ text?: string }>(req);
         const text = (body.text ?? "").trim();
         if (!text) return json(res, 400, { error: "text is required" });
-
         const store = new LifeStore(opts.home);
         const state = await store.load();
         const model = process.env.OREN_MODEL?.trim() || state.config.model;
-        const llm = selectLlm(model, "say");
-        const result = await sayToOren({ store, text, llm });
+        const result = await sayToOren({
+          store,
+          text,
+          llm: selectLlm(model, "say"),
+        });
         return json(res, 200, {
           ok: true,
           user: result.userTurn,
@@ -64,10 +69,13 @@ export function startDashboardServer(opts: ServeOptions): http.Server {
           const state = await store.load();
           model = process.env.OREN_MODEL?.trim() || state.config.model;
         } catch {
-          // runTick will surface init errors
+          /* runTick handles */
         }
-        const llm = selectLlm(model, "tick");
-        const result = await runTick({ home: opts.home, forceMode, llm });
+        const result = await runTick({
+          home: opts.home,
+          forceMode,
+          llm: selectLlm(model, "tick"),
+        });
         return json(res, result.exitCode === 0 ? 200 : 500, {
           ok: result.exitCode === 0,
           ...result,
@@ -84,6 +92,24 @@ export function startDashboardServer(opts: ServeOptions): http.Server {
         const state = await store.load();
         const file = await writeCorpusFile(opts.home, state.config, name, content);
         return json(res, 200, { ok: true, file });
+      }
+
+      if (method === "GET" && url.pathname === "/api/corpus") {
+        const name = (url.searchParams.get("name") ?? "").trim();
+        if (!name) return json(res, 400, { error: "name query required" });
+        const store = new LifeStore(opts.home);
+        const state = await store.load();
+        const file = await readCorpusFile(opts.home, state.config, name);
+        return json(res, 200, { ok: true, file });
+      }
+
+      if (method === "DELETE" && url.pathname === "/api/corpus") {
+        const name = (url.searchParams.get("name") ?? "").trim();
+        if (!name) return json(res, 400, { error: "name query required" });
+        const store = new LifeStore(opts.home);
+        const state = await store.load();
+        const result = await deleteCorpusFile(opts.home, state.config, name);
+        return json(res, 200, { ok: true, ...result });
       }
 
       if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -119,8 +145,7 @@ function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
     req.on("data", (c) => chunks.push(Buffer.from(c)));
     req.on("end", () => {
       try {
-        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-        resolve(JSON.parse(raw) as T);
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as T);
       } catch (err) {
         reject(err);
       }

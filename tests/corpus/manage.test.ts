@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  deleteCorpusFile,
   listCorpusFiles,
+  readCorpusFile,
   sanitizeCorpusName,
   writeCorpusFile,
 } from "../../src/corpus/manage.js";
@@ -23,14 +25,19 @@ describe("corpus manage", () => {
     expect(() => sanitizeCorpusName("x.exe")).toThrow();
   });
 
-  it("writes and lists corpus files", async () => {
+  it("writes, reads, lists, deletes corpus files", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "oren-corp-"));
     temps.push(home);
     const config = defaultConfig();
-    await fs.mkdir(path.join(home, "data/corpus"), { recursive: true });
     await writeCorpusFile(home, config, "idea.md", "# Hello\n\nworld");
     const list = await listCorpusFiles(home, config);
     expect(list.some((f) => f.path === "idea.md")).toBe(true);
-    expect(list[0]!.bytes).toBeGreaterThan(0);
+    expect(list.find((f) => f.path === "idea.md")!.preview).toContain("Hello");
+    const read = await readCorpusFile(home, config, "idea.md");
+    expect(read.content).toContain("world");
+    await deleteCorpusFile(home, config, "idea.md");
+    const after = await listCorpusFiles(home, config);
+    expect(after.some((f) => f.path === "idea.md")).toBe(false);
   });
 });
+

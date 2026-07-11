@@ -15,6 +15,7 @@ export interface MonologueEntry {
   refined_summary?: string;
   open_questions?: string[];
   reading?: { path: string; reason: string }[];
+  thread_ids: string[];
   felt_intensity?: number;
 }
 
@@ -137,9 +138,14 @@ export async function loadRecentMonologues(
           felt_intensity?: number;
         };
         reading_plan?: { items?: { path?: string; reason?: string }[] };
+        applied_patch?: {
+          thoughts?: { thread_id?: string }[];
+          thread_ops?: { op?: string; id?: string; thread?: { id?: string } }[];
+        };
       };
       const mono = raw.parsed_artifact?.monologue?.trim();
       if (!mono) continue;
+      const thread_ids = extractThreadIds(raw.applied_patch);
       entries.push({
         mtime: st.mtimeMs,
         entry: {
@@ -150,6 +156,7 @@ export async function loadRecentMonologues(
           refined_summary: raw.parsed_artifact?.refined_summary,
           open_questions: raw.parsed_artifact?.open_questions,
           felt_intensity: raw.parsed_artifact?.felt_intensity,
+          thread_ids,
           reading: (raw.reading_plan?.items ?? [])
             .filter((i) => i.path)
             .map((i) => ({ path: String(i.path), reason: String(i.reason ?? "") })),
@@ -162,4 +169,20 @@ export async function loadRecentMonologues(
 
   entries.sort((a, b) => b.mtime - a.mtime);
   return entries.slice(0, limit).map((e) => e.entry);
+}
+
+function extractThreadIds(patch: {
+  thoughts?: { thread_id?: string }[];
+  thread_ops?: { op?: string; id?: string; thread?: { id?: string } }[];
+} | undefined): string[] {
+  if (!patch) return [];
+  const ids = new Set<string>();
+  for (const t of patch.thoughts ?? []) {
+    if (t.thread_id) ids.add(t.thread_id);
+  }
+  for (const op of patch.thread_ops ?? []) {
+    if (op.id) ids.add(op.id);
+    if (op.thread?.id) ids.add(op.thread.id);
+  }
+  return [...ids];
 }

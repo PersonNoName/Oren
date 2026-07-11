@@ -150,7 +150,11 @@ export function dashboardHtml(): string {
       <div id="relation" class="empty">—</div>
     </section>
     <section class="span2">
-      <h2>Recent monologues</h2>
+      <h2>Recent monologues
+        <select id="mono-filter" style="margin-left:0.75rem;font-size:0.8rem;background:#10141c;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0.2rem 0.4rem;">
+          <option value="">all threads</option>
+        </select>
+      </h2>
       <div id="monologues" class="scroll empty">—</div>
     </section>
     <section class="span2">
@@ -186,11 +190,15 @@ export function dashboardHtml(): string {
   <footer id="footer"></footer>
   <script>
     let busy = false;
+    let lastSnap = null;
+    let monoFilter = '';
+    let previewOpen = null;
 
     async function load() {
       const res = await fetch('/api/snapshot?_=' + Date.now());
       if (!res.ok) throw new Error('snapshot ' + res.status);
-      render(await res.json());
+      lastSnap = await res.json();
+      render(lastSnap);
     }
 
     function render(d) {
@@ -222,19 +230,38 @@ export function dashboardHtml(): string {
         '<div><span class="meta">warm</span><br>' + (warm || '<span class="empty">none</span>') + '</div>' +
         '<div style="margin-top:0.6rem"><span class="meta">cold</span><br>' + (cold || '<span class="empty">none</span>') + '</div>';
 
-      const monos = d.monologues || [];
+      // monologue filter options from active threads + monologue thread_ids
+      const filterEl = document.getElementById('mono-filter');
+      const threadOpts = {};
+      (d.threads.active || []).forEach(t => { threadOpts[t.id] = t.title; });
+      (d.monologues || []).forEach(m => (m.thread_ids || []).forEach(id => {
+        if (!threadOpts[id]) threadOpts[id] = id;
+      }));
+      const prev = monoFilter || filterEl.value;
+      filterEl.innerHTML = '<option value="">all threads</option>' +
+        Object.keys(threadOpts).map(id =>
+          '<option value="' + esc(id) + '">' + esc(threadOpts[id]) + '</option>'
+        ).join('');
+      filterEl.value = prev;
+      monoFilter = filterEl.value;
+
+      let monos = d.monologues || [];
+      if (monoFilter) {
+        monos = monos.filter(m => (m.thread_ids || []).includes(monoFilter));
+      }
       document.getElementById('monologues').innerHTML = monos.length
         ? monos.map(m => (
             '<div class="mono-card">' +
               '<div class="title">' + esc((m.at||'').replace('T',' ').slice(0,19)) +
               ' <span class="sal">' + esc(m.mode) +
+              (m.thread_ids && m.thread_ids.length ? ' · th ' + esc(m.thread_ids.join(',')) : '') +
               (m.reading && m.reading[0] ? ' · read ' + esc(m.reading.map(r=>r.path).join(', ')) : '') +
               '</span></div>' +
               '<div class="body">' + esc(m.monologue) + '</div>' +
               (m.refined_summary ? '<div class="sum" style="margin-top:0.4rem">→ ' + esc(m.refined_summary) + '</div>' : '') +
             '</div>'
           )).join('')
-        : '<div class="empty">No contemplations yet. Run a tick (or wait for heartbeat).</div>';
+        : '<div class="empty">No contemplations' + (monoFilter ? ' for this thread' : '') + ' yet.</div>';
 
       const dlg = d.dialogue || [];
       const dlgEl = document.getElementById('dialogue');
@@ -253,10 +280,37 @@ export function dashboardHtml(): string {
       const corp = d.corpus || [];
       document.getElementById('corpus').innerHTML = corp.length
         ? corp.map(c =>
-            '<div class="corp-row"><b>' + esc(c.path) + '</b> <span class="sal">' +
-            c.bytes + ' B</span></div>'
+            '<div class="corp-row">' +
+              '<div><b>' + esc(c.path) + '</b> <span class="sal">' + c.bytes + ' B</span></div>' +
+              (c.preview ? '<div class="sum">' + esc(c.preview) + '</div>' : '') +
+              '<div style="margin-top:0.35rem">' +
+                '<button type="button" data-preview="' + esc(c.path) + '">Preview</button> ' +
+                '<button type="button" data-del="' + esc(c.path) + '">Delete</button>' +
+              '</div>' +
+              (previewOpen === c.path
+                ? '<pre class="body" id="corp-preview-body" style="margin-top:0.5rem;white-space:pre-wrap;color:var(--mono);font-size:0.85rem">loading…</pre>'
+                : '') +
+            '</div>'
           ).join('')
         : '<div class="empty">Empty corpus — add a .md below.</div>';
+      document.querySelectorAll('[data-preview]').forEach(btn => {
+        btn.onclick = () => previewCorpus(btn.getAttribute('data-preview'));
+      });
+      document.querySelectorAll('[data-del]').forEach(btn => {
+        btn.onclick = () => deleteCorpus(btn.getAttribute('data-del'));
+      });
+      if (previewOpen) {
+        fetch('/api/corpus?name=' + encodeURIComponent(previewOpen))
+          .then(r => r.json())
+          .then(data => {
+            const el = document.getElementById('corp-preview-body');
+            if (el) el.textContent = (data.file && data.file.content) || data.error || '';
+          })
+          .catch(e => {
+            const el = document.getElementById('corp-preview-body');
+            if (el) el.textContent = String(e);
+          });
+      }
 
       const st = d.stream || [];
       document.getElementById('stream').innerHTML = st.length
@@ -359,10 +413,35 @@ export function dashboardHtml(): string {
       }
     }
 
+    async function deleteCorpus(name) {
+      if (busy || !name) return;
+      if (!confirm('Delete corpus file ' + name + '?')) return;
+      setBusy(true, 'Deleting…', 'corp-status');
+      try {
+        const res = await fetch('/api/corpus?name=' + encodeURIComponent(name), { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || ('delete failed ' + res.status));
+        if (previewOpen === name) previewOpen = null;
+        await load();
+        setBusy(false, 'deleted ' + name, 'corp-status');
+      } catch (e) {
+        setBusy(false); setErr(String(e.message || e), 'corp-status');
+      }
+    }
+
+    function previewCorpus(name) {
+      previewOpen = previewOpen === name ? null : name;
+      if (lastSnap) render(lastSnap);
+    }
+
     document.getElementById('btn-refresh').onclick = () => load().catch(e => setErr(String(e)));
     document.getElementById('btn-say').onclick = say;
     document.getElementById('btn-tick').onclick = tickOnce;
     document.getElementById('btn-corp').onclick = addCorpus;
+    document.getElementById('mono-filter').onchange = (e) => {
+      monoFilter = e.target.value;
+      if (lastSnap) render(lastSnap);
+    };
     document.getElementById('say-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); say(); }
     });
