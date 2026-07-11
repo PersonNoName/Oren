@@ -22,5 +22,8 @@ describe("buildDashboardSnapshot", () => {
     expect(snap.meta.tick_count).toBe(0);
     expect(snap.threads.active).toEqual([]);
     expect(snap.home).toBe(home);
+    expect(snap.monologues).toEqual([]);
+    expect(Array.isArray(snap.corpus)).toBe(true);
   });
 });
+

@@ -1,4 +1,5 @@
 import http from "node:http";
+import { writeCorpusFile } from "../corpus/manage.js";
 import { sayToOren } from "../dialogue/reply.js";
 import { selectLlm } from "../llm/select.js";
 import { loadDotEnv } from "../load-env.js";
@@ -17,7 +18,6 @@ export interface ServeOptions {
 export function startDashboardServer(opts: ServeOptions): http.Server {
   const port = opts.port ?? 8787;
   const host = opts.host ?? "127.0.0.1";
-  // Ensure life .env is loaded for API keys when serving
   loadDotEnv([opts.home]);
 
   const server = http.createServer(async (req, res) => {
@@ -72,6 +72,18 @@ export function startDashboardServer(opts: ServeOptions): http.Server {
           ok: result.exitCode === 0,
           ...result,
         });
+      }
+
+      if (method === "POST" && url.pathname === "/api/corpus") {
+        const body = await readJsonBody<{ name?: string; content?: string }>(req);
+        const name = (body.name ?? "").trim();
+        const content = body.content ?? "";
+        if (!name) return json(res, 400, { error: "name is required" });
+        if (!content.trim()) return json(res, 400, { error: "content is required" });
+        const store = new LifeStore(opts.home);
+        const state = await store.load();
+        const file = await writeCorpusFile(opts.home, state.config, name, content);
+        return json(res, 200, { ok: true, file });
       }
 
       if (method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {

@@ -1,11 +1,22 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { listCorpusFiles, type CorpusFileInfo } from "../corpus/manage.js";
 import { readDialogueTail } from "../dialogue/store.js";
-import { corpusDir } from "../paths.js";
 import { loadRelation } from "../relation/cognition.js";
 import { describeAbsence } from "../relation/visit.js";
 import { LifeStore } from "../store/life-store.js";
 import type { DialogueTurn, RelationState, StreamEvent, Thread } from "../types.js";
-import fs from "node:fs/promises";
-import path from "node:path";
+
+export interface MonologueEntry {
+  tick_id: string;
+  at: string;
+  mode: string;
+  monologue: string;
+  refined_summary?: string;
+  open_questions?: string[];
+  reading?: { path: string; reason: string }[];
+  felt_intensity?: number;
+}
 
 export interface DashboardSnapshot {
   generated_at: string;
@@ -24,6 +35,8 @@ export interface DashboardSnapshot {
   };
   stream: StreamEvent[];
   dialogue: DialogueTurn[];
+  monologues: MonologueEntry[];
+  corpus: CorpusFileInfo[];
   corpus_docs: number;
   modes_recent: string[];
 }
@@ -45,6 +58,8 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
   const relation = await loadRelation(store);
   const stream = await store.readStreamTail(80);
   const dialogue = await readDialogueTail(store, 40);
+  const monologues = await loadRecentMonologues(store.paths.ticksDir, 12);
+  const corpus = await listCorpusFiles(home, state.config);
 
   const threads = Object.values(state.threads);
   const toSummary = (t: Thread): ThreadSummary => ({
@@ -73,24 +88,6 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     .map((e) => String(e.payload.mode ?? "?"))
     .slice(-20);
 
-  let corpus_docs = 0;
-  try {
-    const cDir = corpusDir(home, state.config);
-    const walk = async (d: string) => {
-      const ents = await fs.readdir(d, { withFileTypes: true });
-      for (const e of ents) {
-        const p = path.join(d, e.name);
-        if (e.isDirectory()) await walk(p);
-        else if (/\.(md|txt|markdown)$/i.test(e.name) && e.name !== "README.md") {
-          corpus_docs++;
-        }
-      }
-    };
-    await walk(cDir);
-  } catch {
-    corpus_docs = 0;
-  }
-
   return {
     generated_at: new Date().toISOString(),
     home,
@@ -105,7 +102,64 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     threads: { active, dormant },
     stream: stream.slice(-60),
     dialogue,
-    corpus_docs,
+    monologues,
+    corpus,
+    corpus_docs: corpus.length,
     modes_recent,
   };
+}
+
+export async function loadRecentMonologues(
+  ticksDir: string,
+  limit = 12,
+): Promise<MonologueEntry[]> {
+  let names: string[];
+  try {
+    names = await fs.readdir(ticksDir);
+  } catch {
+    return [];
+  }
+  const files = names.filter((n) => n.endsWith(".json"));
+  const entries: { mtime: number; entry: MonologueEntry }[] = [];
+
+  for (const name of files) {
+    try {
+      const abs = path.join(ticksDir, name);
+      const st = await fs.stat(abs);
+      const raw = JSON.parse(await fs.readFile(abs, "utf8")) as {
+        tick_id?: string;
+        at?: string;
+        mode?: string;
+        parsed_artifact?: {
+          monologue?: string;
+          refined_summary?: string;
+          open_questions?: string[];
+          felt_intensity?: number;
+        };
+        reading_plan?: { items?: { path?: string; reason?: string }[] };
+      };
+      const mono = raw.parsed_artifact?.monologue?.trim();
+      if (!mono) continue;
+      entries.push({
+        mtime: st.mtimeMs,
+        entry: {
+          tick_id: raw.tick_id ?? name.replace(/\.json$/, ""),
+          at: raw.at ?? new Date(st.mtimeMs).toISOString(),
+          mode: raw.mode ?? "?",
+          monologue: mono,
+          refined_summary: raw.parsed_artifact?.refined_summary,
+          open_questions: raw.parsed_artifact?.open_questions,
+          felt_intensity: raw.parsed_artifact?.felt_intensity,
+          reading: (raw.reading_plan?.items ?? [])
+            .filter((i) => i.path)
+            .map((i) => ({ path: String(i.path), reason: String(i.reason ?? "") })),
+        },
+      });
+    } catch {
+      // skip bad tick files
+    }
+  }
+
+  entries.sort((a, b) => b.mtime - a.mtime);
+  return entries.slice(0, limit).map((e) => e.entry);
 }
