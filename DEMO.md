@@ -6,7 +6,17 @@ Oren 是一个**持续在场的独立主体**：自己读语料、沉思、留�
 
 ```bash
 cd /Users/robot/Documents/Projects/Oren
+npm install          # 若报找不到 tsx / 依赖缺失，先执行这一步
+npm run demo         # 会先 build，再启动；浏览器打开 http://127.0.0.1:8787
+# 结束演示：终端里 Ctrl+C
+```
+
+若 `npm run demo` 仍失败：
+
+```bash
+rm -rf node_modules
 npm install
+npm run build
 npm run demo
 ```
 

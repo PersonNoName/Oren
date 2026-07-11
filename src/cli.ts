@@ -158,8 +158,15 @@ async function main(argv: string[]): Promise<number> {
 
   if (cmd === "demo") {
     const port = Number(process.env.OREN_DASH_PORT ?? parsePort(rest) ?? 8787);
+    // Prefer durable Application Support home unless user explicitly set OREN_HOME
+    const demoHome = process.env.OREN_HOME?.trim()
+      ? home
+      : path.join(
+          process.env.HOME || process.cwd(),
+          "Library/Application Support/Oren",
+        );
     const { runDemo } = await import("./demo.js");
-    await runDemo({ home, port, serve: true });
+    await runDemo({ home: demoHome, port, serve: true });
     return 0;
   }
 

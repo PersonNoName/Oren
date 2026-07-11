@@ -11,9 +11,11 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "postinstall": "npm run build",
     "oren": "node --import tsx src/cli.ts",
-    "demo": "node --import tsx src/cli.ts demo",
-    "start": "node --import tsx src/cli.ts serve"
+    "demo": "npm run build && node dist/cli.js demo",
+    "start": "npm run build && node dist/cli.js serve",
+    "demo:dev": "node --import tsx src/cli.ts demo"
   },
   "engines": {
     "node": ">=20"
