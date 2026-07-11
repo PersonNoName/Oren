@@ -55,24 +55,30 @@ export OPENAI_API_KEY=sk-...
 npm run oren -- tick --force-mode contemplate
 ```
 
-### B) OpenAI 兼容接口（Chat Completions 格式 / 自定义网关）
+### B) DeepSeek（推荐）
 
-很多中转、硅基流动、DeepSeek OpenAI 模式、自建 vLLM 都属于这类：
+pi-ai 已内置，base 为 `https://api.deepseek.com`：
 
 ```bash
 export OREN_LLM=pi
-export OREN_MODEL=openai:你的模型名          # 网关文档里的 model id
-export OPENAI_API_KEY=sk-...                 # 或网关发的 key
-export OPENAI_BASE_URL=https://api.xxx.com/v1  # 必须带到 /v1 这一层（按网关文档）
+export OREN_MODEL=deepseek:deepseek-v4-flash   # 或 deepseek:deepseek-v4-pro
+export DEEPSEEK_API_KEY=sk-...                  # platform.deepseek.com
 
 npm run oren -- tick --force-mode contemplate
 ```
 
-说明：
+### C) 其它 OpenAI 兼容网关
 
-- **只要设置了 `OPENAI_BASE_URL`**，Oren 会走 **OpenAI Completions 兼容通道**（`openai-completions`），而不是官方 Responses API。
-- `OREN_MODEL` 的 `openai:` 后面填网关要求的模型名，例如 `deepseek-chat`、`gpt-4o-mini`、`qwen-plus`。
-- Key 也可用 `OPENAI_COMPAT_API_KEY`（与 `OPENAI_API_KEY` 二选一即可）。
+```bash
+export OREN_LLM=pi
+export OREN_MODEL=openai:你的模型名
+export OPENAI_API_KEY=sk-...
+export OPENAI_BASE_URL=https://api.xxx.com/v1
+
+npm run oren -- tick --force-mode contemplate
+```
+
+设置了 `OPENAI_BASE_URL` 后走 Completions 兼容通道；key 也可用 `OPENAI_COMPAT_API_KEY`。
 
 ### D) Anthropic / Claude 风格
 
