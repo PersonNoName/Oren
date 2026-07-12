@@ -103,6 +103,15 @@ export function dashboardHtml(): string {
     }
     .chat .oren .bubble { border-color: #2a3a55; }
     .chat .share { margin-top: 0.35rem; font-size: 0.8rem; color: var(--warm); }
+    .chat .share .kind {
+      display: inline-block;
+      margin-right: 0.35rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      border: 1px solid color-mix(in srgb, var(--warm) 45%, transparent);
+      color: var(--warm);
+    }
     .composer, .corpus-form {
       display: flex; gap: 0.5rem; align-items: flex-end;
       border-top: 1px solid var(--border); padding-top: 0.75rem;
@@ -136,8 +145,11 @@ export function dashboardHtml(): string {
       <div class="meta" id="header-meta">加载中…</div>
     </div>
     <div class="actions">
-      <button type="button" id="btn-tick" title="跑一轮体验循环">心跳一轮</button>
-      <button type="button" id="btn-contemplate" title="强制沉思">沉思</button>
+      <button type="button" id="btn-tick" title="独处调度：规划或执行下一项">心跳一轮</button>
+      <button type="button" id="btn-plan" title="制定/重写独处计划表">规划</button>
+      <button type="button" id="btn-act" title="执行计划下一项">执行下一项</button>
+      <button type="button" id="btn-contemplate" title="强制沉思（绕过计划）">沉思</button>
+      <button type="button" id="btn-organize" title="强制整理（绕过计划）">整理</button>
       <button type="button" id="btn-refresh">刷新</button>
     </div>
   </header>
@@ -145,6 +157,15 @@ export function dashboardHtml(): string {
     <section>
       <h2>内心线索</h2>
       <div id="threads" class="scroll empty">—</div>
+    </section>
+    <section>
+      <h2>意志 · Will</h2>
+      <div id="will" class="empty">—</div>
+    </section>
+    <section>
+      <h2>独自计划</h2>
+      <div id="agenda-note" class="empty" style="margin-bottom:0.5rem;font-size:0.85rem;">—</div>
+      <div id="agenda" class="scroll empty">—</div>
     </section>
     <section>
       <h2>品味 · 关系</h2>
@@ -200,6 +221,16 @@ export function dashboardHtml(): string {
       idle: '发呆',
       organize: '整理',
       contemplate: '沉思',
+      plan: '规划',
+      think_without_new_reading: '纯想（未新读）',
+      read: '阅读',
+      think: '所思',
+      seek: '查询',
+      pending: '待做',
+      active: '进行中',
+      done: '完成',
+      blocked: '受阻',
+      skipped: '跳过',
     };
     const EVENT_LABEL = {
       tick_started: '心跳开始',
@@ -237,6 +268,55 @@ export function dashboardHtml(): string {
         '</b> 次 · 上次 <b>' + esc(fmtTime(d.meta.last_tick_at) || '从未') +
         '</b> · 模型 <b>' + esc(d.meta.model) +
         '</b> · 语料 <b>' + d.corpus_docs + '</b> 篇';
+
+      const will = d.will;
+      const postureZh = { engage: '主动', soft_check: '轻探', quiet: '安静', care: '关心' };
+      const driveZh = { low: '低', mid: '中', high: '高' };
+      document.getElementById('will').innerHTML = will
+        ? '<div class="title">' + esc(will.focus_summary || '（无焦点）') + '</div>' +
+          '<div class="sum" style="margin-top:0.4rem">' +
+          '<span class="pill">' + esc(postureZh[will.posture] || will.posture) + '</span>' +
+          '<span class="pill">分享 ' + esc(driveZh[will.share_drive] || will.share_drive) + '</span>' +
+          '<span class="pill">提问 ' + esc(driveZh[will.ask_drive] || will.ask_drive) + '</span>' +
+          '</div>' +
+          ((will.queue_titles && will.queue_titles.length)
+            ? '<div class="meta" style="margin-top:0.55rem">队列</div>' +
+              will.queue_titles.slice(0, 6).map((t, i) =>
+                '<div class="sum">' + (i + 1) + '. ' + esc(t) + '</div>'
+              ).join('')
+            : '<div class="meta" style="margin-top:0.55rem">队列为空</div>')
+        : '<div class="empty">尚无意志状态 — 下一心跳会合成。</div>';
+
+      const ag = d.agenda;
+      const kindZh = { read: '阅读', think: '所思', organize: '整理', seek: '查询', idle: '发呆', say: '主动聊' };
+      const stZh = { pending: '待做', active: '进行中', done: '完成', blocked: '受阻', skipped: '跳过' };
+      document.getElementById('agenda-note').textContent =
+        ag && ag.planning_note ? ag.planning_note : (ag ? '（尚无规划说明）' : '尚无计划表 — 点「规划」或「心跳」');
+      const queueHtml = ag && ag.items && ag.items.length
+        ? ag.items.map((it, idx) => (
+            '<div class="thread"><div class="title">' + (idx+1) + '. ' +
+            '<span class="pill">' + esc(kindZh[it.kind] || it.kind) + '</span> ' +
+            esc(it.title) +
+            ' <span class="sal">' + esc(stZh[it.status] || it.status) +
+            (it.blocked_reason ? ' · ' + esc(it.blocked_reason) : '') +
+            '</span></div></div>'
+          )).join('')
+        : '<div class="empty">待办队列为空。</div>';
+      const def = (ag && ag.deferred) || [];
+      const defHtml = def.length
+        ? '<div class="meta" style="margin:0.75rem 0 0.35rem">未到期 · 日历关心</div>' +
+          def.map(it => (
+            '<div class="thread"><div class="title"><span class="pill warm">日历</span> ' +
+            esc(it.title) +
+            '</div><div class="sum">' +
+            esc((it.due_start||'').slice(0,10)) + ' ～ ' + esc((it.due_end||'').slice(0,10)) +
+            (it.source_text ? ' · 原话「' + esc(it.source_text.slice(0,40)) + '」' : '') +
+            '</div></div>'
+          )).join('')
+        : '<div class="meta" style="margin-top:0.75rem">未到期日历关心：无</div>';
+      document.getElementById('agenda').innerHTML =
+        queueHtml + defHtml +
+        (ag ? '<div class="meta" style="margin-top:0.5rem">自上次规划已执行 ' + (ag.actions_since_plan||0) + ' 项</div>' : '');
 
       const taste = d.taste || { values: [], aesthetics: [] };
       document.getElementById('taste').innerHTML =
@@ -306,9 +386,18 @@ export function dashboardHtml(): string {
         ? dlg.map(t => {
             const who = t.role === 'user' ? '你' : 'Oren';
             const share = t.share && t.share.opened
-              ? '<div class="share">分享：' + esc(t.share.snippet || '') + '</div>' : '';
+              ? (() => {
+                  const kindMap = { read: '阅读', think: '所思', write: '自写' };
+                  const kind = t.share.kind && kindMap[t.share.kind] ? kindMap[t.share.kind] : '分享';
+                  const path = t.share.source_path ? ' · ' + esc(t.share.source_path) : '';
+                  return '<div class="share"><span class="kind">' + kind + path + '</span>' +
+                    esc(t.share.snippet || '') + '</div>';
+                })() : '';
+            const proactive = t.proactive && t.role === 'oren'
+              ? ' <span class="sal">主动</span>'
+              : '';
             return '<div class="row ' + (t.role === 'user' ? 'you' : 'oren') + '"><div class="who">' + who +
-              ' · ' + esc(fmtTime(t.ts)) +
+              ' · ' + esc(fmtTime(t.ts)) + proactive +
               '</div><div class="bubble">' + esc(t.text || '') + '</div>' + share + '</div>';
           }).join('')
         : '<div class="empty">还没有对话。在下方输入即可。</div>';
@@ -397,9 +486,10 @@ export function dashboardHtml(): string {
     function setBusy(v, msg, el) {
       busy = v;
       document.getElementById('btn-say').disabled = v;
-      document.getElementById('btn-tick').disabled = v;
-      const bc = document.getElementById('btn-contemplate');
-      if (bc) bc.disabled = v;
+      ['btn-tick','btn-organize','btn-contemplate','btn-plan','btn-act'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.disabled = v;
+      });
       document.getElementById('btn-corp').disabled = v;
       document.getElementById('say-input').disabled = v;
       const st = document.getElementById(el || 'say-status');
@@ -427,7 +517,14 @@ export function dashboardHtml(): string {
         if (!res.ok) throw new Error(data.error || ('发送失败 ' + res.status));
         input.value = '';
         await load();
-        setBusy(false, data.share && data.share.opened ? '已分享一段内心线索' : '已发送');
+        const n = (data.oren_turns && data.oren_turns.length) || 1;
+        const stanceZh = { follow: '顺着聊', weave: '接住并带一点', lead: '自己起头' }[data.stance] || '';
+        const shareBit = data.share && data.share.opened
+          ? (' · 分享' + ({ read: '阅读', think: '所思', write: '自写' }[data.share.kind] || '内心'))
+          : '';
+        setBusy(false,
+          (n > 1 ? ('连说 ' + n + ' 句') : '已发送') +
+          (stanceZh ? ' · ' + stanceZh : '') + shareBit);
       } catch (e) {
         setBusy(false); setErr(String(e.message || e));
       }
@@ -435,7 +532,12 @@ export function dashboardHtml(): string {
 
     async function tickOnce(forceMode) {
       if (busy) return;
-      setBusy(true, forceMode === 'contemplate' ? '正在沉思…' : '正在心跳…');
+      setBusy(true,
+        forceMode === 'contemplate' ? '正在沉思…'
+          : forceMode === 'organize' ? '正在整理…'
+            : forceMode === 'plan' ? '正在规划…'
+              : forceMode === 'act' ? '执行下一项…'
+                : '正在心跳…');
       try {
         const res = await fetch('/api/tick', {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -500,7 +602,10 @@ export function dashboardHtml(): string {
     document.getElementById('btn-refresh').onclick = () => load().catch(e => setErr(String(e)));
     document.getElementById('btn-say').onclick = say;
     document.getElementById('btn-tick').onclick = () => tickOnce();
+    document.getElementById('btn-plan').onclick = () => tickOnce('plan');
+    document.getElementById('btn-act').onclick = () => tickOnce('act');
     document.getElementById('btn-contemplate').onclick = () => tickOnce('contemplate');
+    document.getElementById('btn-organize').onclick = () => tickOnce('organize');
     document.getElementById('btn-corp').onclick = addCorpus;
     document.getElementById('mono-filter').onchange = (e) => {
       monoFilter = e.target.value;

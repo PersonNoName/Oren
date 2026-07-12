@@ -12,6 +12,7 @@ import { recordVisit } from "./relation/visit.js";
 import { LifeStore } from "./store/life-store.js";
 import { runTick } from "./tick/engine.js";
 import type { Mode } from "./types.js";
+import { loadWill } from "./will/store.js";
 
 loadDotEnv();
 
@@ -33,7 +34,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (cmd === "tick") {
-    let forceMode: Mode | undefined;
+    let forceMode: Mode | "act" | undefined;
     try {
       forceMode = parseForceMode(rest);
     } catch (err) {
@@ -58,6 +59,7 @@ async function main(argv: string[]): Promise<number> {
     const store = new LifeStore(home);
     try {
       const state = await store.load();
+      const will = await loadWill(store, new Date().toISOString());
       const tail = await store.readStreamTail(20);
       const active = Object.values(state.threads).filter((t) => t.status === "active");
       const rel = await loadRelation(store);
@@ -68,6 +70,13 @@ async function main(argv: string[]): Promise<number> {
       for (const t of active.slice(0, 10)) {
         console.log(`  - ${t.id} salience=${t.salience.toFixed(2)} ${t.title}`);
       }
+      console.log(`will_focus: ${will.focus.summary}`);
+      console.log(
+        `will_posture: ${will.toward_user.posture} share=${will.toward_user.share_drive} ask=${will.toward_user.ask_drive}`,
+      );
+      console.log(
+        `will_queue: ${will.session.queue.length} open_moves: ${will.open_moves.length}`,
+      );
       const last = state.affect.absence.last_user_contact_at;
       console.log(`last_visit: ${last ?? "(never)"} count=${state.affect.absence.visit_count}`);
       console.log(
@@ -226,11 +235,19 @@ async function main(argv: string[]): Promise<number> {
   return 1;
 }
 
-function parseForceMode(args: string[]): Mode | undefined {
+function parseForceMode(args: string[]): Mode | "act" | undefined {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--force-mode" && args[i + 1]) {
       const m = args[i + 1]!;
-      if (m === "idle" || m === "organize" || m === "contemplate") return m;
+      if (
+        m === "idle" ||
+        m === "organize" ||
+        m === "contemplate" ||
+        m === "plan" ||
+        m === "act"
+      ) {
+        return m;
+      }
       throw new Error(`invalid --force-mode: ${m}`);
     }
   }
@@ -253,13 +270,15 @@ Usage:
   oren demo [--port 8787]      # seed life, warm ticks, open dashboard
   oren serve [--port 8787]     # dashboard (chat + tick + corpus)
   oren setup-life | init | doctor | status
-  oren tick [--force-mode idle|organize|contemplate]
+  oren tick [--force-mode idle|organize|contemplate|plan|act]
   oren say <message> | history [n] | visit [note]
 
 Env:
   OREN_HOME       life root (default for demo: ~/Library/Application Support/Oren)
-  OREN_TICK_LLM   fake | pi   (ticks; default fake for cheap heartbeat)
+  OREN_TICK_LLM   fake | pi   (legacy force ticks)
   OREN_SAY_LLM    fake | pi   (dialogue)
+  OREN_PLAN_LLM   fake | pi   (solitary plan; default live)
+  OREN_ORGANIZE_LLM  fake | pi
   OREN_MODEL      e.g. deepseek:deepseek-v4-flash
   OREN_DASH_PORT  dashboard port (default 8787)
 `);

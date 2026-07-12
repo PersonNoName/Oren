@@ -3,6 +3,7 @@ import path from "node:path";
 import { corpusDir } from "./paths.js";
 import { describeAbsence } from "./relation/visit.js";
 import { LifeStore } from "./store/life-store.js";
+import { loadWill } from "./will/store.js";
 
 export interface DoctorReport {
   ok: boolean;
@@ -28,6 +29,13 @@ export async function runDoctor(home: string): Promise<DoctorReport> {
     process.env.ANTHROPIC_OAUTH_TOKEN
   );
   lines.push(`provider_key=${hasKey ? "present" : "MISSING"}`);
+  const dsKey = process.env.DEEPSEEK_API_KEY?.trim() ?? "";
+  if (dsKey) {
+    lines.push(`DEEPSEEK_API_KEY=****${dsKey.slice(-4)} (len=${dsKey.length})`);
+  } else {
+    lines.push(`DEEPSEEK_API_KEY=(missing)`);
+  }
+
   if (!hasKey && (process.env.OREN_LLM === "pi" || process.env.OREN_LLM === "live")) {
     ok = false;
   }
@@ -41,6 +49,32 @@ export async function runDoctor(home: string): Promise<DoctorReport> {
     const active = Object.values(state.threads).filter((t) => t.status === "active");
     lines.push(`active_threads=${active.length}`);
     lines.push(`relation: ${describeAbsence(state.affect)}`);
+
+    let willFilePresent = false;
+    try {
+      await fs.access(store.paths.will);
+      willFilePresent = true;
+    } catch {
+      willFilePresent = false;
+    }
+    if (!willFilePresent) {
+      lines.push(
+        "will=missing (soft) — will be synthesized from agenda/life on next tick or load",
+      );
+    } else {
+      try {
+        const will = await loadWill(store, new Date().toISOString());
+        const focus = will.focus.summary.slice(0, 80);
+        lines.push(
+          `will=ok focus=${JSON.stringify(focus)} posture=${will.toward_user.posture} queue=${will.session.queue.length}`,
+        );
+      } catch (err) {
+        ok = false;
+        lines.push(
+          `will=CORRUPT (${err instanceof Error ? err.message : err})`,
+        );
+      }
+    }
 
     const cDir = corpusDir(home, state.config);
     let corpusFiles = 0;

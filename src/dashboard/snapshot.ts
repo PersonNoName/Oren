@@ -4,8 +4,20 @@ import { listCorpusFiles, type CorpusFileInfo } from "../corpus/manage.js";
 import { readDialogueTail } from "../dialogue/store.js";
 import { loadRelation } from "../relation/cognition.js";
 import { describeAbsence } from "../relation/visit.js";
+import { loadAgenda } from "../agenda/store.js";
 import { LifeStore } from "../store/life-store.js";
-import type { DialogueTurn, RelationState, StreamEvent, Taste, Thread } from "../types.js";
+import type {
+  Agenda,
+  DialogueTurn,
+  DriveLevel,
+  Intent,
+  RelationState,
+  StreamEvent,
+  Taste,
+  Thread,
+  WillPosture,
+} from "../types.js";
+import { loadWill } from "../will/store.js";
 
 export interface MonologueEntry {
   tick_id: string;
@@ -45,6 +57,36 @@ export interface DashboardSnapshot {
   corpus: CorpusFileInfo[];
   corpus_docs: number;
   modes_recent: string[];
+  agenda: {
+    id: string;
+    status: string;
+    planning_note?: string;
+    actions_since_plan: number;
+    items: {
+      id: string;
+      kind: string;
+      title: string;
+      status: string;
+      blocked_reason?: string;
+      thread_id?: string;
+      due_start?: string;
+      due_end?: string;
+    }[];
+    deferred: {
+      id: string;
+      title: string;
+      due_start?: string;
+      due_end?: string;
+      source_text?: string;
+    }[];
+  } | null;
+  will: {
+    focus_summary: string;
+    posture: WillPosture;
+    share_drive: DriveLevel;
+    ask_drive: DriveLevel;
+    queue_titles: string[];
+  } | null;
   product: {
     name: string;
     version: string;
@@ -99,6 +141,10 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     .map((e) => String(e.payload.mode ?? "?"))
     .slice(-20);
 
+  const agendaRaw = await loadAgenda(store);
+  const agenda = summarizeAgenda(agendaRaw);
+  const will = await summarizeWill(store);
+
   return {
     generated_at: new Date().toISOString(),
     home,
@@ -118,11 +164,67 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     corpus,
     corpus_docs: corpus.length,
     modes_recent,
+    agenda,
+    will,
     product: {
       name: "Oren",
       version: "0.2.0",
       tagline: "持续在场 · 拥有自己的内心生活",
     },
+  };
+}
+
+async function summarizeWill(
+  store: LifeStore,
+): Promise<DashboardSnapshot["will"]> {
+  try {
+    const will = await loadWill(store, new Date().toISOString());
+    const queue_titles = will.session.queue
+      .map((id) => will.session.intents[id]?.title)
+      .filter((t): t is string => !!t);
+    return {
+      focus_summary: will.focus.summary,
+      posture: will.toward_user.posture,
+      share_drive: will.toward_user.share_drive,
+      ask_drive: will.toward_user.ask_drive,
+      queue_titles,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function summarizeAgenda(a: Agenda): DashboardSnapshot["agenda"] {
+  const items = a.queue
+    .map((id) => a.intents[id])
+    .filter((x): x is Intent => !!x)
+    .map((i) => ({
+      id: i.id,
+      kind: i.kind,
+      title: i.title,
+      status: i.status,
+      blocked_reason: i.blocked_reason,
+      thread_id: i.thread_id,
+      due_start: i.due_start,
+      due_end: i.due_end,
+    }));
+  const deferred = Object.values(a.intents)
+    .filter((i) => i.status === "deferred")
+    .sort((x, y) => (x.due_start ?? "").localeCompare(y.due_start ?? ""))
+    .map((i) => ({
+      id: i.id,
+      title: i.title,
+      due_start: i.due_start,
+      due_end: i.due_end,
+      source_text: i.hints?.source_text,
+    }));
+  return {
+    id: a.id,
+    status: a.status,
+    planning_note: a.planning_note,
+    actions_since_plan: a.actions_since_plan,
+    items,
+    deferred,
   };
 }
 
