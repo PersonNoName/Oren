@@ -18,14 +18,23 @@ See **[DEMO.md](./DEMO.md)** for a 5-minute walkthrough.
 
 | Layer | Capability |
 |-------|------------|
-| **Life loop** | `oren tick` — perceive → mode → act → integrate → persist |
+| **Will spine** | Intent truth in `will.json`; session queue is a projection |
+| **Life loop** | `oren tick` — perceive → revise Will → act → integrate → persist |
 | **Self-memory** | Active threads with summary, open questions, salience |
 | **Monologues** | Auditable contemplations in `ticks/` + dashboard |
-| **Dialogue** | `oren say` / dashboard chat — seepage + share gate |
+| **Dialogue** | Will-turn (moves) → express (utterances); seepage at express |
 | **Relation** | Visit / absence; cold/warm topic calibration (not sycophancy) |
 | **Corpus** | Local md/txt feed; dashboard add / preview / delete |
 | **Heartbeat** | launchd every 30m (`OREN_TICK_LLM=fake` by default) |
 | **Dashboard** | Localhost UI for the whole presence |
+
+## Will spine
+
+Oren’s intent lives in **`will.json`** (single source of truth for wants / stance / open moves). The solitude **session queue** (former agenda 3–7) is a **projection** of that Will, not a second mind.
+
+**Dialogue** is two-step: **will-turn** chooses moves → **express** writes utterances under those frozen moves. Express does not invent policy.
+
+See the design spec: [`docs/superpowers/specs/2026-07-12-oren-will-spine-design.md`](./docs/superpowers/specs/2026-07-12-oren-will-spine-design.md).
 
 ## Commands
 
@@ -45,7 +54,8 @@ oren setup-life
 |----------|------|
 | `OREN_HOME` | Life root (demo default: `~/Library/Application Support/Oren`) |
 | `OREN_TICK_LLM` | `fake` \| `pi` — unsupervised ticks |
-| `OREN_SAY_LLM` | `fake` \| `pi` — dialogue |
+| `OREN_SAY_LLM` | `fake` \| `pi` — dialogue express |
+| `OREN_WILL_LLM` | `fake` \| `pi` — Will revise + will-turn |
 | `OREN_MODEL` | e.g. `deepseek:deepseek-v4-flash` |
 | `DEEPSEEK_API_KEY` | For live `pi` dialogue |
 
@@ -64,6 +74,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.oren.tick.plist
 - Essence (what Oren *is*): `design/2026-07-11-oren-core-essence.md`
 - Architecture exploration: `discussion/2026-07-10-oren-agent-design.md`
 - Technical spec: `docs/superpowers/specs/2026-07-12-oren-runtime-v1-design.md`
+- **Will spine**: `docs/superpowers/specs/2026-07-12-oren-will-spine-design.md`
+- Stage assessment: `docs/2026-07-12-stage-assessment.md`
 
 ## Develop
 
