@@ -75,6 +75,8 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.oren.tick.plist
 - Architecture exploration: `discussion/2026-07-10-oren-agent-design.md`
 - Technical spec: `docs/superpowers/specs/2026-07-12-oren-runtime-v1-design.md`
 - **Will spine**: `docs/superpowers/specs/2026-07-12-oren-will-spine-design.md`
+- **Memory + presence (pending)**: `docs/superpowers/specs/2026-07-12-oren-memory-and-presence-design.md`
+- **Curiosity drive (pending)**: `docs/superpowers/specs/2026-07-12-oren-curiosity-drive-design.md`
 - Stage assessment: `docs/2026-07-12-stage-assessment.md`
 
 ## Develop

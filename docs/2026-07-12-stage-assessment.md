@@ -47,10 +47,11 @@
 | **中文产品面** | ● | locale、计划/对话中文约束、看板中文 |
 | **看板** | ● | 对话/线索/计划/日历/沉思/语料/心跳按钮 |
 | **运维** | ● | doctor、setup-life、heartbeat plist、env 覆盖 |
-| **外读 / 真实 seek** | ○ | seek 仅 blocked 占位 |
+| **外读 / 真实 seek** | ○ | seek 仅 blocked 占位；**好奇驱动**规格已批（问题优先、零 read 合法、seek 愿望登记）见 `docs/superpowers/specs/2026-07-12-oren-curiosity-drive-design.md`，待实现 |
 | **多设备 / 云同步** | ○ | 单机 JSON 生命家 |
 | **沉默后追一句（二期）** | ○ | 设计已定，未实现 |
-| **长期记忆压缩 / 时间线 UI** | ○ | 文件可审计，缺产品级时间线 |
+| **长期记忆压缩 / 时间线 UI** | ○ | 文件可审计，缺产品级时间线；规格见 `docs/superpowers/specs/2026-07-12-oren-memory-and-presence-design.md`（待实现） |
+| **存在论诚实 / 来源自觉** | ○ | 设计已收敛（同文档 §1）；未落 origin 状态与 Express 硬约束 |
 | **正式发布与提交卫生** | ◐ | 0.2 在 git；其后大块能力未 commit |
 
 ---
