@@ -308,9 +308,10 @@ export function dashboardHtml(): string {
       if (hint) {
         const lastContact = d.relation_field || '';
         hint.innerHTML =
-          '后台：macOS launchd <code>com.oren.tick</code> 约每 <b>30 分钟</b> 跑一轮（不打开本页也会跑；日志 /tmp/oren-tick.*.log）。' +
-          ' 本页勾选「页面自动心跳」时约每 <b>10 分钟</b> 再跑一轮。' +
-          ' 你刚聊过的约 <b>2 分钟</b> 内会暂停规划/执行（用户在场），避免抢话——只点「规划/执行」可强制。' +
+          '后台：launchd <code>com.oren.tick</code> 约每 <b>15 分钟</b> 一轮（关页面也跑；日志 /tmp/oren-tick.*.log）。' +
+          ' 规划/沉思/对话默认 <b>真模型</b>——费用主要来自这里。' +
+          ' 「页面自动心跳」默认关；勾上约每 15 分钟再加一轮（会叠费用）。' +
+          ' 聊过约 <b>2 分钟</b> 内后台暂停 plan/act（在场），避免抢话；手动「规划/执行」可强制。' +
           (lastContact ? ' · 关系场：' + esc(String(lastContact).slice(0, 80)) : '');
       }
 
@@ -775,12 +776,13 @@ export function dashboardHtml(): string {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); say(); }
     });
 
-    // Page-open auto heartbeat (not a replacement for launchd when browser closed)
-    const AUTO_MS = 10 * 60 * 1000;
+    // Page-open auto heartbeat — default OFF (cost: real model ticks are expensive)
+    // launchd handles background; enable only when you want denser presence while watching.
+    const AUTO_MS = 15 * 60 * 1000;
     const autoEl = document.getElementById('auto-tick');
     try {
-      autoEl.checked = localStorage.getItem('oren_auto_tick') !== '0';
-    } catch { autoEl.checked = true; }
+      autoEl.checked = localStorage.getItem('oren_auto_tick') === '1';
+    } catch { autoEl.checked = false; }
     autoEl.onchange = () => {
       try { localStorage.setItem('oren_auto_tick', autoEl.checked ? '1' : '0'); } catch {}
     };

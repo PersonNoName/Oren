@@ -5,7 +5,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEFAULT_HOME="$HOME/Library/Application Support/Oren"
 OREN_HOME="${OREN_HOME:-$DEFAULT_HOME}"
 NODE_BIN="$(command -v node)"
-INTERVAL="${INTERVAL:-1800}"
+# Default 15 minutes. Shorter burns API when OREN_TICK_LLM=pi.
+INTERVAL="${INTERVAL:-900}"
 LABEL="com.oren.tick"
 PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
 
@@ -53,7 +54,8 @@ EOF
 
 echo "Wrote $PLIST"
 echo "OREN_HOME=$OREN_HOME  interval=${INTERVAL}s  binary=$ROOT/dist/cli.js"
-echo "OREN_TICK_LLM should be fake (cheap) in $OREN_HOME/.env"
+echo "LLM: set OREN_TICK_LLM=fake for cheap unsupervised ticks, or pi for live (costly)."
+echo "Recommended cost posture: OREN_TICK_LLM=fake, OREN_PLAN_LLM=pi only when you force plan."
 echo ""
 echo "Reload:"
 echo "  launchctl bootout gui/\$(id -u) $PLIST 2>/dev/null || true"

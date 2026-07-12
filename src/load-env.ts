@@ -15,6 +15,9 @@ const OVERRIDE_KEYS = new Set([
   "OREN_LLM",
   "OREN_TICK_LLM",
   "OREN_SAY_LLM",
+  "OREN_WILL_LLM",
+  "OREN_PLAN_LLM",
+  "OREN_ORGANIZE_LLM",
   "OREN_HOME",
 ]);
 
