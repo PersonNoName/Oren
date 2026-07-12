@@ -2,10 +2,21 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
+import {
+  actOnIntent,
+  lastProactiveSayAt,
+  summarizeDialogueForPlan,
+} from "../agenda/act.js";
+import { promoteDueIntents } from "../agenda/deferred.js";
+import { buildAgendaPlan } from "../agenda/plan.js";
+import { agendaConfig, canPlanSay, decideAgendaTick } from "../agenda/schedule.js";
 import { buildCorpusIndex } from "../corpus/index.js";
-import { planReading } from "../corpus/retrieve.js";
+import { collectChunkReadCounts, planReading } from "../corpus/retrieve.js";
+import { readDialogueTail } from "../dialogue/store.js";
+import { selectLlm } from "../llm/select.js";
 import type { LlmCompleter } from "../llm/types.js";
 import { corpusDir } from "../paths.js";
+import { loadRelation } from "../relation/cognition.js";
 import {
   LifeStore,
   LockError,
@@ -13,10 +24,11 @@ import {
   SchemaMismatchError,
 } from "../store/life-store.js";
 import type { ExitCode, Mode, StreamEvent, TickPatch } from "../types.js";
+import { loadWill, saveWillAndAgenda } from "../will/store.js";
 import { chooseMode } from "./choose-mode.js";
 import { buildContemplatePatch } from "./contemplate.js";
 import { integrate } from "./integrate.js";
-import { planOrganize } from "./organize.js";
+import { buildOrganizePatch, planOrganize } from "./organize.js";
 import { perceive } from "./perceive.js";
 
 export interface TickResult {
@@ -28,7 +40,8 @@ export interface TickResult {
 
 export async function runTick(opts: {
   home: string;
-  forceMode?: Mode;
+  /** Legacy modes + plan. "act" is accepted via forceAgenda. */
+  forceMode?: Mode | "act";
   llm: LlmCompleter;
   now?: () => Date;
   rng?: () => number;
@@ -73,15 +86,22 @@ export async function runTick(opts: {
 
     const streamTail = await store.readStreamTail(500);
     const perception = perceive({ state, index, streamTail, now });
+    let will = await loadWill(store, nowIso);
+    let agenda = will.session;
+    const agCfg = agendaConfig(state.config);
 
-    let { mode, reason } = chooseMode({
-      force: opts.forceMode,
-      recentModes: perception.recentModes,
-      config: state.config,
-      hasReadableCorpus: perception.hasReadableCorpus,
-      activeThreadCount: perception.activeThreadCount,
-      rng,
-    });
+    const force = opts.forceMode;
+    const legacyForce =
+      force === "idle" || force === "organize" || force === "contemplate";
+    const agendaEnabled = agCfg.enabled && !legacyForce;
+
+    let mode: Mode = "idle";
+    let reason = "init";
+    let patch: TickPatch;
+    let readingPlan = null as ReturnType<typeof planReading> | null;
+    let rawModel: string | null = null;
+    let artifact: unknown = null;
+    let agendaDirty = false;
 
     const baseEvents: StreamEvent[] = [
       {
@@ -92,28 +112,287 @@ export async function runTick(opts: {
       },
     ];
 
-    let patch: TickPatch;
-    let readingPlan = null as ReturnType<typeof planReading> | null;
-    let rawModel: string | null = null;
-    let artifact: unknown = null;
-
-    if (mode === "contemplate") {
-      readingPlan = planReading({
-        index,
-        taste: state.taste,
-        threads: state.threads,
-        config: state.config,
-        contemplateOrdinal: perception.contemplateOrdinal,
-      });
-      if (readingPlan.items.length === 0) {
-        mode = "idle";
-        reason = "degraded_empty_corpus";
+    if (agendaEnabled) {
+      // Calendar: promote due deferred cares into queue tail before deciding.
+      const promoted = promoteDueIntents(agenda, now, agCfg.max_intents);
+      if (promoted.promoted.length > 0) {
+        agenda = promoted.agenda;
+        agendaDirty = true;
         baseEvents.push({
           ts: nowIso,
           tick_id: tickId,
-          type: "warn_empty_corpus",
-          payload: {},
+          type: "mode_chosen",
+          payload: {
+            mode: "plan",
+            reason: "promote_due_intents",
+            promoted: promoted.promoted.map((p) => ({
+              id: p.id,
+              title: p.title,
+            })),
+          },
         });
+      }
+
+      const decision = decideAgendaTick({
+        agenda,
+        config: state.config,
+        now,
+        lastUserContactAt: state.affect.absence.last_user_contact_at,
+        force:
+          force === "plan" || force === "act"
+            ? force
+            : force === "idle"
+              ? "idle"
+              : undefined,
+      });
+
+      if (decision.action === "idle_user_present") {
+        mode = "idle";
+        reason = decision.reason;
+        patch = {
+          mode: "idle",
+          reason,
+          stream_events: [
+            {
+              type: "presence_blank",
+              payload: {
+                gap_ms: perception.gap_ms,
+                note: "user_present_pause_agenda",
+              },
+            },
+          ],
+        };
+      } else if (decision.action === "plan") {
+        mode = "plan";
+        reason = decision.reason;
+        const planLlm = selectLlm(state.config.model, "plan");
+        const unreadPaths = listUnreadPaths(index, state.threads);
+        const relation = await loadRelation(store);
+        const dialogueTail = await readDialogueTail(store, 16);
+        const lastSay = lastProactiveSayAt(dialogueTail, agenda);
+        const allowSay = canPlanSay({
+          config: state.config,
+          now,
+          lastProactiveSayAt: lastSay,
+        });
+        try {
+          const built = await buildAgendaPlan({
+            state,
+            index,
+            llm: planLlm,
+            now: nowIso,
+            relation,
+            previous: agenda,
+            unreadPaths,
+            canSeek: false,
+            canSay: allowSay,
+            dialogueSummary: summarizeDialogueForPlan(dialogueTail),
+            lastProactiveSayAt: lastSay,
+          });
+          agenda = built.agenda;
+          agendaDirty = true;
+          will = {
+            ...will,
+            session: agenda,
+            updated_at: nowIso,
+            last_reason: reason,
+          };
+          rawModel = built.raw;
+          artifact = {
+            planning_note: agenda.planning_note,
+            queue: agenda.queue.map((id) => agenda.intents[id]),
+          };
+          patch = {
+            mode: "plan",
+            reason: `plan:${reason}`,
+            stream_events: [
+              {
+                type: "thought_written",
+                payload: {
+                  kind: "planning_note",
+                  monologue_preview: (agenda.planning_note ?? "").slice(0, 240),
+                  intent_count: agenda.queue.length,
+                  can_say: allowSay,
+                },
+              },
+              {
+                type: "will_revised",
+                payload: {
+                  reason,
+                  focus: will.focus,
+                  queue_len: will.session.queue.length,
+                },
+              },
+            ],
+          };
+        } catch (err) {
+          reason = `plan_failed:${err instanceof Error ? err.message : String(err)}`;
+          mode = "idle";
+          patch = {
+            mode: "idle",
+            reason,
+            stream_events: [
+              {
+                type: "tick_failed",
+                payload: { phase: "plan", message: reason },
+              },
+            ],
+          };
+        }
+      } else if (decision.action === "act") {
+        const actLlm =
+          decision.intent.kind === "organize"
+            ? selectLlm(state.config.model, "organize")
+            : decision.intent.kind === "say"
+              ? selectLlm(state.config.model, "say")
+              : decision.intent.kind === "read" || decision.intent.kind === "think"
+                ? selectLlm(state.config.model, "tick")
+                : opts.llm;
+        // Prefer live for read/think/say act when key present (override fake tick for substance)
+        const livePrefer =
+          decision.intent.kind === "read" ||
+          decision.intent.kind === "think" ||
+          decision.intent.kind === "say"
+            ? selectLlm(
+                state.config.model,
+                decision.intent.kind === "say" ? "say" : "plan",
+              )
+            : actLlm;
+        const dialogueTail = await readDialogueTail(store, 16);
+        const relation = await loadRelation(store);
+        const acted = await actOnIntent({
+          intent: decision.intent,
+          agenda,
+          state,
+          index,
+          llm: livePrefer,
+          organizeLlm: selectLlm(state.config.model, "organize"),
+          tickId,
+          now: nowIso,
+          dialogueTail,
+          relation,
+          store,
+        });
+        mode = acted.mode;
+        reason = decision.reason;
+        patch = acted.patch;
+        readingPlan = acted.readingPlan;
+        rawModel = acted.rawModel;
+        artifact = acted.artifact;
+        agenda = acted.agenda;
+        agendaDirty = true;
+      } else {
+        mode = "idle";
+        reason = decision.reason;
+        patch = {
+          mode: "idle",
+          reason,
+          stream_events: [
+            {
+              type: "presence_blank",
+              payload: { gap_ms: perception.gap_ms, note: "agenda_idle" },
+            },
+          ],
+        };
+      }
+    } else {
+      // Legacy path (force idle/organize/contemplate or agenda disabled)
+      const chosen = chooseMode({
+        force:
+          force === "idle" || force === "organize" || force === "contemplate"
+            ? force
+            : undefined,
+        recentModes: perception.recentModes,
+        config: state.config,
+        hasReadableCorpus: perception.hasReadableCorpus,
+        activeThreadCount: perception.activeThreadCount,
+        rng,
+      });
+      mode = chosen.mode;
+      reason = chosen.reason;
+
+      if (mode === "contemplate") {
+        readingPlan = planReading({
+          index,
+          taste: state.taste,
+          threads: state.threads,
+          config: state.config,
+          contemplateOrdinal: perception.contemplateOrdinal,
+        });
+        if (
+          readingPlan.kind === "think" &&
+          readingPlan.items.length === 0 &&
+          !readingPlan.thread_id &&
+          Object.keys(state.threads).length === 0 &&
+          index.docs.length === 0
+        ) {
+          mode = "idle";
+          reason = "degraded_empty_corpus";
+          baseEvents.push({
+            ts: nowIso,
+            tick_id: tickId,
+            type: "warn_empty_corpus",
+            payload: {},
+          });
+        } else if (readingPlan.kind === "think") {
+          reason = `${reason}+${readingPlan.intent}`;
+        }
+      }
+
+      if (mode === "idle") {
+        patch = {
+          mode: "idle",
+          reason,
+          stream_events: [
+            {
+              type: "presence_blank",
+              payload: { gap_ms: perception.gap_ms, note: "idle" },
+            },
+          ],
+        };
+      } else if (mode === "organize") {
+        if (state.config.organize.use_llm) {
+          const organizeLlm = selectLlm(state.config.model, "organize");
+          const dialogueTail = await readDialogueTail(store, 10);
+          const relation = await loadRelation(store);
+          const built = await buildOrganizePatch({
+            state,
+            llm: organizeLlm,
+            tickId,
+            now: nowIso,
+            dialogueTail,
+            relation,
+          });
+          patch = built.patch;
+          rawModel = built.raw;
+          artifact = built.artifact;
+        } else {
+          const org = planOrganize({
+            threads: state.threads,
+            config: state.config,
+            now: nowIso,
+          });
+          patch = {
+            mode: "organize",
+            reason: org.reason || reason,
+            thread_ops: org.thread_ops,
+            stream_events: org.thread_ops.map((op) => ({
+              type: "thread_updated",
+              payload: { op },
+            })),
+          };
+        }
+      } else {
+        const built = await buildContemplatePatch({
+          state,
+          plan: readingPlan!,
+          llm: opts.llm,
+          tickId,
+          now: nowIso,
+        });
+        patch = built.patch;
+        rawModel = built.raw;
+        artifact = built.artifact;
       }
     }
 
@@ -121,47 +400,8 @@ export async function runTick(opts: {
       ts: nowIso,
       tick_id: tickId,
       type: "mode_chosen",
-      payload: { mode, reason },
+      payload: { mode, reason, agenda_enabled: agendaEnabled },
     });
-
-    if (mode === "idle") {
-      patch = {
-        mode: "idle",
-        reason,
-        stream_events: [
-          {
-            type: "presence_blank",
-            payload: { gap_ms: perception.gap_ms, note: "idle" },
-          },
-        ],
-      };
-    } else if (mode === "organize") {
-      const org = planOrganize({
-        threads: state.threads,
-        config: state.config,
-        now: nowIso,
-      });
-      patch = {
-        mode: "organize",
-        reason: org.reason || reason,
-        thread_ops: org.thread_ops,
-        stream_events: org.thread_ops.map((op) => ({
-          type: op.op === "dormant" ? "thread_updated" : "thread_updated",
-          payload: { op },
-        })),
-      };
-    } else {
-      const built = await buildContemplatePatch({
-        state,
-        plan: readingPlan!,
-        llm: opts.llm,
-        tickId,
-        now: nowIso,
-      });
-      patch = built.patch;
-      rawModel = built.raw;
-      artifact = built.artifact;
-    }
 
     const integrated = integrate(state, patch, nowIso);
     const nextMeta = {
@@ -212,6 +452,15 @@ export async function runTick(opts: {
       tickId,
     });
 
+    if (agendaDirty) {
+      will = {
+        ...will,
+        session: agenda,
+        updated_at: nowIso,
+      };
+      await saveWillAndAgenda(store, will);
+    }
+
     return {
       exitCode: 0,
       tickId,
@@ -238,6 +487,19 @@ export async function runTick(opts: {
       await store.releaseLock();
     }
   }
+}
+
+function listUnreadPaths(
+  index: Awaited<ReturnType<typeof buildCorpusIndex>>,
+  threads: import("../types.js").LifeState["threads"],
+): string[] {
+  const counts = collectChunkReadCounts(threads);
+  const unread = new Set<string>();
+  for (const d of index.docs) {
+    const anyUnread = d.chunks.some((c) => (counts.get(c.chunk_id) ?? 0) === 0);
+    if (anyUnread || d.chunks.length === 0) unread.add(d.path);
+  }
+  return [...unread];
 }
 
 /** Hash all files under corpus for DoD D8 helpers */
