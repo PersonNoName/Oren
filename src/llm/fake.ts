@@ -23,17 +23,32 @@ export class FakeLlmCompleter implements LlmCompleter {
 
   async complete(input: { system: string; user: string }): Promise<string> {
     this.calls.push(input);
-    // Will-turn (dialogue intent only — no user-facing lines)
-    if (/意志层|turn_moves/.test(input.system + input.user)) {
+    // Will-turn (dialogue intent only — no user-facing lines).
+    // Match 意志层 specifically — Express system also mentions turn_moves (frozen).
+    if (/意志层/.test(input.system + input.user)) {
       const said =
         input.user.split(/用户说[：:]/).pop()?.trim() ?? input.user.trim();
       const curt = said.length <= 2 || /^(嗯|哦|哦。|行|随便)$/.test(said);
+      const knock =
+        /\b(read|reading|thinking)\b|内心|在读|想什么|what are you/i.test(said);
       if (curt) {
         return JSON.stringify({
           turn_moves: ["curt", "acknowledge"],
           share_allowed: false,
           toward_user: { posture: "quiet", share_drive: "low", ask_drive: "low" },
           reason: "用户敷衍，简短回应",
+        });
+      }
+      if (knock) {
+        return JSON.stringify({
+          turn_moves: ["follow", "share", "acknowledge"],
+          share_allowed: true,
+          toward_user: {
+            posture: "engage",
+            share_drive: "high",
+            ask_drive: "low",
+          },
+          reason: "用户问起在读/内心，允许分享",
         });
       }
       return JSON.stringify({
