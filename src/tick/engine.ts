@@ -8,7 +8,6 @@ import {
   summarizeDialogueForPlan,
 } from "../agenda/act.js";
 import { promoteDueIntents } from "../agenda/deferred.js";
-import { buildAgendaPlan } from "../agenda/plan.js";
 import { agendaConfig, canPlanSay, decideAgendaTick } from "../agenda/schedule.js";
 import { buildCorpusIndex } from "../corpus/index.js";
 import { collectChunkReadCounts, planReading } from "../corpus/retrieve.js";
@@ -24,6 +23,7 @@ import {
   SchemaMismatchError,
 } from "../store/life-store.js";
 import type { ExitCode, Mode, StreamEvent, TickPatch } from "../types.js";
+import { reviseWill } from "../will/revise.js";
 import { loadWill, saveWillAndAgenda } from "../will/store.js";
 import { chooseMode } from "./choose-mode.js";
 import { buildContemplatePatch } from "./contemplate.js";
@@ -176,28 +176,23 @@ export async function runTick(opts: {
           lastProactiveSayAt: lastSay,
         });
         try {
-          const built = await buildAgendaPlan({
+          const revised = await reviseWill({
+            will,
             state,
             index,
             llm: planLlm,
             now: nowIso,
             relation,
-            previous: agenda,
             unreadPaths,
             canSeek: false,
             canSay: allowSay,
             dialogueSummary: summarizeDialogueForPlan(dialogueTail),
             lastProactiveSayAt: lastSay,
           });
-          agenda = built.agenda;
+          will = revised.will;
+          agenda = will.session;
           agendaDirty = true;
-          will = {
-            ...will,
-            session: agenda,
-            updated_at: nowIso,
-            last_reason: reason,
-          };
-          rawModel = built.raw;
+          rawModel = revised.raw;
           artifact = {
             planning_note: agenda.planning_note,
             queue: agenda.queue.map((id) => agenda.intents[id]),
