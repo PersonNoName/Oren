@@ -67,6 +67,19 @@ describe("buildDashboardSnapshot", () => {
       ask_drive: "high",
       queue_titles: ["读 alpha.md"],
     });
+    // Agenda snapshot is derived from will.session (not a separate loadAgenda).
+    expect(snap.agenda?.items).toEqual([
+      {
+        id: "i1",
+        kind: "read",
+        title: "读 alpha.md",
+        status: "pending",
+        blocked_reason: undefined,
+        thread_id: undefined,
+        due_start: undefined,
+        due_end: undefined,
+      },
+    ]);
   });
 });
 

@@ -4,7 +4,6 @@ import { listCorpusFiles, type CorpusFileInfo } from "../corpus/manage.js";
 import { readDialogueTail } from "../dialogue/store.js";
 import { loadRelation } from "../relation/cognition.js";
 import { describeAbsence } from "../relation/visit.js";
-import { loadAgenda } from "../agenda/store.js";
 import { LifeStore } from "../store/life-store.js";
 import type {
   Agenda,
@@ -15,6 +14,7 @@ import type {
   StreamEvent,
   Taste,
   Thread,
+  Will,
   WillPosture,
 } from "../types.js";
 import { loadWill } from "../will/store.js";
@@ -141,9 +141,10 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
     .map((e) => String(e.payload.mode ?? "?"))
     .slice(-20);
 
-  const agendaRaw = await loadAgenda(store);
-  const agenda = summarizeAgenda(agendaRaw);
-  const will = await summarizeWill(store);
+  // Prefer Will as primary; agenda is the session projection on will.
+  const willRaw = await loadWill(store, new Date().toISOString());
+  const agenda = summarizeAgenda(willRaw.session);
+  const will = summarizeWill(willRaw);
 
   return {
     generated_at: new Date().toISOString(),
@@ -174,24 +175,17 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
   };
 }
 
-async function summarizeWill(
-  store: LifeStore,
-): Promise<DashboardSnapshot["will"]> {
-  try {
-    const will = await loadWill(store, new Date().toISOString());
-    const queue_titles = will.session.queue
-      .map((id) => will.session.intents[id]?.title)
-      .filter((t): t is string => !!t);
-    return {
-      focus_summary: will.focus.summary,
-      posture: will.toward_user.posture,
-      share_drive: will.toward_user.share_drive,
-      ask_drive: will.toward_user.ask_drive,
-      queue_titles,
-    };
-  } catch {
-    return null;
-  }
+function summarizeWill(will: Will): DashboardSnapshot["will"] {
+  const queue_titles = will.session.queue
+    .map((id) => will.session.intents[id]?.title)
+    .filter((t): t is string => !!t);
+  return {
+    focus_summary: will.focus.summary,
+    posture: will.toward_user.posture,
+    share_drive: will.toward_user.share_drive,
+    ask_drive: will.toward_user.ask_drive,
+    queue_titles,
+  };
 }
 
 function summarizeAgenda(a: Agenda): DashboardSnapshot["agenda"] {
