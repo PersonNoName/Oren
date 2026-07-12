@@ -171,8 +171,12 @@ export function dashboardHtml(): string {
       <button type="button" id="btn-contemplate" title="强制沉思（绕过计划）">沉思</button>
       <button type="button" id="btn-organize" title="强制整理（绕过计划）">整理</button>
       <button type="button" id="btn-refresh">刷新</button>
+      <label class="meta" style="display:flex;align-items:center;gap:0.35rem;cursor:pointer" title="本页打开时每隔一段时间自动跑一轮 tick（规划/执行）。关掉浏览器后靠 macOS launchd 后台心跳。">
+        <input type="checkbox" id="auto-tick" /> 页面自动心跳
+      </label>
     </div>
   </header>
+  <div class="meta" id="presence-hint" style="padding:0.45rem 1.5rem 0;line-height:1.45"></div>
   <main>
     <section>
       <h2>内心线索</h2>
@@ -297,7 +301,18 @@ export function dashboardHtml(): string {
         ' · 编号 <b>' + esc(d.meta.oren_id.slice(0,8)) + '</b> · 心跳 <b>' + d.meta.tick_count +
         '</b> 次 · 上次 <b>' + esc(fmtTime(d.meta.last_tick_at) || '从未') +
         '</b> · 模型 <b>' + esc(d.meta.model) +
-        '</b> · 语料 <b>' + d.corpus_docs + '</b> 篇';
+        '</b> · 语料 <b>' + d.corpus_docs + '</b> 篇' +
+        ' · 时区 <b>上海</b>';
+
+      const hint = document.getElementById('presence-hint');
+      if (hint) {
+        const lastContact = d.relation_field || '';
+        hint.innerHTML =
+          '后台：macOS launchd <code>com.oren.tick</code> 约每 <b>30 分钟</b> 跑一轮（不打开本页也会跑；日志 /tmp/oren-tick.*.log）。' +
+          ' 本页勾选「页面自动心跳」时约每 <b>10 分钟</b> 再跑一轮。' +
+          ' 你刚聊过的约 <b>2 分钟</b> 内会暂停规划/执行（用户在场），避免抢话——只点「规划/执行」可强制。' +
+          (lastContact ? ' · 关系场：' + esc(String(lastContact).slice(0, 80)) : '');
+      }
 
       const will = d.will;
       const postureZh = { engage: '主动', soft_check: '轻探', quiet: '安静', care: '关心' };
@@ -557,16 +572,46 @@ export function dashboardHtml(): string {
         '<span class="empty">暂无模式记录</span>';
 
       document.getElementById('footer').textContent =
-        '仅本机访问 · 生成于 ' + fmtTime(d.generated_at) + ' · 数据目录 ' + d.home;
+        '仅本机访问 · 生成于 ' + fmtTime(d.generated_at) + '（上海时区） · 数据目录 ' + d.home;
     }
 
+    /** ISO timestamps are UTC; display Asia/Shanghai (product TZ). Never slice raw ISO. */
     function fmtTime(s) {
       if (!s) return '';
-      return String(s).replace('T', ' ').slice(0, 19);
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) {
+        return String(s).replace('T', ' ').replace(/Z$/, '').slice(0, 19);
+      }
+      try {
+        return new Intl.DateTimeFormat('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).format(d);
+      } catch {
+        return d.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      }
     }
     function fmtClock(s) {
       if (!s) return '';
-      return String(s).replace('T', ' ').slice(11, 19);
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) return String(s).slice(11, 19);
+      try {
+        return new Intl.DateTimeFormat('zh-CN', {
+          timeZone: 'Asia/Shanghai',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        }).format(d);
+      } catch {
+        return fmtTime(s);
+      }
     }
 
     function esc(s) {
@@ -729,6 +774,20 @@ export function dashboardHtml(): string {
     document.getElementById('say-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); say(); }
     });
+
+    // Page-open auto heartbeat (not a replacement for launchd when browser closed)
+    const AUTO_MS = 10 * 60 * 1000;
+    const autoEl = document.getElementById('auto-tick');
+    try {
+      autoEl.checked = localStorage.getItem('oren_auto_tick') !== '0';
+    } catch { autoEl.checked = true; }
+    autoEl.onchange = () => {
+      try { localStorage.setItem('oren_auto_tick', autoEl.checked ? '1' : '0'); } catch {}
+    };
+    setInterval(() => {
+      if (!autoEl.checked || busy) return;
+      tickOnce().catch(() => {});
+    }, AUTO_MS);
 
     load().catch(err => { document.getElementById('header-meta').textContent = String(err); });
     setInterval(() => { if (!busy) load().catch(() => {}); }, 15000);
