@@ -27,7 +27,7 @@ export function perceive(input: {
   for (const ev of input.streamTail) {
     if (ev.type === "mode_chosen" && typeof ev.payload.mode === "string") {
       const m = ev.payload.mode;
-      if (m === "idle" || m === "organize" || m === "contemplate") {
+      if (m === "idle" || m === "organize" || m === "contemplate" || m === "plan") {
         recentModes.push(m);
       }
     }

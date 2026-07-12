@@ -22,7 +22,9 @@ export interface ServeOptions {
 export function startDashboardServer(opts: ServeOptions): http.Server {
   const port = opts.port ?? 8787;
   const host = opts.host ?? "127.0.0.1";
-  loadDotEnv([opts.home]);
+  // Prefer life-home .env so shell / old process exports cannot pin a dead key.
+  reloadEnv(opts.home);
+  logAuthFingerprint(opts.home);
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -33,33 +35,58 @@ export function startDashboardServer(opts: ServeOptions): http.Server {
         return json(res, 200, await buildDashboardSnapshot(opts.home));
       }
 
+      if (method === "GET" && url.pathname === "/api/auth") {
+        reloadEnv(opts.home);
+        return json(res, 200, authStatus(opts.home));
+      }
+
       if (method === "POST" && url.pathname === "/api/say") {
+        // Re-read .env on every send so key rotation works without restarting serve.
+        reloadEnv(opts.home);
         const body = await readJsonBody<{ text?: string }>(req);
         const text = (body.text ?? "").trim();
         if (!text) return json(res, 400, { error: "text is required" });
         const store = new LifeStore(opts.home);
         const state = await store.load();
         const model = process.env.OREN_MODEL?.trim() || state.config.model;
-        const result = await sayToOren({
-          store,
-          text,
-          llm: selectLlm(model, "say"),
-        });
-        return json(res, 200, {
-          ok: true,
-          user: result.userTurn,
-          oren: result.orenTurn,
-          share: result.artifact.share,
-        });
+        try {
+          const result = await sayToOren({
+            store,
+            text,
+            llm: selectLlm(model, "say"),
+          });
+          return json(res, 200, {
+            ok: true,
+            user: result.userTurn,
+            oren: result.orenTurn,
+            oren_turns: result.orenTurns,
+            stance: result.artifact.stance,
+            share: result.artifact.share,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const auth = authStatus(opts.home);
+          return json(res, 500, {
+            error: message,
+            hint:
+              /401|authentication|invalid_request_error|api key/i.test(message)
+                ? `当前进程使用的 key 末四位是 ${auth.keyLast4 ?? "无"}（来自 ${auth.keySource}）。若与 .env 不一致，请改 life-home 的 .env 后直接重试发送（无需重启）；仍失败则杀掉旧 serve 进程再 npm run start。`
+                : undefined,
+            auth,
+          });
+        }
       }
 
       if (method === "POST" && url.pathname === "/api/tick") {
+        reloadEnv(opts.home);
         const body = await readJsonBody<{ forceMode?: string }>(req);
-        let forceMode: Mode | undefined;
+        let forceMode: Mode | "act" | undefined;
         if (
           body.forceMode === "idle" ||
           body.forceMode === "organize" ||
-          body.forceMode === "contemplate"
+          body.forceMode === "contemplate" ||
+          body.forceMode === "plan" ||
+          body.forceMode === "act"
         ) {
           forceMode = body.forceMode;
         }
@@ -137,6 +164,44 @@ function json(res: http.ServerResponse, status: number, body: unknown): void {
     "cache-control": "no-store",
   });
   res.end(JSON.stringify(body));
+}
+
+function reloadEnv(home: string): void {
+  loadDotEnv([home]);
+}
+
+function keyLast4(key: string | undefined): string | null {
+  if (!key) return null;
+  return key.length <= 4 ? key : key.slice(-4);
+}
+
+function authStatus(home: string): {
+  home: string;
+  model: string | null;
+  sayLlm: string | null;
+  keyPresent: boolean;
+  keyLast4: string | null;
+  keySource: string;
+} {
+  const key = process.env.DEEPSEEK_API_KEY?.trim() || "";
+  return {
+    home,
+    model: process.env.OREN_MODEL?.trim() || null,
+    sayLlm: process.env.OREN_SAY_LLM?.trim() || process.env.OREN_LLM?.trim() || null,
+    keyPresent: !!key,
+    keyLast4: keyLast4(key),
+    keySource: key
+      ? `DEEPSEEK_API_KEY（末四位 ${keyLast4(key)}；优先 life-home .env）`
+      : "未配置 DEEPSEEK_API_KEY",
+  };
+}
+
+function logAuthFingerprint(home: string): void {
+  const a = authStatus(home);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[oren serve] home=${a.home} model=${a.model ?? "(default)"} say_llm=${a.sayLlm ?? "(auto)"} key=${a.keyPresent ? `****${a.keyLast4}` : "(missing)"}`,
+  );
 }
 
 function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {

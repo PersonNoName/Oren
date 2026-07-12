@@ -18,6 +18,7 @@ export function integrate(state: LifeState, patch: TickPatch, now: string): Inte
     threads[id] = {
       ...t,
       sources: [...t.sources],
+      quotes: t.quotes ? t.quotes.map((q) => ({ ...q })) : t.quotes,
       open_questions: [...t.open_questions],
       reading_log: [...t.reading_log],
       contemplation_log: [...t.contemplation_log],
@@ -34,7 +35,8 @@ export function integrate(state: LifeState, patch: TickPatch, now: string): Inte
   };
   let tasteNudges = 0;
 
-  if (patch.mode === "idle") {
+  if (patch.mode === "idle" || patch.mode === "plan") {
+    // Gentle decay while resting or writing a plan (no deep engagement).
     for (const [id, t] of Object.entries(threads)) {
       if (t.status !== "active") continue;
       const next = Math.max(0, Math.round((t.salience - IDLE_SALIENCE_DECAY) * 1000) / 1000);
