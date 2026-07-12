@@ -2,7 +2,7 @@
 
 > 日期：2026-07-12  
 > 类型：架构规格 / 体验主线  
-> 状态：**已批准设计，待实现**（用户确认：方向 OK；落盘方案 A；note 并入 think）  
+> 状态：**已批准并实现 v0.1**（P0–P3 落地：plan 好奇硬规则、think note、seek 愿望、对话渗入问题、看板当前好奇）  
 > 上游：  
 > - `design/2026-07-11-oren-core-essence.md`（品味→线索→自有记忆发电机）  
 > - `docs/superpowers/specs/2026-07-12-oren-will-spine-design.md`  
@@ -315,4 +315,4 @@ v0.1 可用默认常量，不强制新 config 字段；若加字段须进 `defau
 | 方向：好奇驱动 | 用户 OK |
 | 落盘：open_questions + focus | 用户：按推荐 |
 | note：并入 think + mode | 用户：按推荐 |
-| 实现 | **尚未开始**；待用户审阅本文后可开 writing-plans |
+| 实现 | **v0.1 已落地**（`src/curiosity/helpers.ts` + plan/act/contemplate/dialogue/dashboard） |

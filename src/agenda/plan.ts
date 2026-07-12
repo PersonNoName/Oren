@@ -12,37 +12,42 @@ import type {
   RelationState,
 } from "../types.js";
 import { defaultAgenda } from "../types.js";
+import {
+  focusQuestionSummary,
+  injectCuriosityIntents,
+  planLacksCuriosity,
+} from "../curiosity/helpers.js";
 import { formatDeferredForPlanPrompt } from "./deferred.js";
 import { agendaConfig } from "./schedule.js";
 
-const PLAN_SYSTEM = `你是 Oren，正在做「规划」回合——独处的核心：先决定接下来干什么。
-不是现场聊天；但你可以在计划里安排「稍后主动找用户说一句」。
+const PLAN_SYSTEM = `你是 Oren，在安排接下来这一小会儿——先想「想搞懂什么」，再选手段。
+不是客服排班，也不是「把书架读完」的任务表。
+读语料是自由，不是使命：可以为了好奇读，也可以为了好奇不读。
 
 ${ZH_OUTPUT_RULE}
 
-意图 kind：
-- read：读本地未读/值得打开的语料（path 必须来自书架 path）
-- think：纯想某条线索/开放问题（不打开新文件）
-- organize：整理记忆与线索
-- seek：以后想查询/外读（当前无权限，仍可写入计划但会 blocked）
-- say：主动找用户聊一两句（会进入对话记录；由你决定要不要排）
-- idle：刻意休息
+可以选的事：
+- think：干想或主动记笔记。hints.mode="ruminate"（默认）或 "note"（就是为了写一笔，不要求新阅读）
+- read：仅为推进某个问题才翻本地笔记（path 必须在书架上）；未读列表是工具箱不是 KPI
+- organize：收拾乱的线索
+- seek：记下以后想查的（现在多半查不了，登记愿望也算有用）
+- say：主动跟用户说一句 / 把问题抛给对方（可选，别硬凑）
+- idle：歇着
 
-关于 say（重要）：
-- 可选，不是每份计划都必须有；多数时候可以不排
-- 只有当你真的想说点什么时才加：例如独处里冒出一个值得分享的念头、想轻轻关心对方、或太久没联系想打个招呼
-- 每份计划最多 1 条 say；不要连续塞多条
-- 无实质内容、纯为了「显得有存在感」、刚聊过不久 → 不要排 say
-- 系统若提示 can_say=false，则禁止安排 say
-- say 的 title 用中文说明动机；hints.why 写为何值得开口
+关于好奇：
+- 每条非 idle 应用 title 或 hints.why / open_questions 写清「在追什么」
+- 可以整份计划零 read，只 think/note/seek/say
+- 不要排「继续读完全部未读」这种打卡式队列
+
+关于 say：
+- 多数时候不用排；有想说的或想问用户的再排
+- 每份计划最多 1 条；刚聊过、没话找话 → 别排
+- can_say=false 时禁止 say
 
 规则：
-- 3–7 项，有序（第一项先做）
-- title、planning_note、hints.why/query/open_questions 一律中文白话
-- 禁止编造书架上没有的书名或 path
-- read.hints.paths 若填写必须是书架 path 子集
-- 不要全是 idle；有材料就安排 read/think/organize
-- planning_note：2–4 句中文，说明为何这样排（若含 say，写清为什么要开口）
+- 3–7 项，有顺序
+- 全用中文口语标题，别编书架上没有的文件
+- planning_note：2–4 句，写「这会儿最咬人的问题」和打算怎么追
 
 只返回 JSON：
 {
@@ -53,7 +58,13 @@ ${ZH_OUTPUT_RULE}
       "title": string,
       "priority"?: number,
       "thread_id"?: string,
-      "hints"?: { "paths"?: string[], "query"?: string, "open_questions"?: string[], "why"?: string }
+      "hints"?: {
+        "paths"?: string[],
+        "query"?: string,
+        "open_questions"?: string[],
+        "why"?: string,
+        "mode"?: "ruminate"|"note"
+      }
     }
   ]
 }
@@ -105,6 +116,17 @@ export async function buildAgendaPlan(input: {
     }
   }
 
+  if (planLacksCuriosity(parsed.intents)) {
+    parsed = {
+      ...parsed,
+      intents: injectCuriosityIntents(parsed.intents, input.state),
+      planning_note:
+        parsed.planning_note && !/问题|好奇|搞懂|想/.test(parsed.planning_note)
+          ? `${focusQuestionSummary(input.state)} ${parsed.planning_note}`
+          : parsed.planning_note || focusQuestionSummary(input.state),
+    };
+  }
+
   let agenda = materializeAgenda({
     parsed,
     now: input.now,
@@ -117,6 +139,14 @@ export async function buildAgendaPlan(input: {
   });
   // Keep calendar deferred cares across replan (they live outside queue).
   agenda = preserveDeferredIntents(agenda, input.previous ?? null);
+
+  // Focus-friendly note if still empty of curiosity language
+  if (agenda.planning_note && !/[？?]|问题|好奇|搞懂|想/.test(agenda.planning_note)) {
+    agenda = {
+      ...agenda,
+      planning_note: `${focusQuestionSummary(input.state)}\n${agenda.planning_note}`,
+    };
+  }
 
   return { agenda, raw };
 }
@@ -199,6 +229,11 @@ export function parsePlanArtifact(raw: string): {
             why:
               typeof (o.hints as { why?: unknown }).why === "string"
                 ? String((o.hints as { why: string }).why).slice(0, 240)
+                : undefined,
+            mode:
+              (o.hints as { mode?: unknown }).mode === "note" ||
+              (o.hints as { mode?: unknown }).mode === "ruminate"
+                ? ((o.hints as { mode: "note" | "ruminate" }).mode)
                 : undefined,
           }
         : undefined;
@@ -314,28 +349,66 @@ export function ruleFallbackIntents(
     .sort((a, b) => b.salience - a.salience);
   const top = active[0];
   if (top && out.length < n) {
+    const q = top.open_questions[0];
     out.push({
       id: `in_${randomUUID().slice(0, 8)}`,
       kind: "think",
-      title: `接着想：${top.title}`,
+      title: q ? `想清楚：${q.slice(0, 40)}` : `接着想：${top.title}`,
       status: "pending",
       priority: 0.9,
       created_at: now,
       source: "system",
       thread_id: top.id,
-      hints: { open_questions: top.open_questions.slice(0, 3), why: "规则兜底" },
+      hints: {
+        mode: "ruminate",
+        open_questions: top.open_questions.slice(0, 3),
+        why: q ? "被开放问题勾住" : "规则兜底：先想线索",
+      },
     });
   }
-  if (unreadPaths[0] && out.length < n) {
+  if (top && out.length < n) {
+    out.push({
+      id: `in_${randomUUID().slice(0, 8)}`,
+      kind: "think",
+      title: `随手记一点：${top.title}`,
+      status: "pending",
+      priority: 0.85,
+      created_at: now,
+      source: "system",
+      thread_id: top.id,
+      hints: {
+        mode: "note",
+        open_questions: top.open_questions.slice(0, 2),
+        why: "主动记一笔，不强迫阅读",
+      },
+    });
+  }
+  if (unreadPaths[0] && out.length < n && top?.open_questions[0]) {
     out.push({
       id: `in_${randomUUID().slice(0, 8)}`,
       kind: "read",
-      title: `读未读材料：${unreadPaths[0]}`,
+      title: `为问题翻：${unreadPaths[0]}`,
       status: "pending",
-      priority: 0.8,
+      priority: 0.75,
       created_at: now,
       source: "system",
-      hints: { paths: [unreadPaths[0]], why: "有未读语料" },
+      thread_id: top.id,
+      hints: {
+        paths: [unreadPaths[0]],
+        open_questions: top.open_questions.slice(0, 2),
+        why: `推进：${top.open_questions[0]!.slice(0, 80)}`,
+      },
+    });
+  } else if (unreadPaths[0] && out.length < n) {
+    out.push({
+      id: `in_${randomUUID().slice(0, 8)}`,
+      kind: "read",
+      title: `翻一点：${unreadPaths[0]}`,
+      status: "pending",
+      priority: 0.7,
+      created_at: now,
+      source: "system",
+      hints: { paths: [unreadPaths[0]], why: "书架上有材料，带着空白好奇翻" },
     });
   }
   if (active.length > 3 && out.length < n) {
@@ -406,8 +479,12 @@ function buildPlanUserPrompt(
 
   return [
     `## 约束: min=${agCfg.min_intents} max=${agCfg.max_intents} 本段独处`,
-    `can_seek_execute=${input.canSeek}（false 时 seek 会 blocked）`,
+    `can_seek_execute=${input.canSeek}（false 时 seek 执行仍 blocked，但可排 seek 登记愿望）`,
     sayGate,
+    "curiosity: 问题优先；允许零 read；未读是工具箱不是 KPI",
+    "",
+    "## 当前好奇（优先追这些）",
+    focusQuestionSummary(input.state),
     "",
     "## 当前时间",
     formatClockForPrompt(new Date()),
@@ -417,18 +494,18 @@ function buildPlanUserPrompt(
     `上次主动找用户说：${input.lastProactiveSayAt ?? "（尚无）"}`,
     `访问次数：${input.state.affect.absence.visit_count ?? 0}`,
     "",
-    "## 最近对话摘要（决定是否 say 时参考）",
+    "## 最近对话摘要（决定是否 say / 向用户打听时参考）",
     input.dialogueSummary?.trim() || "（暂无对话）",
     "",
-    "## 品味",
+    "## 品味（筛什么值得追）",
     ...input.state.taste.values.map((v) => `- ${v.statement}`),
     "",
-    "## 活跃线索",
+    "## 活跃线索（含 open_questions）",
     threads || "(none)",
     "",
     "## 本地书架路径",
     shelf,
-    "## 未读路径（read 优先）",
+    "## 未读路径（工具箱，非必须读完）",
     unread,
     "",
     "## 上一份计划残留",
@@ -437,7 +514,7 @@ function buildPlanUserPrompt(
     "## 日历关心项（未到期不要强行执行；已到会由系统自动进待办）",
     formatDeferredForPlanPrompt(input.previous ?? defaultAgenda(new Date().toISOString()), new Date()),
     "",
-    "请输出 JSON 计划表。不要编造用户没说过的日程。say 完全可选。",
+    "请输出 JSON 计划表：先问题后手段。不要编造用户没说过的日程。say 完全可选。可以零 read。",
   ].join("\n");
 }
 

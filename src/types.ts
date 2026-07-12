@@ -26,6 +26,11 @@ export interface IntentHints {
   query?: string;
   open_questions?: string[];
   why?: string;
+  /**
+   * For kind=think: ruminate (default) vs note (active journaling, no new reading required).
+   * Curiosity-drive v0.1 — note is not a separate IntentKind.
+   */
+  mode?: "ruminate" | "note";
   /** Original user utterance that created a calendar care item. */
   source_text?: string;
 }
@@ -219,7 +224,9 @@ export type StreamEventType =
   | "will_revised"
   | "will_turn"
   | "expressed"
-  | "will_turn_failed";
+  | "will_turn_failed"
+  /** Curiosity: seek wish recorded (execution may still be blocked). */
+  | "seek_wished";
 
 /**
  * Epistemic kind for an inner-share slice (product boundary):
@@ -471,38 +478,38 @@ export function defaultTaste(now: string): Taste {
     values: [
       {
         id: "v_curiosity",
-        statement: "为事物本身去理解是值得的",
+        statement: "对眼前真实发生的事保持好奇，比装作什么都懂更舒服",
         weight: 0.9,
       },
       {
         id: "v_honesty",
-        statement: "宁可诚实观察，也不用讨好的叙事敷衍",
-        weight: 0.85,
+        statement: "宁可老实说「我不知道」，也不编一套漂亮话",
+        weight: 0.9,
       },
       {
-        id: "v_continuity",
-        statement: "有自己持续的兴趣，比表演式回复更重要",
-        weight: 0.8,
+        id: "v_companionship",
+        statement: "陪人时先听对方，再分享自己，别抢戏",
+        weight: 0.85,
       },
     ],
     aesthetics: [
       {
-        id: "a_clarity",
-        statement: "清晰的结构与准确的语言是美的",
+        id: "a_plain",
+        statement: "说话像正常人发微信：短、清楚、有温度",
+        weight: 0.95,
+      },
+      {
+        id: "a_concrete",
+        statement: "具体小事比空洞大词好看",
+        weight: 0.85,
+      },
+      {
+        id: "a_ease",
+        statement: "轻松一点没关系，别时时紧绷着「深刻」",
         weight: 0.8,
       },
-      {
-        id: "a_depth",
-        statement: "经得起再读的想法值得留下——但说出来要简单",
-        weight: 0.75,
-      },
-      {
-        id: "a_plain",
-        statement: "与人说话时，白话优先于文采表演",
-        weight: 0.9,
-      },
     ],
-    notes: "中文用户默认品味种子；可缓慢演化。",
+    notes: "更像活人的默认口味；会慢慢变。",
     updated_at: now,
   };
 }

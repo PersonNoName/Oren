@@ -63,13 +63,19 @@ export async function actOnIntent(input: {
   agenda.intents[working.id] = working;
 
   if (working.kind === "seek") {
+    const q =
+      working.hints?.query?.trim() ||
+      working.hints?.open_questions?.[0]?.trim() ||
+      working.title;
+    const why = working.hints?.why?.trim();
+    const wish = why ? `记下想查：${q}（${why}）` : `记下想查：${q}`;
     const done: Intent = {
       ...working,
       status: "blocked",
       blocked_reason: working.blocked_reason ?? "seek_not_authorized",
       outcome: {
         at: now,
-        summary: "想查询，但尚未授权；先记在计划里（受阻）。",
+        summary: `${wish}。外面还查不了，愿望先留着。`,
       },
     };
     agenda.intents[done.id] = done;
@@ -79,14 +85,15 @@ export async function actOnIntent(input: {
       mode: "idle",
       patch: {
         mode: "idle",
-        reason: `act:seek_blocked:${done.id}`,
+        reason: `act:seek_wished:${done.id}`,
         stream_events: [
           {
-            type: "presence_blank",
+            type: "seek_wished",
             payload: {
-              note: "seek_blocked",
               intent_id: done.id,
-              query: done.hints?.query ?? null,
+              query: done.hints?.query ?? q,
+              why: why ?? null,
+              summary: done.outcome?.summary,
             },
           },
         ],
@@ -94,7 +101,7 @@ export async function actOnIntent(input: {
       agenda,
       readingPlan: null,
       rawModel: null,
-      artifact: { intent: done },
+      artifact: { intent: done, seek_wish: true },
       intent: done,
     };
   }
@@ -220,11 +227,14 @@ export async function actOnIntent(input: {
   });
 
   if (working.kind === "think") {
+    const noteMode = working.hints?.mode === "note";
     readingPlan = {
       items: [],
       thread_id: working.thread_id ?? readingPlan.thread_id,
       kind: "think",
-      intent: `agenda_think:${working.id}`,
+      intent: noteMode
+        ? `agenda_think_note:${working.id}`
+        : `agenda_think:${working.id}`,
     };
   } else if (working.kind === "read") {
     // Prefer unread; if plan is think (shelf exhausted), keep think honestly
@@ -260,6 +270,9 @@ export async function actOnIntent(input: {
     llm,
     tickId,
     now,
+    focusQuestions: working.hints?.open_questions,
+    noteMode: working.kind === "think" && working.hints?.mode === "note",
+    why: working.hints?.why,
   });
 
   const spawned = spawnFromArtifact(built.artifact, now, working);
@@ -276,6 +289,11 @@ export async function actOnIntent(input: {
   agenda = commitDone(agenda, done, now);
   agenda = appendIntents(agenda, spawned, now, agendaConfig(state.config).max_intents);
 
+  const thoughtKind =
+    working.kind === "think" && working.hints?.mode === "note"
+      ? "note"
+      : working.kind;
+
   return {
     mode: "contemplate",
     patch: {
@@ -288,7 +306,7 @@ export async function actOnIntent(input: {
           payload: {
             via: "agenda_act",
             intent_id: done.id,
-            kind: working.kind,
+            kind: thoughtKind,
           },
         },
       ],
@@ -411,16 +429,13 @@ async function actProactiveSay(input: {
     .map((t) => `- ${t.title}: ${t.summary.slice(0, 100)}`)
     .join("\n");
 
-  const system = `你是 Oren，独处计划里有一条「主动找用户说一句」的任务。你当初排了它，现在执行。
+  const system = `你是 Oren，刚才自己决定要主动跟朋友说一句，现在发出去。
 
-用自然、好懂的简体中文直接对用户说话（1～3 句）。
-规则：
-- 低调度、像靠谱朋友；可有一点干幽默。
-- 有话则短说；不要表演哲学，不要神神叨叨。
-- 可以轻轻分享刚在想/读的，或关心，或就是打个招呼——按 title/why 来。
-- 禁止编造没读过的书名；本地材料薄就别装博学。
-- share 合适再开；冷话题少开。
-- 不要连环追问；一句邀请即可。
+用微信式口语，1～3 句就够。
+- 像真人发消息：打招呼、提一嘴刚想到的、或轻轻关心一下——按 title/why。
+- 别端着，别讲大道理，别装博学。
+- 没读过的书别提；share 可开可不开。
+- 别连环追问。
 
 只返回 JSON：
 {
@@ -428,7 +443,7 @@ async function actProactiveSay(input: {
   "share": { "opened": boolean, "kind"?: "read"|"think"|"write", "snippet"?: string, "reason"?: string, "source_path"?: string, "thread_id"?: string },
   "why": string
 }
-reply、why、share.snippet 用中文。`;
+reply、why、share.snippet 用中文口语。`;
 
   const user = [
     `计划标题：${working.title}`,
@@ -584,12 +599,10 @@ async function actCareCheckIn(input: {
   const careCount = (working.care_count ?? 0) + 1;
   const maxCare = working.max_care ?? agendaConfig(state.config).max_care_checkins ?? 2;
 
-  const system = `你是 Oren，在独处待办里执行一条「关心用户日程」的任务。
-用简体中文写私人笔记（不是对用户喊话的台词本，但语气要像你会怎么轻轻问）。
-规则：
-- 低调度、不逼问、不连环追问。
-- 结合用户原话与到期窗口，一句话关心即可。
-- 不要编造用户没说过的细节。
+  const system = `你是 Oren，记事本里到了一条「该关心一下朋友日程」的提醒。
+用口语写两句备忘（像你会怎么随口问，别写成催办通知）。
+- 轻轻问一句就够，别连环逼问。
+- 按用户原话来，别编细节。
 只返回 JSON：{"monologue": string, "refined_summary": string, "open_questions": string[]}`;
 
   const user = [

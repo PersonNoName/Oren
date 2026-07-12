@@ -71,6 +71,8 @@ export interface DashboardSnapshot {
       thread_id?: string;
       due_start?: string;
       due_end?: string;
+      /** think + mode=note → display as 笔记 */
+      mode?: string;
     }[];
     deferred: {
       id: string;
@@ -81,11 +83,46 @@ export interface DashboardSnapshot {
     }[];
   } | null;
   will: {
+    updated_at: string;
     focus_summary: string;
+    focus_thread_id?: string;
+    /** Top open questions across active threads (curiosity strip). */
+    curiosity: { thread_id: string; title: string; question: string }[];
+    solitude: { mode_bias: string; note?: string };
     posture: WillPosture;
     share_drive: DriveLevel;
     ask_drive: DriveLevel;
+    last_reason?: string;
+    open_moves: {
+      id: string;
+      kind: string;
+      title: string;
+      status: string;
+    }[];
     queue_titles: string[];
+    session: {
+      id: string;
+      status: string;
+      planning_note?: string;
+      actions_since_plan: number;
+      queue_len: number;
+    };
+    /** Recent will-related stream events for debugging dialogue / plan. */
+    recent_events: {
+      ts: string;
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    /** Pretty-print friendly raw subset (no full session intents dump). */
+    debug: {
+      focus: Will["focus"];
+      solitude: Will["solitude"];
+      toward_user: Will["toward_user"];
+      last_reason?: string;
+      open_moves: Will["open_moves"];
+      session_queue: string[];
+      session_planning_note?: string;
+    };
   } | null;
   product: {
     name: string;
@@ -144,7 +181,7 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
   // Prefer Will as primary; agenda is the session projection on will.
   const willRaw = await loadWill(store, new Date().toISOString());
   const agenda = summarizeAgenda(willRaw.session);
-  const will = summarizeWill(willRaw);
+  const will = summarizeWill(willRaw, stream, state.threads);
 
   return {
     generated_at: new Date().toISOString(),
@@ -175,16 +212,79 @@ export async function buildDashboardSnapshot(home: string): Promise<DashboardSna
   };
 }
 
-function summarizeWill(will: Will): DashboardSnapshot["will"] {
+function summarizeWill(
+  will: Will,
+  stream: StreamEvent[],
+  threads: Record<string, Thread>,
+): DashboardSnapshot["will"] {
   const queue_titles = will.session.queue
     .map((id) => will.session.intents[id]?.title)
     .filter((t): t is string => !!t);
+  const recent_events = stream
+    .filter((e) =>
+      [
+        "will_revised",
+        "will_turn",
+        "will_turn_failed",
+        "expressed",
+        "seek_wished",
+      ].includes(String(e.type)),
+    )
+    .slice(-12)
+    .map((e) => ({
+      ts: e.ts,
+      type: String(e.type),
+      payload: (e.payload ?? {}) as Record<string, unknown>,
+    }))
+    .reverse();
+  const curiosity: { thread_id: string; title: string; question: string }[] = [];
+  for (const t of Object.values(threads)
+    .filter((x) => x.status === "active")
+    .sort((a, b) => b.salience - a.salience)) {
+    for (const q of t.open_questions.slice(0, 2)) {
+      if (!q.trim()) continue;
+      curiosity.push({ thread_id: t.id, title: t.title, question: q.trim() });
+      if (curiosity.length >= 3) break;
+    }
+    if (curiosity.length >= 3) break;
+  }
   return {
+    updated_at: will.updated_at,
     focus_summary: will.focus.summary,
+    focus_thread_id: will.focus.thread_id,
+    curiosity,
+    solitude: {
+      mode_bias: will.solitude.mode_bias,
+      note: will.solitude.note,
+    },
     posture: will.toward_user.posture,
     share_drive: will.toward_user.share_drive,
     ask_drive: will.toward_user.ask_drive,
+    last_reason: will.last_reason,
+    open_moves: (will.open_moves ?? []).slice(0, 12).map((m) => ({
+      id: m.id,
+      kind: m.kind,
+      title: m.title,
+      status: m.status,
+    })),
     queue_titles,
+    session: {
+      id: will.session.id,
+      status: will.session.status,
+      planning_note: will.session.planning_note,
+      actions_since_plan: will.session.actions_since_plan,
+      queue_len: will.session.queue.length,
+    },
+    recent_events,
+    debug: {
+      focus: will.focus,
+      solitude: will.solitude,
+      toward_user: will.toward_user,
+      last_reason: will.last_reason,
+      open_moves: will.open_moves ?? [],
+      session_queue: will.session.queue,
+      session_planning_note: will.session.planning_note,
+    },
   };
 }
 
@@ -201,6 +301,7 @@ function summarizeAgenda(a: Agenda): DashboardSnapshot["agenda"] {
       thread_id: i.thread_id,
       due_start: i.due_start,
       due_end: i.due_end,
+      mode: i.hints?.mode,
     }));
   const deferred = Object.values(a.intents)
     .filter((i) => i.status === "deferred")

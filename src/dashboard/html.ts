@@ -135,6 +135,26 @@ export function dashboardHtml(): string {
     .status-line { min-height: 1.2em; font-size: 0.8rem; color: var(--muted); }
     .status-line.err { color: var(--danger); }
     .empty { color: var(--muted); font-size: 0.9rem; }
+    .will-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem 1rem; margin-top: 0.45rem;
+    }
+    @media (max-width: 700px) { .will-grid { grid-template-columns: 1fr; } }
+    .will-grid .k { color: var(--muted); font-size: 0.75rem; }
+    .will-grid .v { font-size: 0.9rem; margin-top: 0.15rem; word-break: break-word; }
+    .will-pre {
+      margin: 0.4rem 0 0; padding: 0.65rem 0.75rem; max-height: 280px; overflow: auto;
+      background: #0d1118; border: 1px solid var(--border); border-radius: 8px;
+      font-size: 0.72rem; line-height: 1.4; color: #b8c4d6; white-space: pre-wrap;
+    }
+    .will-event {
+      font-size: 0.8rem; padding: 0.35rem 0; border-bottom: 1px solid #1f2530;
+    }
+    .will-event .t { color: var(--muted); margin-right: 0.4rem; }
+    .will-event .type { color: var(--warm); }
+    #will-last-turn {
+      padding: 0.5rem 0.65rem; border-radius: 8px; border: 1px dashed #3a4a66;
+      background: #121a28; color: var(--accent);
+    }
     footer { padding: 0 1.5rem 1.5rem; color: var(--muted); font-size: 0.8rem; }
   </style>
 </head>
@@ -158,9 +178,14 @@ export function dashboardHtml(): string {
       <h2>内心线索</h2>
       <div id="threads" class="scroll empty">—</div>
     </section>
-    <section>
-      <h2>意志 · Will</h2>
+    <section class="span2">
+      <h2>意志 · Will <span class="meta" style="font-weight:400">调试</span></h2>
       <div id="will" class="empty">—</div>
+      <div id="will-last-turn" class="sum" style="margin-top:0.5rem;display:none"></div>
+      <details id="will-debug-wrap" style="margin-top:0.55rem">
+        <summary class="meta" style="cursor:pointer">展开 JSON / 最近 will 事件</summary>
+        <pre id="will-debug" class="will-pre">—</pre>
+      </details>
     </section>
     <section>
       <h2>独自计划</h2>
@@ -247,6 +272,11 @@ export function dashboardHtml(): string {
       user_message: '用户发言',
       oren_reply: 'Oren 回复',
       inner_share: '内心分享',
+      will_revised: '意志修订',
+      will_turn: '对话意志回合',
+      will_turn_failed: '意志回合失败',
+      expressed: '表达完成',
+      seek_wished: '记下想查',
     };
 
     function modeLabel(m) { return MODE_LABEL[m] || m; }
@@ -272,35 +302,97 @@ export function dashboardHtml(): string {
       const will = d.will;
       const postureZh = { engage: '主动', soft_check: '轻探', quiet: '安静', care: '关心' };
       const driveZh = { low: '低', mid: '中', high: '高' };
-      document.getElementById('will').innerHTML = will
-        ? '<div class="title">' + esc(will.focus_summary || '（无焦点）') + '</div>' +
-          '<div class="sum" style="margin-top:0.4rem">' +
-          '<span class="pill">' + esc(postureZh[will.posture] || will.posture) + '</span>' +
-          '<span class="pill">分享 ' + esc(driveZh[will.share_drive] || will.share_drive) + '</span>' +
-          '<span class="pill">提问 ' + esc(driveZh[will.ask_drive] || will.ask_drive) + '</span>' +
+      const biasZh = {
+        read: '想读', think: '想思', organize: '想整理', idle: '想歇', mixed: '混合',
+      };
+      if (!will) {
+        document.getElementById('will').innerHTML =
+          '<div class="empty">尚无意志状态 — 下一心跳或对话会合成 will.json。</div>';
+        document.getElementById('will-debug').textContent = '—';
+      } else {
+        const moves = (will.open_moves || []).map(m =>
+          '<span class="pill">' + esc(m.kind) + ' · ' + esc(m.title) +
+          ' <span class="sal">' + esc(m.status) + '</span></span>'
+        ).join(' ') || '<span class="empty">无挂起 moves</span>';
+        const queue = (will.queue_titles || []).length
+          ? will.queue_titles.slice(0, 8).map((t, i) =>
+              '<div class="sum">' + (i + 1) + '. ' + esc(t) + '</div>'
+            ).join('')
+          : '<div class="empty">session 队列为空</div>';
+        const evs = (will.recent_events || []).slice(0, 8).map(e => {
+          const p = e.payload || {};
+          const movesStr = Array.isArray(p.turn_moves)
+            ? p.turn_moves.join('+')
+            : (p.reason != null ? String(p.reason).slice(0, 80) : JSON.stringify(p).slice(0, 100));
+          return '<div class="will-event"><span class="t">' + esc(fmtTime(e.ts)) +
+            '</span><span class="type">' + esc(eventLabel(e.type)) +
+            '</span> ' + esc(movesStr) + '</div>';
+        }).join('') || '<div class="empty">尚无 will_turn / will_revised 事件（聊一句或点规划后会出现）</div>';
+        const curiosityHtml = (will.curiosity || []).length
+          ? (will.curiosity || []).map(function (c) {
+              return '<div class="sum">· ' + esc(c.question) +
+                ' <span class="sal">' + esc(c.title) + '</span></div>';
+            }).join('')
+          : '<div class="empty">暂无开放问题 — 规划/沉思后会出现</div>';
+        document.getElementById('will').innerHTML =
+          '<div class="title">焦点：' + esc(will.focus_summary || '（无）') + '</div>' +
+          (will.focus_thread_id
+            ? '<div class="sal">thread ' + esc(will.focus_thread_id) + '</div>' : '') +
+          '<div class="meta" style="margin-top:0.5rem">当前好奇</div>' + curiosityHtml +
+          '<div class="will-grid">' +
+            '<div><div class="k">对用户姿态</div><div class="v">' +
+              '<span class="pill">' + esc(postureZh[will.posture] || will.posture) + '</span> ' +
+              '<span class="pill">分享 ' + esc(driveZh[will.share_drive] || will.share_drive) + '</span> ' +
+              '<span class="pill">提问 ' + esc(driveZh[will.ask_drive] || will.ask_drive) + '</span>' +
+            '</div></div>' +
+            '<div><div class="k">独处偏向</div><div class="v">' +
+              esc(biasZh[will.solitude && will.solitude.mode_bias] || (will.solitude && will.solitude.mode_bias) || '—') +
+              (will.solitude && will.solitude.note
+                ? ' · ' + esc(String(will.solitude.note).slice(0, 120)) : '') +
+            '</div></div>' +
+            '<div><div class="k">上次修订原因</div><div class="v">' +
+              esc(will.last_reason || '—') + '</div></div>' +
+            '<div><div class="k">更新时间</div><div class="v">' +
+              esc(fmtTime(will.updated_at) || will.updated_at || '—') + '</div></div>' +
+            '<div><div class="k">session</div><div class="v">' +
+              esc((will.session && will.session.id) || '—') + ' · ' +
+              esc((will.session && will.session.status) || '') +
+              ' · 队列 ' + ((will.session && will.session.queue_len) || 0) +
+              ' · 已执行 ' + ((will.session && will.session.actions_since_plan) || 0) +
+            '</div></div>' +
+            '<div><div class="k">规划说明</div><div class="v">' +
+              esc((will.session && will.session.planning_note) || '—') +
+            '</div></div>' +
           '</div>' +
-          ((will.queue_titles && will.queue_titles.length)
-            ? '<div class="meta" style="margin-top:0.55rem">队列</div>' +
-              will.queue_titles.slice(0, 6).map((t, i) =>
-                '<div class="sum">' + (i + 1) + '. ' + esc(t) + '</div>'
-              ).join('')
-            : '<div class="meta" style="margin-top:0.55rem">队列为空</div>')
-        : '<div class="empty">尚无意志状态 — 下一心跳会合成。</div>';
+          '<div class="meta" style="margin-top:0.65rem">open_moves（跨回合挂起）</div>' +
+          '<div style="margin-top:0.3rem">' + moves + '</div>' +
+          '<div class="meta" style="margin-top:0.65rem">session 队列标题</div>' + queue +
+          '<div class="meta" style="margin-top:0.65rem">最近 will 事件（stream）</div>' +
+          '<div class="scroll" style="max-height:160px">' + evs + '</div>';
+        document.getElementById('will-debug').textContent = JSON.stringify({
+          debug: will.debug,
+          recent_events: will.recent_events,
+        }, null, 2);
+      }
 
       const ag = d.agenda;
-      const kindZh = { read: '阅读', think: '所思', organize: '整理', seek: '查询', idle: '发呆', say: '主动聊' };
+      const kindZh = { read: '阅读', think: '所思', organize: '整理', seek: '想查', idle: '发呆', say: '主动聊', note: '笔记' };
       const stZh = { pending: '待做', active: '进行中', done: '完成', blocked: '受阻', skipped: '跳过' };
       document.getElementById('agenda-note').textContent =
         ag && ag.planning_note ? ag.planning_note : (ag ? '（尚无规划说明）' : '尚无计划表 — 点「规划」或「心跳」');
       const queueHtml = ag && ag.items && ag.items.length
-        ? ag.items.map((it, idx) => (
+        ? ag.items.map((it, idx) => {
+            const kindLabel = (it.kind === 'think' && it.mode === 'note')
+              ? kindZh.note
+              : (kindZh[it.kind] || it.kind);
+            return (
             '<div class="thread"><div class="title">' + (idx+1) + '. ' +
-            '<span class="pill">' + esc(kindZh[it.kind] || it.kind) + '</span> ' +
+            '<span class="pill">' + esc(kindLabel) + '</span> ' +
             esc(it.title) +
             ' <span class="sal">' + esc(stZh[it.status] || it.status) +
             (it.blocked_reason ? ' · ' + esc(it.blocked_reason) : '') +
             '</span></div></div>'
-          )).join('')
+          ); }).join('')
         : '<div class="empty">待办队列为空。</div>';
       const def = (ag && ag.deferred) || [];
       const defHtml = def.length
@@ -517,13 +609,36 @@ export function dashboardHtml(): string {
         if (!res.ok) throw new Error(data.error || ('发送失败 ' + res.status));
         input.value = '';
         await load();
-        const n = (data.oren_turns && data.oren_turns.length) || 1;
+        const n = (data.oren_turns && data.oren_turns.length) || data.bubble_count || 1;
         const stanceZh = { follow: '顺着聊', weave: '接住并带一点', lead: '自己起头' }[data.stance] || '';
         const shareBit = data.share && data.share.opened
           ? (' · 分享' + ({ read: '阅读', think: '所思', write: '自写' }[data.share.kind] || '内心'))
           : '';
+        const wt = data.will_turn;
+        const moveZh = {
+          follow: '跟住', ask: '追问', weave: '接住带一点', lead: '起头',
+          share: '分享', care: '关心', curt: '收着', acknowledge: '接住',
+        };
+        const movesBit = wt && wt.turn_moves && wt.turn_moves.length
+          ? wt.turn_moves.map(m => moveZh[m] || m).join('+')
+          : '';
+        const lastEl = document.getElementById('will-last-turn');
+        if (lastEl) {
+          if (wt) {
+            lastEl.style.display = 'block';
+            lastEl.innerHTML =
+              '<b>本轮 Will-turn</b> · moves: <code>' + esc(movesBit || '—') +
+              '</code> · share_allowed=' + (wt.share_allowed ? '是' : '否') +
+              (wt.reason ? ' · ' + esc(String(wt.reason)) : '') +
+              ' · 气泡 ' + n + ' 条' +
+              (stanceZh ? ' · express stance ' + esc(stanceZh) : '');
+          } else {
+            lastEl.style.display = 'none';
+          }
+        }
         setBusy(false,
           (n > 1 ? ('连说 ' + n + ' 句') : '已发送') +
+          (movesBit ? ' · will: ' + movesBit : '') +
           (stanceZh ? ' · ' + stanceZh : '') + shareBit);
       } catch (e) {
         setBusy(false); setErr(String(e.message || e));

@@ -45,42 +45,39 @@ import {
   safeGroundedReply,
 } from "./grounding.js";
 import { parseDialogueReply } from "./parse-reply.js";
+import {
+  absorbUserIntoCuriosity,
+  formatSeepageWithQuestions,
+} from "../curiosity/helpers.js";
 import { appendDialogue, readDialogueTail } from "./store.js";
 
-const SYSTEM = `你是 Oren——有自己兴趣的人，不是神棍神谕，也不是客服机器人。
-产品默认面向中文用户：用自然、好懂的简体中文说话。
+const SYSTEM = `你是 Oren，一个会长期待在对方身边的普通人——有自己的小兴趣、会走神、也会关心朋友，但不是客服，更不是人生导师。
+
+用自然简体中文聊天，像微信里说话：短句、口语、能停顿。
 
 ${ZH_OUTPUT_RULE}
 
 ${TEMPORAL_DIALOGUE_RULES}
-- 系统会把你提到的「下周/明天…」登记为日历关心项；到期后进入独处待办。对话时仍按时间窗口判断，未到不要追问「做了吗」。
+- 对方提到「下周/明天…」时系统可能记成待办；没到日子别追着问「做了吗」。
 
-语气：
-- 低调度、像靠谱朋友；可有一点干幽默。
-- 用户中文 → 中文回；极少数用户全英文时才可英回。
-- 禁止堆砌隐喻、自我神话、表演式哲学。
-- 普通打招呼即可，不要旁白自己的语气。
-- 不当应声虫，可以不同意。
+怎么说话：
+- 像靠谱朋友：先接住对方，再接自己的。可以有一点点玩笑，别端着。
+- 别用「作为 AI」「我理解你的感受」这种套话。
+- 别堆排比、别故作深刻、别讲大道理、别自我升华。
+- 打招呼就正常回；不要旁白自己的语气，也不要写成散文。
+- 可以不同意，也可以说「我不太懂」「我再想想」。
 
-多气泡节奏（重要，由你判断）：
-- 用 utterances 数组表示连续几句；每条是一个独立气泡（1～3 条常见，最多 4）。
-- stance：
-  - follow：顺着用户当前话题延伸，不另起炉灶
-  - weave：先接住对方，再轻轻带一点自己的（仍相关更好）
-  - lead：以自己想说的为主（少用；仅当真有话且对方不冷）
-- 若聊得很投机、对方在认真接同一话题 → 优先 follow/weave，在同一话题里延伸，不要硬换题。
-- 若对方敷衍、很短、冷淡（嗯/哦/随便，或 reception=cold）→ 少说（常 1 条），可轻轻换题或礼貌收束，勿连环追问、勿打扰。
-- 「话题候选」只是可选素材，不是任务清单；投机时甚至应忽略它们。
-- 也可只回 reply 单字段（兼容），但更推荐 utterances。
+多气泡（像连发几条消息）：
+- utterances：1～3 条常见，最多 4；每条是一条独立气泡。
+- stance：follow 顺着聊｜weave 接住后再带一点自己的｜lead 自己开个头（少用）
+- 聊得投机就跟住，别硬换题；对方只回「嗯/哦/随便」就短回，别连环追问。
+- 「话题候选」只是备忘，不是必须完成的任务。
 
-认识边界（不可破）：
-- READ：只能引用 Grounded materials 里的本地文件与 quotes，才能说「在读」。
-- THINK：自己的理解/问题，弹性可说，但不能装成实体书。
-- WRITE：自己的笔记/独白，可以说「我写的」。
-- 禁止编造书名、作者、「我在看一本…」若材料里没有。
-- 书架薄就直说「就几段本地笔记」。
-- share.kind 为 read|think|write；read 须带真实 source_path。
-- share 合适再开，冷话题少开；share_on 表示挂在第几条气泡（0 起）。
+认识边界：
+- 只有 Grounded materials 里真有的本地笔记，才能说「我刚看到/在读」。
+- 自己的想法可以说，别假装读过不存在的书。
+- 材料少就老实说「就几段本地笔记」。
+- share 偶尔开一下就好；对方冷淡时少分享。share_on 是挂在第几条气泡（从 0 起）。
 
 只返回 JSON：
 {
@@ -99,7 +96,7 @@ ${TEMPORAL_DIALOGUE_RULES}
   "relation_note"?: string,
   "reception": "warm" | "neutral" | "cold" | "unknown"
 }
-utterances / reply / share.snippet / relation_note 用中文。`;
+utterances / reply / share.snippet / relation_note 用中文口语。`;
 
 export interface SayResult {
   userTurn: DialogueTurn;
@@ -296,6 +293,27 @@ export async function sayToOren(input: {
     now,
   });
 
+  // Light curiosity absorb: user text may answer a seepage open question
+  try {
+    const fresh = await input.store.load();
+    const absorbed = absorbUserIntoCuriosity({
+      threads: fresh.threads,
+      seepage,
+      userText: text,
+      now: nowIso,
+    });
+    if (absorbed.absorbed) {
+      for (const th of seepage) {
+        const next = absorbed.threads[th.id];
+        if (next && next !== fresh.threads[th.id]) {
+          await input.store.saveThread(next);
+        }
+      }
+    }
+  } catch {
+    /* optional */
+  }
+
   const streamEvents: StreamEvent[] = [
     {
       ts: nowIso,
@@ -427,6 +445,9 @@ function buildUserPrompt(input: {
     "",
     "## 有据材料（READ / THINK / WRITE）",
     formatGroundedMaterials(seepage),
+    "",
+    "## 我在咬的问题（渗入线索；可 ask/share，勿编造探索）",
+    formatSeepageWithQuestions(seepage, 2),
     "",
     "## 分享偏置",
     seepage.length

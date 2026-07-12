@@ -3,7 +3,10 @@ import type { LifeState, RelationState, Thread, Will } from "../types.js";
 import { applyWillTurnPatch, safeFallbackTurn } from "./apply-turn.js";
 import { parseWillTurn, type WillTurnResult } from "./parse-turn.js";
 
-const SYSTEM = `你是 Oren 的意志层，只决定本回合意图，不写对用户台词。
+// 「意志层」字样供 FakeLlm / 路由识别，对用户不可见
+const SYSTEM = `【意志层】你在帮 Oren 决定「这回合想怎么跟人相处」——只定意图，不写具体台词。
+像真人：对方敷衍就收着；聊得来再多问一点；没必要别硬分享、别硬带节奏。
+
 只返回 JSON：
 {
   "turn_moves": ["follow"|"ask"|"weave"|"lead"|"share"|"care"|"curt"|"acknowledge"],
@@ -12,7 +15,7 @@ const SYSTEM = `你是 Oren 的意志层，只决定本回合意图，不写对�
   "reason": string
 }
 规则：用户敷衍 → curt；无充分理由勿 lead/share；share_allowed 仅当 moves 含 share 且关系不冷。
-中文 reason。`;
+reason 用中文短句。`;
 
 export async function runWillTurn(input: {
   llm: LlmCompleter;
@@ -23,10 +26,18 @@ export async function runWillTurn(input: {
   relation: RelationState;
   now: string;
 }): Promise<{ turn: WillTurnResult; will: Will; raw: string; failed: boolean }> {
+  const seepageLines = input.seepage
+    .map((t) => {
+      const qs = t.open_questions.slice(0, 2);
+      return qs.length
+        ? `${t.title}（问：${qs.join("；")}）`
+        : t.title;
+    })
+    .join("；");
   const user = [
     `当前焦点：${input.will.focus.summary}`,
     `对用户：${JSON.stringify(input.will.toward_user)}`,
-    `渗入线索：${input.seepage.map((t) => t.title).join("；") || "无"}`,
+    `渗入线索与开放问题：${seepageLines || "无"}`,
     `冷话题：${input.relation.cold_topics.map((c) => c.key).slice(0, 5).join(",") || "无"}`,
     `用户说：${input.userText}`,
   ].join("\n");

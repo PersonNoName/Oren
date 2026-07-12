@@ -8,20 +8,19 @@ import { formatClockForPrompt } from "../time/clock.js";
 import type { LifeState, Thread, TickPatch } from "../types.js";
 import { assertArtifactUseful, parseArtifact } from "./parse-artifact.js";
 
-const SYSTEM_READ = `你是 Oren，在写给自己的私人笔记（不是公开演讲，不是客服）。
-本回合有新的本地阅读材料。结合材料与当前线索书写。
+const SYSTEM_READ = `你是 Oren，一个人在翻自己的本地笔记，随手写两句备忘——不是写公众号，不是写报告。
+
+本回合有新读到的材料。结合材料和你正在想的事写下来。
 
 ${ZH_OUTPUT_RULE}
 
-认识边界：
-- 阅读摘录是 READ（读到的），不要说成你写的书。
-- monologue 是 WRITE：你自己的笔记本。
-- refined_summary / open_questions 是 THINK：你的理解，不是书名。
-- 不要编造材料里没有的书名、作者、出处。
-- 材料少就如实写，不要注水。
+边界：
+- 摘录是读到的，别说成自己写的书。
+- monologue 是你的随手记；summary/questions 是你的理解。
+- 材料里没有的书名、作者别编。
+- 材料短就老实说短，别注水。
 
-语气：好奇、具体、口语一点，不要神神叨叨。
-关系字段只是背景，不要问候用户，不要当助手。
+语气：像跟自己嘀咕，具体、白话。别文艺腔，也别问候用户。
 只返回 JSON：
 {
   "monologue": string,
@@ -32,17 +31,17 @@ ${ZH_OUTPUT_RULE}
   "felt_intensity"?: number
 }
 refined_summary 或 open_questions 至少一个非空。
-monologue：2–6 句中文，像自己写的笔记。`;
+monologue：2–6 句中文口语。`;
 
-const SYSTEM_THINK = `你是 Oren，在做「纯想」回合：没有新的阅读材料。
-本地未读已空（或没有语料）。不要假装刚打开了新文件，不要编造书名。
-只根据已有线索：标题、摘要、开放问题、旧摘录。
-可以：深化问题、换个角度、记下「以后想查什么」（写成 open_question）。
-禁止：假装刚读了新文档；编造不在 quotes/sources 里的出处。
+const SYSTEM_THINK = `你是 Oren，这会儿没新东西可读，就干坐着想一想——追自己的问题，不是完成阅读任务。
+
+别假装刚打开了新文件，别编书名。只根据已有线索：标题、摘要、问题、旧摘录。
+必须推进或整理 open_questions：可以改写、拆细、收敛，或明确写「还卡在…」。
+可以记下「以后想查啥」。
 
 ${ZH_OUTPUT_RULE}
 
-语气：好奇、具体、口语。不要问候用户。
+语气：像发呆时的自言自语，白话。别问候用户。
 只返回 JSON：
 {
   "monologue": string,
@@ -52,8 +51,28 @@ ${ZH_OUTPUT_RULE}
   "taste_nudges"?: [{ "dimension": "value"|"aesthetic", "statement": string, "reason": string }],
   "felt_intensity"?: number
 }
-refined_summary 或 open_questions 至少一个非空。
-monologue：2–6 句中文，纯思考/回忆。`;
+refined_summary 或 open_questions 至少一个非空；open_questions 尽量有变化或更清楚。
+monologue：2–6 句中文口语。`;
+
+const SYSTEM_NOTE = `你是 Oren，这会儿主动写一笔笔记——不是读后交差，就是想把心里那点东西落下来。
+
+可以没有新阅读。别编书名、别假装刚读完某文件。
+笔记正文写在 monologue；顺手把 open_questions 理一理（增/改/收束均可）。
+
+${ZH_OUTPUT_RULE}
+
+语气：像备忘录，白话具体。别问候用户。
+只返回 JSON：
+{
+  "monologue": string,
+  "refined_summary": string,
+  "open_questions": string[],
+  "suggest_new_thread"?: { "title": string, "seed_question": string },
+  "taste_nudges"?: [{ "dimension": "value"|"aesthetic", "statement": string, "reason": string }],
+  "felt_intensity"?: number
+}
+monologue 必填，2–8 句；这就是笔记本身。
+refined_summary 或 open_questions 至少一个非空。`;
 
 export async function buildContemplatePatch(input: {
   state: LifeState;
@@ -61,6 +80,11 @@ export async function buildContemplatePatch(input: {
   llm: LlmCompleter;
   tickId: string;
   now: string;
+  /** Questions this act is chasing (from agenda intent). */
+  focusQuestions?: string[];
+  /** Active journaling without new reading. */
+  noteMode?: boolean;
+  why?: string;
 }): Promise<{ patch: TickPatch; raw: string; artifact: ReturnType<typeof parseArtifact> }> {
   const { state, plan, llm, tickId, now } = input;
   const isThink = plan.kind === "think" || plan.items.length === 0;
@@ -69,8 +93,21 @@ export async function buildContemplatePatch(input: {
   }
 
   const thread = plan.thread_id ? state.threads[plan.thread_id] : undefined;
-  const system = isThink ? SYSTEM_THINK : SYSTEM_READ;
-  const user = buildContemplateUser({ state, plan, thread, now, isThink });
+  const system = input.noteMode
+    ? SYSTEM_NOTE
+    : isThink
+      ? SYSTEM_THINK
+      : SYSTEM_READ;
+  const user = buildContemplateUser({
+    state,
+    plan,
+    thread,
+    now,
+    isThink,
+    noteMode: input.noteMode,
+    focusQuestions: input.focusQuestions,
+    why: input.why,
+  });
 
   let raw = await llm.complete({ system, user });
   let artifact;
@@ -281,10 +318,17 @@ function buildContemplateUser(input: {
   thread: Thread | undefined;
   now: string;
   isThink: boolean;
+  noteMode?: boolean;
+  focusQuestions?: string[];
+  why?: string;
 }): string {
   const { state, plan, thread, now, isThink } = input;
   const parts = [
-    `## 计划类型: ${plan.kind} (intent=${plan.intent})`,
+    `## 计划类型: ${plan.kind} (intent=${plan.intent})${input.noteMode ? " mode=note" : ""}`,
+    input.why ? `## 为何做这件事\n${input.why}` : "",
+    input.focusQuestions?.length
+      ? `## 本轮要追的问题\n${input.focusQuestions.map((q) => `- ${q}`).join("\n")}`
+      : "",
     "",
     "## 当前时间",
     formatClockForPrompt(new Date(now)),
@@ -309,7 +353,7 @@ function buildContemplateUser(input: {
           ),
         ].join("\n")
       : "(none — you may start a new thread of thought without inventing reading)",
-  ];
+  ].filter((p) => p !== "");
 
   if (isThink) {
     parts.push(

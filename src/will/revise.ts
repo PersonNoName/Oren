@@ -1,5 +1,6 @@
 import { buildAgendaPlan } from "../agenda/plan.js";
 import type { CorpusIndex } from "../corpus/index.js";
+import { focusQuestionSummary } from "../curiosity/helpers.js";
 import type { LlmCompleter } from "../llm/types.js";
 import type { LifeState, RelationState, Will } from "../types.js";
 
@@ -34,11 +35,19 @@ export async function reviseWill(input: {
     lastProactiveSayAt: input.lastProactiveSayAt,
   });
 
+  const focusSummary = focusQuestionSummary(input.state, agenda.planning_note ?? "revised");
+  const focusThread =
+    firstSessionThread(agenda) ?? input.will.focus.thread_id;
+
   let will: Will = {
     ...input.will,
     updated_at: input.now,
     session: agenda,
     last_reason: agenda.planning_note ?? "revised",
+    focus: {
+      summary: focusSummary,
+      thread_id: focusThread,
+    },
     solitude: {
       ...input.will.solitude,
       note: agenda.planning_note,
@@ -70,4 +79,12 @@ function hasPendingSay(agenda: Will["session"]): boolean {
     const it = agenda.intents[id];
     return it?.kind === "say" && it.status === "pending";
   });
+}
+
+function firstSessionThread(agenda: Will["session"]): string | undefined {
+  for (const id of agenda.queue) {
+    const th = agenda.intents[id]?.thread_id;
+    if (th) return th;
+  }
+  return undefined;
 }

@@ -9,10 +9,10 @@ export class FakeLlmCompleter implements LlmCompleter {
       response ??
       JSON.stringify({
         monologue:
-          "对着这段文字坐了一会儿，注意到一种注意力的形状——不是为谁表演，只是问题本身在拉我。",
-        refined_summary: "材料提出一个关于连续性与意义的、耐得住时间的问题。",
-        open_questions: ["如果用更慢的时钟再读一遍，会多出什么？"],
-        felt_intensity: 0.6,
+          "翻了两段关于日常的笔记，觉得挺实在——手机、地铁、和朋友闲聊这些事，比空讲道理好懂。",
+        refined_summary: "材料在写这个时代的日常：忙、碎、但还能跟人说几句实话。",
+        open_questions: ["下次想再看看城市生活那篇，对照一下自己的节奏。"],
+        felt_intensity: 0.55,
       });
   }
 
@@ -68,21 +68,49 @@ export class FakeLlmCompleter implements LlmCompleter {
       const pathMatch =
         input.user.match(/## Unread paths[\s\S]*?\n([a-zA-Z0-9_.-]+\.md)/) ||
         input.user.match(/## 未读路径[^\n]*\n([a-zA-Z0-9_.\-\/]+\.md)/);
+      const qMatch =
+        input.user.match(/open=\[?"([^"\]]{4,80})"/) ||
+        input.user.match(/当前最咬人的问题：([^\n（]+)/);
       const threadId = threadMatch?.[1];
       const path = pathMatch?.[1];
+      const openQ = qMatch?.[1]?.trim() || "我想搞懂最近卡住的那件事";
       const canSay = /can_say=true/i.test(input.user);
+      const noUnread = /（none unread）|\(none unread\)|无未读/i.test(input.user);
       const intents: Record<string, unknown>[] = [
         {
           kind: "think",
-          title: "坐一坐开放问题",
+          title: `想清楚：${openQ.slice(0, 40)}`,
           thread_id: threadId,
-          hints: { why: "独处核心" },
+          hints: {
+            mode: "ruminate",
+            open_questions: [openQ],
+            why: "被这个问题勾住",
+          },
         },
         {
-          kind: "read",
-          title: path ? `读未读：${path}` : "读一点未读材料",
-          hints: path ? { paths: [path] } : { why: "书架" },
+          kind: "think",
+          title: `随手记：${openQ.slice(0, 36)}`,
+          thread_id: threadId,
+          hints: {
+            mode: "note",
+            open_questions: [openQ],
+            why: "主动记一笔，不是读后交差",
+          },
         },
+      ];
+      // Optional read only when there is a path and we have a question to serve
+      if (path && !noUnread) {
+        intents.push({
+          kind: "read",
+          title: `为问题翻：${path}`,
+          hints: {
+            paths: [path],
+            open_questions: [openQ],
+            why: `推进：${openQ.slice(0, 80)}`,
+          },
+        });
+      }
+      intents.push(
         {
           kind: "organize",
           title: "快速收拾记忆",
@@ -90,9 +118,13 @@ export class FakeLlmCompleter implements LlmCompleter {
         {
           kind: "seek",
           title: "以后想查相关背景",
-          hints: { query: "持续注意与连续性", why: "暂无查询权限" },
+          hints: {
+            query: openQ.slice(0, 80),
+            why: "先记下愿望，外面还查不了",
+            open_questions: [openQ],
+          },
         },
-      ];
+      );
       // Optional proactive say: only when allowed and no recent dialogue
       if (
         canSay &&
@@ -101,22 +133,32 @@ export class FakeLlmCompleter implements LlmCompleter {
       ) {
         intents.push({
           kind: "say",
-          title: "想轻轻跟你打个招呼",
-          hints: { why: "独处一阵了，有点想说声在" },
+          title: "想把这个问题轻轻抛给对方",
+          hints: { why: `好奇：${openQ.slice(0, 60)}` },
         });
       }
       return JSON.stringify({
         planning_note: canSay
-          ? "先想清楚手头问题；若合适就主动说一句，再整理。"
-          : "先想清楚手头问题，有未读就翻一点，再轻轻整理。",
+          ? `最咬人的是「${openQ.slice(0, 40)}」。先想、记一笔；若合适再跟朋友说一声。`
+          : `最咬人的是「${openQ.slice(0, 40)}」。先想、记一笔；有材料再翻，不打卡式读库。`,
         intents,
+      });
+    }
+    // Note-mode think
+    if (/mode=note|主动写一笔笔记|agenda_think_note/i.test(input.system + input.user)) {
+      return JSON.stringify({
+        monologue:
+          "记一笔：我不是在完成阅读任务，是真的卡在这个问题上。先把疑问写清楚，以后再决定要不要翻书架。",
+        refined_summary: "主动笔记：问题比未读文件更优先。",
+        open_questions: ["我真正想搞懂的是什么？", "有没有不必读库也能想的角度？"],
+        felt_intensity: 0.45,
       });
     }
     // Proactive say act
     if (/主动找用户说一句|proactive say|执行一条「主动/i.test(input.system + input.user)) {
       return JSON.stringify({
-        reply: "在。刚才独处时冒出一个小念头，不着急回——想到你了，打个招呼。",
-        share: { opened: false, reason: "只是轻轻开口" },
+        reply: "在不在？我刚自己待了一会儿，突然想问你今天顺不顺。",
+        share: { opened: false, reason: "就打个招呼" },
         why: "模拟主动聊天",
       });
     }
