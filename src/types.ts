@@ -178,7 +178,10 @@ export interface Config {
     user_present_ms: number;
     min_intents: number;
     max_intents: number;
-    /** After this many acts, prefer replan even if queue non-empty. */
+    /**
+     * Soft budget: after this many acts in a session, planning is welcome again
+     * once the queue has no actionable work (act still always wins while queue has work).
+     */
     replan_after_actions: number;
     /** Whether seek intents may be planned (always blocked until rights granted). */
     allow_seek_in_plan: boolean;
@@ -194,6 +197,11 @@ export interface Config {
      * Prevents nagging; plan drops say while cooling down.
      */
     say_cooldown_ms?: number;
+    /**
+     * After a fresh plan with nothing yet acted, skip unsupervised replan (zero LLM)
+     * for this many ms. Default 20m. Does not block act or force:plan.
+     */
+    min_replan_gap_ms?: number;
   };
   will?: {
     enabled: boolean;
@@ -405,6 +413,8 @@ export function defaultConfig(): Config {
       allow_say_in_plan: true,
       /** 4 hours between proactive outreach. */
       say_cooldown_ms: 4 * 60 * 60 * 1000,
+      /** Avoid replan thrash right after planning (unsupervised). */
+      min_replan_gap_ms: 20 * 60 * 1000,
     },
   };
 }

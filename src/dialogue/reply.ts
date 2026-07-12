@@ -139,8 +139,8 @@ export async function sayToOren(input: {
   // Will is the subjectivity source; session is dual-written to agenda.
   let will = await loadWill(input.store, nowIso);
 
-  // Longer tail so time-sensitive commitments (e.g. 「下周搬家」) stay in view.
-  const history = await readDialogueTail(input.store, 40);
+  // Enough for temporal commitments; full log stays on disk (not every turn).
+  const history = await readDialogueTail(input.store, 24);
   const seepage = pickSeepageThreads(state, 3);
 
   // Session/agenda is read-only fuel while chatting (not executed here).
@@ -418,8 +418,8 @@ function buildUserPrompt(input: {
   candidatesText: string;
 }): string {
   const { state, seepage, history, userMessage, now, relation } = input;
-  // Keep last 16 turns fully; older ones only if still in the 40-tail (already truncated by store).
-  const recent = history.slice(-16);
+  // Slim express context: last 12 turns in prompt (history may be longer on disk).
+  const recent = history.slice(-12);
   const hist = recent.map((t) => formatDialogueLineForPrompt(t, now)).join("\n");
   const engagement = estimateUserEngagement(userMessage, history);
 

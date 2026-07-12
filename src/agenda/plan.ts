@@ -450,23 +450,34 @@ function buildPlanUserPrompt(
   },
   agCfg: ReturnType<typeof agendaConfig>,
 ): string {
+  // Slim: top threads by salience, short open_questions — not the whole mind dump.
   const threads = Object.values(input.state.threads)
     .filter((t) => t.status === "active")
     .sort((a, b) => b.salience - a.salience)
-    .slice(0, 8)
-    .map(
-      (t) =>
-        `- id=${t.id} sal=${t.salience.toFixed(2)} title="${t.title}" open=${JSON.stringify(t.open_questions).slice(0, 120)}`,
-    )
+    .slice(0, 4)
+    .map((t) => {
+      const qs = t.open_questions.slice(0, 2).join("；") || "（暂无问题）";
+      return `- id=${t.id} sal=${t.salience.toFixed(2)} 「${t.title}」\n  摘要:${t.summary.slice(0, 80)}\n  问:${qs}`;
+    })
     .join("\n");
 
-  const shelf = input.index.docs.map((d) => d.path).join(", ") || "(empty)";
-  const unread = input.unreadPaths.slice(0, 20).join(", ") || "(none unread)";
-  const prev =
+  // Tool shelf: unread first (max 6), else a few known paths — not full corpus listing.
+  const unread = input.unreadPaths.slice(0, 6);
+  const shelfExtra = input.index.docs
+    .map((d) => d.path)
+    .filter((p) => !unread.includes(p))
+    .slice(0, 4);
+  const pathsBlock =
+    unread.length > 0
+      ? `未读（优先工具）：${unread.join(", ")}`
+      : `书架抽样：${shelfExtra.join(", ") || "(empty)"}`;
+
+  const prevPending =
     input.previous && input.previous.queue.length
       ? input.previous.queue
           .map((id) => input.previous!.intents[id])
-          .filter(Boolean)
+          .filter((i) => i && (i.status === "pending" || i.status === "blocked"))
+          .slice(0, 5)
           .map((i) => `${i!.status}:${i!.kind}:${i!.title}`)
           .join("\n")
       : "(none)";
@@ -474,47 +485,47 @@ function buildPlanUserPrompt(
   const lastContact = input.state.affect.absence.last_user_contact_at;
   const canSay = input.canSay !== false && agCfg.allow_say_in_plan !== false;
   const sayGate = canSay
-    ? "can_say=true（若你真有话想说，可排最多 1 条 say；不想说就不要排）"
-    : "can_say=false（冷却中或已关闭；禁止安排 say）";
+    ? "can_say=true（有想说/想问再排，最多 1 条）"
+    : "can_say=false（禁止 say）";
+  const taste = input.state.taste.values.slice(0, 4).map((v) => `- ${v.statement}`);
 
   return [
-    `## 约束: min=${agCfg.min_intents} max=${agCfg.max_intents} 本段独处`,
-    `can_seek_execute=${input.canSeek}（false 时 seek 执行仍 blocked，但可排 seek 登记愿望）`,
+    `## 约束 min=${agCfg.min_intents} max=${agCfg.max_intents}`,
+    `can_seek_execute=${input.canSeek}（false 仍可排 seek 记愿望）`,
     sayGate,
-    "curiosity: 问题优先；允许零 read；未读是工具箱不是 KPI",
+    "好奇优先；允许零 read；未读是工具不是 KPI；有可做的事先做完再重规划（系统侧）",
     "",
-    "## 当前好奇（优先追这些）",
+    "## 当前好奇（主轴）",
     focusQuestionSummary(input.state),
     "",
-    "## 当前时间",
+    "## 时间",
     formatClockForPrompt(new Date()),
     "",
-    "## 与用户的联系",
-    `上次用户联系：${lastContact ?? "（尚无记录）"}`,
-    `上次主动找用户说：${input.lastProactiveSayAt ?? "（尚无）"}`,
-    `访问次数：${input.state.affect.absence.visit_count ?? 0}`,
+    "## 联系",
+    `用户上次：${lastContact ?? "（尚无）"} · 上次主动说：${input.lastProactiveSayAt ?? "（尚无）"} · 到访 ${input.state.affect.absence.visit_count ?? 0}`,
     "",
-    "## 最近对话摘要（决定是否 say / 向用户打听时参考）",
-    input.dialogueSummary?.trim() || "（暂无对话）",
+    "## 对话摘录（短）",
+    input.dialogueSummary?.trim() || "（暂无）",
     "",
-    "## 品味（筛什么值得追）",
-    ...input.state.taste.values.map((v) => `- ${v.statement}`),
+    "## 品味（筛子）",
+    ...taste,
     "",
-    "## 活跃线索（含 open_questions）",
+    "## 活跃线索（顶 4）",
     threads || "(none)",
     "",
-    "## 本地书架路径",
-    shelf,
-    "## 未读路径（工具箱，非必须读完）",
-    unread,
+    "## 材料路径",
+    pathsBlock,
     "",
-    "## 上一份计划残留",
-    prev,
+    "## 上轮未完成",
+    prevPending,
     "",
-    "## 日历关心项（未到期不要强行执行；已到会由系统自动进待办）",
-    formatDeferredForPlanPrompt(input.previous ?? defaultAgenda(new Date().toISOString()), new Date()),
+    "## 日历关心",
+    formatDeferredForPlanPrompt(
+      input.previous ?? defaultAgenda(new Date().toISOString()),
+      new Date(),
+    ),
     "",
-    "请输出 JSON 计划表：先问题后手段。不要编造用户没说过的日程。say 完全可选。可以零 read。",
+    "输出 JSON 计划：先问题后手段。勿编日程。say 可选。可零 read。",
   ].join("\n");
 }
 

@@ -53,6 +53,63 @@ describe("decideAgendaTick", () => {
     if (d.action === "act") expect(d.intent.id).toBe("in_1");
   });
 
+  it("acts before replan even when actions_since_plan is high", () => {
+    const now = new Date();
+    const it = intent({ id: "in_2", kind: "think", title: "keep going" });
+    const agenda = defaultAgenda(now.toISOString());
+    agenda.queue = [it.id];
+    agenda.intents = { [it.id]: it };
+    agenda.actions_since_plan = 99;
+    agenda.planning_note = "旧计划";
+    const d = decideAgendaTick({
+      agenda,
+      config: defaultConfig(),
+      now,
+      lastUserContactAt: null,
+    });
+    expect(d.action).toBe("act");
+    if (d.action === "act") expect(d.intent.id).toBe("in_2");
+  });
+
+  it("idle_light when fresh plan has no actionable work", () => {
+    const now = new Date();
+    const blocked = intent({
+      id: "in_s",
+      kind: "seek",
+      title: "以后查",
+      status: "blocked",
+      blocked_reason: "seek_not_authorized",
+    });
+    const agenda = defaultAgenda(now.toISOString());
+    agenda.created_at = now.toISOString();
+    agenda.planning_note = "刚排完：先记下想查的";
+    agenda.queue = [blocked.id];
+    agenda.intents = { [blocked.id]: blocked };
+    agenda.actions_since_plan = 0;
+    const d = decideAgendaTick({
+      agenda,
+      config: defaultConfig(),
+      now: new Date(now.getTime() + 60_000),
+      lastUserContactAt: null,
+    });
+    expect(d.action).toBe("idle_light");
+  });
+
+  it("plans after replan gap when still no actionable", () => {
+    const now = new Date();
+    const agenda = defaultAgenda(now.toISOString());
+    agenda.created_at = new Date(now.getTime() - 25 * 60_000).toISOString();
+    agenda.planning_note = "旧计划";
+    agenda.actions_since_plan = 0;
+    const d = decideAgendaTick({
+      agenda,
+      config: defaultConfig(),
+      now,
+      lastUserContactAt: null,
+    });
+    expect(d.action).toBe("plan");
+  });
+
   it("acts pending say like other intents", () => {
     const now = new Date();
     const it = intent({ id: "in_say", kind: "say", title: "聊一句" });

@@ -162,13 +162,32 @@ export async function runTick(opts: {
             },
           ],
         };
+      } else if (decision.action === "idle_light") {
+        // Zero LLM: present but not thrashing replan. Agency intact; force:plan still works.
+        mode = "idle";
+        reason = decision.reason;
+        patch = {
+          mode: "idle",
+          reason,
+          stream_events: [
+            {
+              type: "presence_blank",
+              payload: {
+                gap_ms: perception.gap_ms,
+                note: "idle_light_skip_replan",
+                detail: decision.reason,
+              },
+            },
+          ],
+        };
       } else if (decision.action === "plan") {
         mode = "plan";
         reason = decision.reason;
         const planLlm = selectLlm(state.config.model, "plan");
         const unreadPaths = listUnreadPaths(index, state.threads);
         const relation = await loadRelation(store);
-        const dialogueTail = await readDialogueTail(store, 16);
+        // Slim context: short dialogue tail is enough for plan (curiosity-first).
+        const dialogueTail = await readDialogueTail(store, 8);
         const lastSay = lastProactiveSayAt(dialogueTail, agenda);
         const allowSay = canPlanSay({
           config: state.config,
@@ -186,7 +205,7 @@ export async function runTick(opts: {
             unreadPaths,
             canSeek: false,
             canSay: allowSay,
-            dialogueSummary: summarizeDialogueForPlan(dialogueTail),
+            dialogueSummary: summarizeDialogueForPlan(dialogueTail, 6),
             lastProactiveSayAt: lastSay,
           });
           will = revised.will;
