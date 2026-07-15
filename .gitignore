@@ -1,11 +1,10 @@
+.DS_Store
+.env
+.env.*
+!.env.example
 node_modules/
 dist/
-data/life/
-data/corpus/
+data/
 .oren-life/
-.DS_Store
+.npm-cache/
 *.log
-.env
-.env.local
-.env.*.local
-!.env.example
