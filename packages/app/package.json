@@ -1,0 +1,14 @@
+{
+  "name": "@oren/app",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/cognition": "*",
+    "@oren/extensions": "*",
+    "@oren/kernel": "*",
+    "@oren/pi-cognition": "*",
+    "@oren/storage": "*",
+    "@oren/test-counter": "*"
+  }
+}

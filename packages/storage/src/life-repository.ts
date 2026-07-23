@@ -6,6 +6,7 @@ import {
   type Grant,
   type JsonObject,
   type LifeState,
+  type CoreEvent,
 } from "@oren/kernel";
 
 interface OutboxRow {
@@ -17,7 +18,10 @@ interface OutboxRow {
 }
 
 export class SqliteLifeRepository {
-  public constructor(private readonly db: DatabaseSync) {}
+  public constructor(
+    private readonly db: DatabaseSync,
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {}
 
   public close(): void {
     this.db.close();
@@ -202,6 +206,108 @@ export class SqliteLifeRepository {
         effect: JSON.parse(String(row.effect_json)) as Effect,
         attempts: Number(row.attempts) + 1,
       }));
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public finishEffect(
+    effectId: string,
+    orenId: string,
+    correlationId: string,
+    payload:
+      | Extract<CoreEvent, { type: "EffectCompleted" }>
+      | Extract<CoreEvent, { type: "EffectFailed" }>
+      | Extract<CoreEvent, { type: "EffectUncertain" }>,
+  ): void {
+    if (payload.effectId !== effectId) {
+      throw new Error(`Effect terminal payload identity does not match ${effectId}`);
+    }
+    const status = payload.type === "EffectCompleted"
+      ? "completed"
+      : payload.type === "EffectFailed"
+        ? "failed"
+        : "uncertain";
+    const receipt = JSON.stringify(payload);
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const outbox = this.db.prepare(`
+        SELECT oren_id, capability, effect_json, status, receipt_json
+        FROM outbox WHERE effect_id = ?
+      `).get(effectId);
+      if (!outbox) {
+        throw new Error(`Effect ${effectId} not found`);
+      }
+      const effect = JSON.parse(String(outbox.effect_json)) as Effect;
+      if (
+        String(outbox.oren_id) !== orenId
+        || effect.effectId !== effectId
+        || effect.orenId !== orenId
+        || effect.correlationId !== correlationId
+        || effect.capability !== String(outbox.capability)
+      ) {
+        throw new Error(`Effect ${effectId} identity does not match persisted outbox row`);
+      }
+
+      const operation = this.db.prepare(`
+        SELECT oren_id, capability, status, receipt_json
+        FROM operations WHERE effect_id = ?
+      `).get(effectId);
+      if (
+        !operation
+        || String(operation.oren_id) !== orenId
+        || String(operation.capability) !== effect.capability
+      ) {
+        throw new Error(`Effect ${effectId} operation identity does not match outbox row`);
+      }
+
+      const terminalStatuses = new Set(["completed", "failed", "uncertain", "cancelled"]);
+      const outboxStatus = String(outbox.status);
+      const operationStatus = String(operation.status);
+      if (terminalStatuses.has(outboxStatus)) {
+        if (
+          operationStatus !== outboxStatus
+          || operation.receipt_json !== outbox.receipt_json
+        ) {
+          throw new Error(`Effect ${effectId} terminal state is inconsistent`);
+        }
+        this.db.exec("COMMIT");
+        return;
+      }
+      if (terminalStatuses.has(operationStatus)) {
+        throw new Error(`Effect ${effectId} operation state is inconsistent`);
+      }
+
+      const outboxUpdate = this.db.prepare(`
+        UPDATE outbox
+        SET status = ?, receipt_json = ?, lease_owner = NULL, lease_until = NULL
+        WHERE effect_id = ? AND oren_id = ?
+          AND status NOT IN ('completed','failed','uncertain','cancelled')
+      `).run(status, receipt, effectId, orenId);
+      if (Number(outboxUpdate.changes) !== 1) {
+        throw new Error(`Effect ${effectId} outbox did not transition`);
+      }
+      const operationUpdate = this.db.prepare(`
+        UPDATE operations
+        SET status = ?, receipt_json = ?
+        WHERE effect_id = ? AND oren_id = ?
+          AND status NOT IN ('completed','failed','uncertain','cancelled')
+      `).run(status, receipt, effectId, orenId);
+      if (Number(operationUpdate.changes) !== 1) {
+        throw new Error(`Effect ${effectId} operation did not transition`);
+      }
+      this.db.prepare(`
+        INSERT INTO inbox(inbox_id, oren_id, priority, available_at, payload_json)
+        VALUES (?, ?, 4, ?, ?)
+      `).run(
+        `effect-result:${effectId}`,
+        orenId,
+        this.now(),
+        JSON.stringify({ correlationId, event: payload }),
+      );
+      this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
