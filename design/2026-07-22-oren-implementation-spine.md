@@ -1,6 +1,7 @@
 # Oren 实现骨架：生命内核与能力扩展
 
 > 日期：2026-07-22
+> 修订：2026-07-23（固化 Pi 复用边界、异步认知运行流与 Phase 1 验证范围）
 > 类型：实现骨架 / 架构设计
 > 状态：已确认
 > 上游：`design/2026-07-22-oren-concept-design.md`
@@ -10,9 +11,11 @@
 
 ## 1. 一句话骨架
 
-> **Oren 是一个事件溯源的单写者 LifeActor；LLM 作为生命导演，自主选择关注与思考；确定性核心维护主体连续性、权限、预算和因果；所有感知、记忆与行动能力通过扩展协议生长。**
+> **Oren 是一个事件溯源的单写者 LifeActor；LLM 通过有界认知 episode 作为生命导演，自主选择关注与思考；确定性核心维护主体连续性、权限、预算和因果；所有感知、记忆与行动能力通过扩展协议生长。**
 
 Pi 的稳定中心是扩展协议与 Agent 执行循环。Oren 同样以扩展获得能力，但她的稳定中心不同：**主体连续性与意图—行动闭环**。即使移除所有非必要扩展，剩下的核心仍然知道她是谁、在关注什么、承担了什么、为何计划再次醒来。
+
+实现上直接复用 `pi-ai` 与 `pi-agent-core` 承担模型访问和一次认知 episode 内的 Agent/tool loop；Oren 保留外层生命内核、持久化、权限、计划和可靠行动。简言之：**Oren 拥有生命，Pi 提供思考循环。**
 
 ## 2. 五条不可破坏的约束
 
@@ -33,7 +36,10 @@ LifeActor ───────────────→ Chronicle
   │                          ├─ Event Log
   │                          └─ Snapshot
   ↓
-Conductor ───────────────→ Cognition Adapter (LLM)
+Conductor ───────────────→ Cognition Worker
+                              ↓
+                         Pi Cognition Adapter
+                         (`pi-agent-core`)
   │
   ├─ state proposals
   ├─ capability requests
@@ -183,11 +189,17 @@ CloseThread
 
 新业务能力统一通过 `RequestCapability` 生长，不为每项能力增加核心 Proposal 类型。
 
-一次唤醒形成一个有界 `CognitiveEpisode`。LLM 可以决定召回、继续思考、调用能力、停止或休息。纯认知可以在 episode 内多步进行；等待异步扩展时 episode 暂停，结果回来后通过 `correlation_id` 恢复。
+一次唤醒形成一个有界 `CognitiveEpisode`。LLM 可以决定召回、继续思考、调用能力、停止或休息。纯认知可以在 episode 内多步进行；等待持久扩展时当前 Pi episode 结束，结果回来后通过 `correlation_id` 启动新的 episode，继续同一个生命片段。
 
-episode 结束必须产生：已接受的状态变化、已接受的效应，以及下一次唤醒或明确休息。LLM 负责选择，核心仅执行协议校验和故障保护。若 LLM 未安排下一次唤醒，运行时设置低频健康检查；健康检查只再次提供选择机会，不替 Oren 决定关注内容。
+episode 结束必须产生已接受的状态变化和效应，并明确处于下一次唤醒、等待持久 Effect 或休息之一。LLM 负责选择，核心仅执行协议校验和故障保护。若 LLM 未安排下一次唤醒且没有等待中的 Effect，运行时设置低频健康检查；健康检查只再次提供选择机会，不替 Oren 决定关注内容。
 
 第一版由同一个高质量模型承担生命导演与深入思考，通过不同认知任务区分职责。模型路由保留为适配层能力，后续依据真实成本和行为数据再拆分。
+
+`LifeActor` 不在自己的单写事务中等待模型。它先提交带有 `base_state_version` 的 `CognitionRequested`，随后释放邮箱；Actor 外的 Cognition Worker 运行 Pi episode，并把 `CognitionCompleted`、`CognitionFailed` 或 `EpisodeInterrupted` 作为新事件送回 Inbox。只有返回版本仍有效且 Proposal 通过 Guard 时，结果才能改变主体状态。
+
+每个 Oren 同时最多运行一个认知 episode。调度优先级为：用户前台消息、持久能力结果、到期承诺、普通计划唤醒、低频健康检查。用户消息到来时可中止后台自主 episode，记录其中断原因和未提交关注，再以最新状态启动前台 episode。第一版不把前台消息直接 steering 进旧的后台 episode，避免混合旧状态版本、后台预算与前台上下文。
+
+持久能力不会要求序列化 Pi 的调用栈。Effect 入 Outbox 后，当前 episode 以 `waiting_for_effect` 结束；结果通过相同 `correlation_id` 回来后，由新的 LifeFrame 启动新 episode。思考连续性存在于 Chronicle，而不是临时的模型调用栈。
 
 ## 8. 扩展协议
 
@@ -219,6 +231,7 @@ Capability {
 
 ```text
 read_only
+replay_safe
 reversible
 external_side_effect
 uses_user_identity
@@ -252,6 +265,15 @@ Invocation {
 - 崩溃后可查询调用状态并恢复；
 - 密钥由独立凭据服务注入，不暴露给 LLM；
 - 扩展只能获得最小必要上下文。
+
+扩展协议由 Oren 拥有，不直接采用 `pi-coding-agent` 的 Extension API。Oren 扩展只声明能力和事件源；Pi Tool Adapter 将当前可用的 `CapabilityDescriptor` 转换成 `AgentTool`。用户显式请求与 Oren 自主请求汇入同一个 Capability Broker，再根据请求来源应用不同预算和相同的权限、幂等与副作用规则。
+
+能力调用分为两条通道：
+
+1. **即时通道**：仅用于 `read_only`、`replay_safe`、无外部副作用、不使用用户身份且非破坏性的能力；结果可在同一个 Pi episode 内返回。
+2. **持久通道**：其他能力先生成 Effect 并进入 Outbox，当前 episode 结束，真实结果回来后重新唤醒。
+
+Web 搜索等只读但联网或计费的能力可以走即时通道，但仍要经过预算校验并留下 ObservationEvent。通道由 manifest 的风险特征确定，LLM 不能选择绕过。未来可以增加 Pi 工具扩展兼容适配器，但只承诺兼容安全的工具注册子集，不兼容其终端 UI、命令、快捷键或 Coding Session 语义。
 
 ## 9. 记忆分层
 
@@ -340,51 +362,70 @@ DecisionEvent committed
   → operation 完成、重试或转人工
 ```
 
-超时不等于失败。对于购买、发送、删除等高风险动作，状态未知时必须先向外部系统对账，不能直接重试。
+超时不等于失败。对于购买、发送、删除等外部动作，状态未知时必须先向外部系统对账，不能直接重试。故障处理遵循：**认知可以重做，外部事实不能猜测，更不能因重试而重复发生。**
 
-失败分四类：
+认知与即时能力的恢复规则：
 
-- `Retryable`：可按退避策略重试；
-- `NeedsReconciliation`：外部状态未知，必须查询；
-- `NeedsAttention`：缺权限、输入或用户决定；
-- `Terminal`：能力不支持或目标已不可能。
+- 尚未接受 Proposal、也未创建 Effect 的失败可以通过新 episode 有限重试，不恢复旧 Pi 调用栈；
+- 后台重试消耗自治预算，前台重试不受日额度限制，但仍受单次交互 guardrail；
+- 即时能力只有声明 `replay_safe` 时才可自动重试；
+- schema、权限和确定性业务错误直接返回认知层重新判断。
 
-失败本身是生命事件。Oren 可以据此调整承诺和计划；行动账本始终保留真实状态。
+持久 Effect 至少有 `pending`、`dispatched`、`completed`、`failed`、`uncertain` 和 `cancelled` 六种状态。`effect_id` 是调用的幂等键；只有扩展明确支持幂等或状态查询时才能自动补发。重复回执按 `effect_id` 去重。请求可能已经发生但无法查询时进入 `uncertain`，绝不自动再次购买、发送或修改；结果事件重新唤醒 Oren，由她决定查询、等待、说明或请求进一步处理。
 
-## 14. 代码组织与部署
+失败仍分为 `Retryable`、`NeedsReconciliation`、`NeedsAttention` 和 `Terminal` 四类，并全部进入生命史。扩展崩溃只能产生失败或不确定结果，不能留下半写入的 `LifeState`；连续失败的扩展可以被运行时隔离，但不能抹除 Oren 已记录的承诺。
+
+## 14. Pi 复用边界与依赖策略
+
+直接复用：
+
+- `@earendil-works/pi-ai`：模型与供应商抽象、流式响应、工具 schema、参数校验、usage 与 cost；
+- `@earendil-works/pi-agent-core`：一次 CognitiveEpisode 内的 Agent/tool loop、事件流、abort、steering、上下文变换和 tool hooks。
+
+不整体依赖 `pi-coding-agent`。它的扩展系统值得参考其工厂注册、加载/运行阶段分离、失效 context、事件串联和工具前后拦截，但其公共 API 同时绑定 Coding Session、终端 UI、快捷键、命令和文件工具，不应成为 Oren 的生命或扩展协议。
+
+所有 Pi import 集中在 `@oren/pi-cognition`。Oren 其他模块只依赖自己的 `CognitionPort`、`LifeFrame`、`Proposal` 和 capability 协议。正常安装精确固定 `pi-ai` 与 `pi-agent-core` 版本；同级 Pi 源码只作为显式的本地开发覆盖，不是 Oren 的隐式运行前提。初始参考基线为 Pi commit `7c2775f6`、package version `0.75.5`。
+
+升级 Pi 必须通过适配器契约测试，确认 LifeFrame 映射、工具调用、持久能力暂停、abort、usage、错误映射和 Guard 边界没有变化。
+
+## 15. 代码组织与部署
 
 第一版采用模块化单体：
 
 ```text
 packages/
-  kernel/          # LifeActor, Chronicle, LifeState, Scheduler, Guard
-  cognition/       # Conductor, LifeFrame, Proposal schemas, model adapters
-  capabilities/    # extension protocol, registry, runtime, credentials
-  storage/         # SQLite, migrations, event store, inbox/outbox
-  app/             # process lifecycle, configuration, API
+  kernel/          # Event, Proposal, Effect, LifeState, reducer, Guard, LifeActor
+  storage/         # SQLite, Chronicle, snapshots, inbox/outbox, schedules, operations
+  cognition/       # LifeFrame, CognitionPort, Conductor, scripted adapter
+  pi-cognition/    # PiCognitionAdapter, PiAgentToolAdapter, Pi event mapping
+  extensions/      # Oren Extension API, manifest, registry, broker, runtime
+  app/             # Scheduler, EffectDispatcher, process lifecycle, composition root
 extensions/
-  web/
-  memory/
-  messaging/
+  test-counter/
 ```
 
-模块按协议隔离，部署为一个进程。高风险或不可信扩展可以使用子进程隔离；远程扩展和多服务部署留到出现明确隔离、扩缩容或多实例需求之后。
+`kernel` 不导入任何工作区包；`storage`、`cognition` 和 `extensions` 依赖 `kernel`；`pi-cognition` 实现 `cognition` 端口并依赖稳定 capability 描述；`app` 是唯一组合根。Pi 不出现在 `kernel`、`storage`、`extensions` 或业务扩展中。
 
-实现可以参考 `pi-agent` 的扩展、工具调用与运行经验，但 `pi-agent` 只作为可接入的执行适配器或实现参考，不拥有 Oren 的计划、关系、权限或生命状态。
+模块部署为一个进程。高风险或不可信扩展可以使用子进程隔离；远程扩展和多服务部署留到出现明确隔离、扩缩容或多实例需求之后。
 
-## 15. 第一版扩展范围
+## 16. Phase 1 范围
 
-第一版只接入：
+Phase 1 只证明一个可运行、可恢复的生命内核垂直切片：
 
-1. 受限 Web 检索与阅读；
-2. 本地 Oren 档案与记忆读写；
-3. 一个消息投递渠道。
+1. 空数据库初始化并重建一个 Oren；
+2. LifeActor、Chronicle、Inbox、Outbox、Scheduler、Grant 与预算形成闭环；
+3. 真正依赖 `pi-ai` 和 `pi-agent-core`，以假 model stream 运行 Pi 适配器；
+4. 一个即时测试能力和一个持久测试能力；
+5. 持久能力结束当前 episode 并使生命片段进入等待，真实回执触发新 episode；
+6. 进程重启后恢复相同状态。
 
-购买、邮件、日历、第三方账户与复杂浏览器自动化只验证 Manifest、风险声明和 Grant 模型，不进入首个完整闭环。
+Phase 1 不接入真实 Web、购买、消息渠道、生产 Prompt、向量数据库或远程扩展。可以提供一个只有开发者主动配置凭据时才运行的真实模型 smoke 命令，但它不进入自动测试或完成标准。
 
-## 16. 测试与验收
+后续阶段依次加入真实模型与行为评估、记忆投影、Web 阅读与来源、消息渠道，最后再实现购买、邮件、日历和复杂浏览器能力。新的业务能力不改变本文骨架。
 
-### 16.1 核心确定性
+## 17. 测试与验收
+
+### 17.1 核心确定性
 
 - 相同事件序列产生相同 `LifeState`；
 - 快照恢复与从头回放一致；
@@ -393,29 +434,51 @@ extensions/
 
 确定性不要求 LLM 对相同输入永远做出相同决定；它要求给定已接受 Proposal 与事件后，核心结果可确定重放。
 
-### 16.2 权限与扩展契约
+### 17.2 Pi 适配器契约
+
+- 使用假 model stream，不访问网络；
+- LifeFrame 能正确进入 Pi 上下文；
+- Pi 输出只能形成类型化 Proposal；
+- 工具调用能映射到 Oren capability request；
+- 持久能力创建 Effect 后结束 episode；
+- abort、usage、错误和终止原因正确映射；
+- Pi 不能直接获得扩展实例、凭据或绕过 Guard。
+
+### 17.3 权限与扩展契约
 
 - 越权、过期授权和额度超限被拦截；
 - 每个扩展通过统一协议测试套件；
 - 崩溃、超时、重复回执和部分成功可恢复；
 - 扩展无法直接修改主体状态。
 
-### 16.3 认知协议
+### 17.4 认知协议
 
 - 用记录好的 Proposal 测试核心；
 - 用模拟模型覆盖合法和非法输出；
 - 对真实模型做行为评估，不做逐字快照；
 - 检查它能停止、能安排下次唤醒、能区分事实与判断。
 
-### 16.4 长期生命模拟
+### 17.5 故障与恢复
+
+- Effect 写入后、dispatch 前崩溃可恢复；
+- dispatch 后、回执前崩溃不会盲目补发；
+- 重复回执去重，无法确认的结果进入 `uncertain`；
+- 用户消息能抢占后台 episode；
+- 旧 state version 的认知结果不能覆盖新状态。
+
+### 17.6 端到端垂直切片
+
+测试必须完整覆盖：用户消息进入、Pi 请求即时能力、形成状态 Proposal、请求持久能力、当前 episode 结束、生命片段等待、扩展返回回执、新 episode 恢复、安排下次唤醒，以及重启后回放一致。
+
+### 17.7 长期生命模拟
 
 - 加速运行数周或数月事件；
 - 注入重启、模型切换、扩展升级、权限撤销和网络故障；
 - 检查线索、承诺、预算与身份演化是否连续；
 - 评估主动分享是否重复、空洞或过度打扰。
 
-第一版质量门槛：核心可确定性回放，外部副作用不重复，越权不可发生，模型异常不能破坏主体状态。
+Phase 1 质量门槛：测试、类型检查和构建全部通过；可从空数据库运行垂直切片并在重启后恢复相同状态；核心可确定性回放，外部副作用不重复，越权不可发生，模型异常不能破坏主体状态。
 
-## 17. 暂不进入骨架的实现选择
+## 18. 暂不进入骨架的实现选择
 
-以下选择留给实现计划或后续适配，不成为架构前提：具体模型供应商、JSON Schema 库、SQLite ORM、进程间传输协议、向量数据库、同步服务以及 UI 框架。它们必须遵守本文契约，但不应反向定义 Oren。
+以下选择留给实现计划或后续适配，不成为架构前提：具体模型供应商、SQLite ORM、进程间传输协议、向量数据库、同步服务以及 UI 框架。Pi 当前使用的 schema 库可以在适配层复用，但不能泄漏为 Oren 扩展协议不可替换的实现细节。所有后续选择必须遵守本文契约，不能反向定义 Oren。
