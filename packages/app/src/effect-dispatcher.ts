@@ -47,7 +47,7 @@ export interface EffectDispatcherOptions {
 
 export interface EffectDispatchResult {
   readonly effectId: string;
-  readonly status: CapabilityResult["status"] | "persistence_failed";
+  readonly status: CapabilityResult["status"] | "invalid_result" | "persistence_failed";
 }
 
 class EffectTimeoutError extends Error {
@@ -61,6 +61,58 @@ class EffectTimeoutError extends Error {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function isJsonValue(value: unknown, seen = new Set<object>()): boolean {
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+  ) {
+    return true;
+  }
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  const valid = Array.isArray(value)
+    ? value.every((item) => isJsonValue(item, seen))
+    : isRecord(value) && Object.values(value).every((item) => isJsonValue(item, seen));
+  seen.delete(value);
+  return valid;
+}
+
+function isCapabilityResult(value: unknown): value is CapabilityResult {
+  if (!isRecord(value)) return false;
+  if (value.status === "completed") {
+    return hasExactKeys(value, ["status", "output", "receipt"])
+      && isJsonValue(value.output)
+      && isRecord(value.receipt)
+      && isJsonValue(value.receipt);
+  }
+  if (value.status === "failed") {
+    return hasExactKeys(value, ["status", "code", "message"])
+      && typeof value.code === "string"
+      && typeof value.message === "string";
+  }
+  if (value.status === "uncertain") {
+    return hasExactKeys(value, ["status", "message"])
+      && typeof value.message === "string";
+  }
+  return false;
 }
 
 export class EffectDispatcher {
@@ -91,15 +143,23 @@ export class EffectDispatcher {
     try {
       resolved = this.registry.resolve(row.capability);
     } catch (error) {
+      if (row.attempts === 1) {
+        return this.persist(row, {
+          type: "EffectFailed",
+          effectId: row.effectId,
+          code: "EXTENSION_RESOLUTION_FAILED",
+          message: `Extension resolution failed before dispatch: ${errorMessage(error)}`,
+        }, "failed");
+      }
       return this.persist(row, {
         type: "EffectUncertain",
         effectId: row.effectId,
-        message: `Extension resolution failed: ${errorMessage(error)}`,
+        message: `Extension resolution failed while reconciling a previous dispatch: ${errorMessage(error)}`,
       }, "uncertain");
     }
 
     const { descriptor, extension } = resolved;
-    let result: CapabilityResult;
+    let rawResult: unknown;
     try {
       if (row.attempts > 1) {
         if (!extension.query) {
@@ -109,7 +169,7 @@ export class EffectDispatcher {
             message: "Previous dispatch outcome cannot be queried without risking a duplicate effect",
           }, "uncertain");
         }
-        result = await this.runWithTimeout(
+        rawResult = await this.runWithTimeout(
           "reconciliation",
           descriptor.timeoutMs,
           (signal) => extension.query!(row.effectId, signal),
@@ -124,7 +184,7 @@ export class EffectDispatcher {
           stateVersion: row.effect.stateVersion,
           deadline: new Date(this.now() + descriptor.timeoutMs).toISOString(),
         };
-        result = await this.runWithTimeout(
+        rawResult = await this.runWithTimeout(
           "dispatch",
           descriptor.timeoutMs,
           (signal) => extension.invoke(invocation, signal),
@@ -141,6 +201,10 @@ export class EffectDispatcher {
       }, "uncertain");
     }
 
+    if (!isCapabilityResult(rawResult)) {
+      return { effectId: row.effectId, status: "invalid_result" };
+    }
+    const result = rawResult;
     if (result.status === "completed") {
       return this.persist(row, {
         type: "EffectCompleted",

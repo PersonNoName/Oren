@@ -50,6 +50,12 @@ export function migrate(db: DatabaseSync): void {
       receipt_json TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS effect_quarantine (
+      effect_id TEXT PRIMARY KEY,
+      reason TEXT NOT NULL,
+      quarantined_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS grants (
       grant_id TEXT PRIMARY KEY,
       oren_id TEXT NOT NULL,

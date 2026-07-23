@@ -189,6 +189,100 @@ describe("EffectDispatcher", () => {
   });
 
   it.each([
+    { name: "unknown status", result: { status: "bogus" } },
+    {
+      name: "completed result missing output",
+      result: { status: "completed", receipt: { transactionId: "tx-1" } },
+    },
+    {
+      name: "completed result with non-finite output",
+      result: {
+        status: "completed",
+        output: { amount: Infinity },
+        receipt: { transactionId: "tx-1" },
+      },
+    },
+    {
+      name: "completed result with a non-object receipt",
+      result: { status: "completed", output: null, receipt: [] },
+    },
+    {
+      name: "failed result missing code",
+      result: { status: "failed", message: "provider failed" },
+    },
+    {
+      name: "uncertain result missing message",
+      result: { status: "uncertain" },
+    },
+    {
+      name: "result with extra fields",
+      result: {
+        status: "failed",
+        code: "FAILED",
+        message: "provider failed",
+        extra: true,
+      },
+    },
+  ])("rejects a malformed $name and continues with a later row", async ({ result }) => {
+    const { repository, terminalPayloads } = repositoryFor([
+      claimedEffect("effect-malformed"),
+      claimedEffect("effect-valid"),
+    ]);
+    const registry = registryFor({
+      invoke: async (invocation) => invocation.effectId === "effect-malformed"
+        ? result as never
+        : { status: "completed", output: null, receipt: { transactionId: "tx-valid" } },
+    });
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-malformed", status: "invalid_result" },
+      { effectId: "effect-valid", status: "completed" },
+    ]);
+    expect(terminalPayloads).toEqual([{
+      type: "EffectCompleted",
+      effectId: "effect-valid",
+      receipt: { transactionId: "tx-valid" },
+    }]);
+  });
+
+  it("rejects a malformed reconciliation result without invoking or persisting", async () => {
+    let invocations = 0;
+    const { repository, terminalPayloads } = repositoryFor([claimedEffect("effect-1", 2)]);
+    const registry = registryFor({
+      invoke: async () => {
+        invocations += 1;
+        return { status: "completed", output: null, receipt: {} };
+      },
+      query: async () => ({ status: "uncertain" }) as never,
+    });
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-1", status: "invalid_result" },
+    ]);
+    expect(invocations).toBe(0);
+    expect(terminalPayloads).toEqual([]);
+  });
+
+  it("clears the timeout and leaves the signal un-aborted after early success", async () => {
+    vi.useFakeTimers();
+    let signal: AbortSignal | undefined;
+    const { repository } = repositoryFor([claimedEffect("effect-1")]);
+    const registry = registryFor({
+      invoke: async (_invocation, invocationSignal) => {
+        signal = invocationSignal;
+        return { status: "completed", output: null, receipt: { transactionId: "tx-1" } };
+      },
+    }, 50);
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-1", status: "completed" },
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it.each([
     { attempts: 1, operation: "dispatch", lateSettlement: "resolve" },
     { attempts: 2, operation: "reconciliation", lateSettlement: "reject" },
   ])("settles a hanging $operation even when the extension ignores AbortSignal", async ({
@@ -228,9 +322,10 @@ describe("EffectDispatcher", () => {
     expect(terminalPayloads).toHaveLength(1);
   });
 
-  it("continues processing later rows after registry and extension failures", async () => {
+  it("classifies registry failures by dispatch certainty and continues later rows", async () => {
     const { repository, terminalPayloads } = repositoryFor([
       claimedEffect("effect-resolve", 1, "test.missing"),
+      claimedEffect("effect-resolve-reclaimed", 2, "test.missing"),
       claimedEffect("effect-invoke", 1, "test.throws"),
       claimedEffect("effect-complete", 1, "test.increment"),
     ]);
@@ -252,17 +347,27 @@ describe("EffectDispatcher", () => {
     const results = await new EffectDispatcher(repository, registry, "worker-1").runOnce();
 
     expect(results).toEqual([
-      { effectId: "effect-resolve", status: "uncertain" },
+      { effectId: "effect-resolve", status: "failed" },
+      { effectId: "effect-resolve-reclaimed", status: "uncertain" },
       { effectId: "effect-invoke", status: "uncertain" },
       { effectId: "effect-complete", status: "completed" },
     ]);
     expect(terminalPayloads.map((payload) => payload.type)).toEqual([
+      "EffectFailed",
       "EffectUncertain",
       "EffectUncertain",
       "EffectCompleted",
     ]);
-    expect(terminalPayloads[0]).toMatchObject({ message: "Extension resolution failed: extension is inactive" });
-    expect(terminalPayloads[1]).toMatchObject({ message: "Effect dispatch failed before its outcome was known: provider unavailable" });
+    expect(terminalPayloads[0]).toMatchObject({
+      code: "EXTENSION_RESOLUTION_FAILED",
+      message: "Extension resolution failed before dispatch: extension is inactive",
+    });
+    expect(terminalPayloads[1]).toMatchObject({
+      message: "Extension resolution failed while reconciling a previous dispatch: extension is inactive",
+    });
+    expect(terminalPayloads[2]).toMatchObject({
+      message: "Effect dispatch failed before its outcome was known: provider unavailable",
+    });
   });
 
   it("does not turn a finishEffect persistence failure into extension uncertainty", async () => {
