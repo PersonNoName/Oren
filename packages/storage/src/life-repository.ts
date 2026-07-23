@@ -35,7 +35,10 @@ export class SqliteLifeRepository {
 
   private loadEventsAfter(orenId: string, cursor: number): EventEnvelope[] {
     return this.db.prepare(`
-      SELECT envelope_json FROM events WHERE oren_id = ? AND sequence > ? ORDER BY sequence
+      SELECT envelope_json FROM events
+      WHERE oren_id = ?
+      ORDER BY sequence
+      LIMIT -1 OFFSET ?
     `).all(orenId, cursor).map((row) => JSON.parse(String(row.envelope_json)) as EventEnvelope);
   }
 

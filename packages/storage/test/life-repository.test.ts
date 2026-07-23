@@ -71,6 +71,50 @@ describe("SqliteLifeRepository", () => {
     expect(repo.rehydrate("oren-1")).toEqual(reduceLifeState(compactedSnapshot, secondEvent));
   });
 
+  it("rehydrates a compacted Oren by its per-Oren event cursor when events are interleaved", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    const initial = createInitialLifeState("oren-a", "person-a");
+    repo.initialize(initial);
+    repo.initialize(createInitialLifeState("oren-b", "person-b"));
+    const orenBFirst = event("event-b-1", "oren-b", {
+      type: "DispositionUpdated",
+      disposition: "alert",
+      reason: "interleaved before oren-a",
+    });
+    const orenAFirst = event("event-a-1", "oren-a", {
+      type: "DispositionUpdated",
+      disposition: "reflective",
+      reason: "covered by snapshot",
+    });
+    const orenBSecond = event("event-b-2", "oren-b", {
+      type: "ThreadAdvanced",
+      threadId: "thread-b",
+      summary: "interleaved after oren-a snapshot event",
+    });
+    const orenASecond = event("event-a-2", "oren-a", {
+      type: "ThreadAdvanced",
+      threadId: "thread-a",
+      summary: "must replay once",
+    });
+    repo.appendAndEnqueueEffects("oren-b", [orenBFirst], []);
+    repo.appendAndEnqueueEffects("oren-a", [orenAFirst], []);
+    repo.appendAndEnqueueEffects("oren-b", [orenBSecond], []);
+    repo.appendAndEnqueueEffects("oren-a", [orenASecond], []);
+
+    const compactedSnapshot = reduceLifeState(initial, orenAFirst);
+    db.prepare(`
+      UPDATE snapshots SET version = ?, cursor = ?, state_json = ? WHERE oren_id = ?
+    `).run(
+      compactedSnapshot.version,
+      compactedSnapshot.chronicleCursor,
+      JSON.stringify(compactedSnapshot),
+      "oren-a",
+    );
+
+    expect(repo.rehydrate("oren-a")).toEqual(reduceLifeState(compactedSnapshot, orenASecond));
+  });
+
   it.each([
     {
       name: "an event owned by another Oren",
