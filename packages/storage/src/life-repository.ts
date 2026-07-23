@@ -3,6 +3,7 @@ import {
   reduceLifeState,
   type Effect,
   type EventEnvelope,
+  type Grant,
   type JsonObject,
   type LifeState,
 } from "@oren/kernel";
@@ -27,6 +28,34 @@ export class SqliteLifeRepository {
       INSERT OR IGNORE INTO snapshots(oren_id, version, cursor, state_json)
       VALUES (?, ?, ?, ?)
     `).run(state.orenId, state.version, state.chronicleCursor, JSON.stringify(state));
+  }
+
+  public putGrant(orenId: string, grant: Grant): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = this.db.prepare(`
+        SELECT oren_id FROM grants WHERE grant_id = ?
+      `).get(grant.grantId);
+      if (existing && String(existing.oren_id) !== orenId) {
+        throw new Error(`Grant ${grant.grantId} already belongs to ${String(existing.oren_id)}`);
+      }
+      this.db.prepare(`
+        INSERT INTO grants(grant_id, oren_id, grant_json, revoked_at)
+        VALUES (?, ?, ?, NULL)
+        ON CONFLICT(grant_id) DO UPDATE SET grant_json = excluded.grant_json
+        WHERE grants.oren_id = excluded.oren_id
+      `).run(grant.grantId, orenId, JSON.stringify(grant));
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public loadGrants(orenId: string): Grant[] {
+    return this.db.prepare(`
+      SELECT grant_json FROM grants WHERE oren_id = ? AND revoked_at IS NULL
+    `).all(orenId).map((row) => JSON.parse(String(row.grant_json)) as Grant);
   }
 
   public loadEvents(orenId: string): EventEnvelope[] {

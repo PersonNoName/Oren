@@ -4,6 +4,7 @@ import {
   reduceLifeState,
   type Effect,
   type EventEnvelope,
+  type Grant,
 } from "@oren/kernel";
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
@@ -172,6 +173,25 @@ describe("SqliteLifeRepository", () => {
 
     expect(() => repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 })).toThrow();
     expect(repo.claimOutbox("worker-1", 1)).toEqual([]);
+  });
+
+  it("does not allow a grant identity to be reassigned to another Oren", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    const grant: Grant = {
+      grantId: "grant-1",
+      capabilityPattern: "test.*",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      revoked: false,
+    };
+
+    repo.putGrant("oren-1", grant);
+
+    expect(() => repo.putGrant("oren-2", { ...grant, capabilityPattern: "other.*" })).toThrow(
+      "Grant grant-1 already belongs to oren-1",
+    );
+    expect(repo.loadGrants("oren-1")).toEqual([grant]);
+    expect(repo.loadGrants("oren-2")).toEqual([]);
   });
 });
 
