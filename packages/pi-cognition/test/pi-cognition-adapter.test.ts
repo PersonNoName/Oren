@@ -257,60 +257,99 @@ describe("PiCognitionAdapter", () => {
     expect(result).toEqual({ kind: "aborted", usage: { totalTokens: 0 } });
   });
 
-  it("settles promptly when aborted during a non-cooperative capability invocation", async () => {
-    let markInvocationStarted: (() => void) | undefined;
-    const invocationStarted = new Promise<void>((resolve) => {
-      markInvocationStarted = resolve;
-    });
-    let settleCapability: ((outcome: {
-      readonly kind: "waiting_for_effect";
-      readonly effectId: string;
-    }) => void) | undefined;
-    const capabilityOutcome = new Promise<{
-      readonly kind: "waiting_for_effect";
-      readonly effectId: string;
-    }>((resolve) => {
-      settleCapability = resolve;
-    });
-    const controller = new AbortController();
-    let observedSignal: AbortSignal | undefined;
-    const adapter = new PiCognitionAdapter({
-      model: createMockModel(),
-      streamFn: createSequenceStream([
+  it.each(["resolve", "reject"] as const)(
+    "settles an aborted capability before a second stream and ignores its late %s",
+    async (lateSettlement) => {
+      let markInvocationStarted: (() => void) | undefined;
+      const invocationStarted = new Promise<void>((resolve) => {
+        markInvocationStarted = resolve;
+      });
+      let resolveCapability: ((outcome: {
+        readonly kind: "waiting_for_effect";
+        readonly effectId: string;
+      }) => void) | undefined;
+      let rejectCapability: ((error: unknown) => void) | undefined;
+      const capabilityOutcome = new Promise<{
+        readonly kind: "waiting_for_effect";
+        readonly effectId: string;
+      }>((resolve, reject) => {
+        resolveCapability = resolve;
+        rejectCapability = reject;
+      });
+      const controller = new AbortController();
+      let observedSignal: AbortSignal | undefined;
+      let streamCalls = 0;
+      const firstStream = createSequenceStream([
         assistantMessage([{
           type: "toolCall",
           id: "lookup-1",
           name: immediateDescriptor.name,
           arguments: { query: "hang" },
         }]),
-      ]),
-      messageTimestamp: () => 1_700_000_000_000,
-    });
-    const run = adapter.run(
-      createFrame({ capabilities: [immediateDescriptor] }),
-      {
-        invoke: async (_input, signal) => {
-          observedSignal = signal;
-          markInvocationStarted?.();
-          return capabilityOutcome;
+      ]);
+      const adapter = new PiCognitionAdapter({
+        model: createMockModel(),
+        streamFn: () => {
+          streamCalls += 1;
+          return streamCalls === 1
+            ? firstStream()
+            : new Promise<never>(() => undefined);
         },
-      },
-      controller.signal,
-    );
+        messageTimestamp: () => 1_700_000_000_000,
+      });
+      const run = adapter.run(
+        createFrame({ capabilities: [immediateDescriptor] }),
+        {
+          invoke: async (_input, signal) => {
+            observedSignal = signal;
+            markInvocationStarted?.();
+            return capabilityOutcome;
+          },
+        },
+        controller.signal,
+      );
 
-    await invocationStarted;
-    controller.abort(new Error("stop"));
-    settleCapability?.({ kind: "waiting_for_effect", effectId: "late-effect" });
-    const settled = await Promise.race([
-      run,
-      new Promise<"timed_out">((resolve) => {
-        setTimeout(() => resolve("timed_out"), 100);
-      }),
-    ]);
+      await invocationStarted;
+      controller.abort(new Error("stop"));
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const settled = await Promise.race([
+        run,
+        new Promise<"timed_out">((resolve) => {
+          timeout = setTimeout(() => resolve("timed_out"), 1_000);
+        }),
+      ]);
+      if (timeout !== undefined) clearTimeout(timeout);
 
-    expect(observedSignal).toBe(controller.signal);
-    expect(settled).toEqual({ kind: "aborted", usage: { totalTokens: 2 } });
-  });
+      expect(observedSignal).toBe(controller.signal);
+      expect({ settled, streamCalls }).toEqual({
+        settled: { kind: "aborted", usage: { totalTokens: 2 } },
+        streamCalls: 1,
+      });
+
+      const unhandledRejections: unknown[] = [];
+      const recordUnhandledRejection = (reason: unknown) => {
+        unhandledRejections.push(reason);
+      };
+      process.on("unhandledRejection", recordUnhandledRejection);
+      try {
+        if (lateSettlement === "resolve") {
+          resolveCapability?.({
+            kind: "waiting_for_effect",
+            effectId: "late-effect",
+          });
+        } else {
+          rejectCapability?.(new Error("late capability failure"));
+        }
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(settled).toEqual({ kind: "aborted", usage: { totalTokens: 2 } });
+        expect(streamCalls).toBe(1);
+        expect(unhandledRejections).toEqual([]);
+      } finally {
+        process.off("unhandledRejection", recordUnhandledRejection);
+      }
+    },
+  );
 
   it("maps Pi's aborted terminal message and its usage to an aborted outcome", async () => {
     const adapter = new PiCognitionAdapter({

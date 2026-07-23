@@ -137,7 +137,8 @@ export class PiCognitionAdapter implements CognitionPort {
           },
           shouldStopAfterTurn: () => {
             turns += 1;
-            return waitingEffectId !== null
+            return signal.aborted
+              || waitingEffectId !== null
               || committed !== null
               || turns >= frame.maxSteps;
           },
