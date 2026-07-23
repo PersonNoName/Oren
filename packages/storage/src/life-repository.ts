@@ -321,10 +321,12 @@ export class SqliteLifeRepository {
           operations.oren_id AS operation_oren_id,
           operations.capability AS operation_capability,
           operations.status AS operation_status,
-          CAST(operations.attempts AS TEXT) AS operation_attempts_text
+          CAST(operations.attempts AS TEXT) AS operation_attempts_text,
+          operations.quarantined AS operation_quarantined
         FROM outbox
         LEFT JOIN operations ON operations.effect_id = outbox.effect_id
-        WHERE outbox.status IN ('pending','dispatched')
+        WHERE outbox.quarantined = 0
+          AND outbox.status IN ('pending','dispatched')
           AND (outbox.lease_until IS NULL OR outbox.lease_until <= ?)
           AND NOT EXISTS (
             SELECT 1 FROM effect_quarantine
@@ -335,13 +337,13 @@ export class SqliteLifeRepository {
       const lease = this.db.prepare(`
         UPDATE outbox
         SET status = 'dispatched', lease_owner = ?, lease_until = ?, attempts = attempts + 1
-        WHERE effect_id = ? AND status = ? AND attempts = ?
+        WHERE effect_id = ? AND quarantined = 0 AND status = ? AND attempts = ?
       `);
       const updateOperation = this.db.prepare(`
         UPDATE operations
         SET status = 'dispatched', attempts = attempts + 1
         WHERE effect_id = ? AND oren_id = ? AND capability = ?
-          AND status = ? AND attempts = ?
+          AND quarantined = 0 AND status = ? AND attempts = ?
       `);
       const quarantine = this.db.prepare(`
         INSERT OR IGNORE INTO effect_quarantine(effect_id, reason, quarantined_at)
@@ -391,6 +393,7 @@ export class SqliteLifeRepository {
           || String(row.operation_capability) !== outboxCapability
           || String(row.operation_status) !== outboxStatus
           || operationAttempts !== outboxAttempts
+          || Number(row.operation_quarantined) !== 0
         ) {
           quarantine.run(effectId, "operation row is missing or inconsistent with outbox", now);
           continue;
@@ -452,7 +455,8 @@ export class SqliteLifeRepository {
           effect_json,
           status,
           CAST(attempts AS TEXT) AS attempts_text,
-          receipt_json
+          receipt_json,
+          quarantined
         FROM outbox WHERE effect_id = ?
       `).get(effectId);
       if (!outbox) {
@@ -463,6 +467,7 @@ export class SqliteLifeRepository {
         effect === undefined
         ||
         String(outbox.oren_id) !== orenId
+        || Number(outbox.quarantined) !== 0
         || effect.effectId !== effectId
         || effect.orenId !== orenId
         || effect.correlationId !== correlationId
@@ -477,11 +482,13 @@ export class SqliteLifeRepository {
           capability,
           status,
           CAST(attempts AS TEXT) AS attempts_text,
-          receipt_json
+          receipt_json,
+          quarantined
         FROM operations WHERE effect_id = ?
       `).get(effectId);
       if (
         !operation
+        || Number(operation.quarantined) !== 0
         || String(operation.oren_id) !== orenId
         || String(operation.capability) !== effect.capability
       ) {
@@ -562,7 +569,7 @@ export class SqliteLifeRepository {
         UPDATE outbox
         SET status = ?, receipt_json = ?, lease_owner = NULL, lease_until = NULL
         WHERE effect_id = ? AND oren_id = ?
-          AND status = ? AND attempts = ?
+          AND quarantined = 0 AND status = ? AND attempts = ?
       `).run(status, receipt, effectId, orenId, outboxStatus, outboxAttempts);
       if (Number(outboxUpdate.changes) !== 1) {
         throw new Error(`Effect ${effectId} outbox did not transition`);
@@ -571,7 +578,7 @@ export class SqliteLifeRepository {
         UPDATE operations
         SET status = ?, receipt_json = ?
         WHERE effect_id = ? AND oren_id = ?
-          AND status = ? AND attempts = ?
+          AND quarantined = 0 AND status = ? AND attempts = ?
       `).run(status, receipt, effectId, orenId, operationStatus, operationAttempts);
       if (Number(operationUpdate.changes) !== 1) {
         throw new Error(`Effect ${effectId} operation did not transition`);

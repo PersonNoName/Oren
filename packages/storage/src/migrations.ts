@@ -1,37 +1,82 @@
 import type { DatabaseSync } from "node:sqlite";
 
-const OUTBOX_TABLE = `
-  CREATE TABLE outbox (
-    effect_id TEXT PRIMARY KEY,
-    oren_id TEXT NOT NULL,
-    capability TEXT NOT NULL,
-    effect_json TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
-    lease_owner TEXT,
-    lease_until TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0 CHECK(
-      typeof(attempts) = 'integer'
-      AND attempts BETWEEN 0 AND 9007199254740991
-      AND (status <> 'pending' OR attempts = 0)
-      AND (status <> 'dispatched' OR attempts >= 1)
-    ),
-    receipt_json TEXT
+// `quarantined = 0` is the only active state: those rows must have textual
+// application identity/effect columns, satisfy the status/attempt checks, and
+// may be claimed or finished. `quarantined = 1` is an inert migration
+// tombstone that preserves a corrupt legacy parent key and its original
+// columns for dependent foreign keys and manual recovery.
+const OUTBOX_COLUMNS = `
+  effect_id TEXT PRIMARY KEY,
+  oren_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  effect_json TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+  lease_owner TEXT,
+  lease_until TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  receipt_json TEXT,
+  quarantined INTEGER NOT NULL DEFAULT 0 CHECK(
+    quarantined IN (0, 1)
+    AND (
+      quarantined = 1
+      OR (
+        typeof(effect_id) = 'text'
+        AND typeof(oren_id) = 'text'
+        AND typeof(capability) = 'text'
+        AND typeof(effect_json) = 'text'
+        AND typeof(attempts) = 'integer'
+        AND attempts BETWEEN 0 AND 9007199254740991
+        AND (status <> 'pending' OR attempts = 0)
+        AND (status <> 'dispatched' OR attempts >= 1)
+      )
+    )
   )
 `;
 
-const OPERATIONS_TABLE = `
-  CREATE TABLE operations (
-    effect_id TEXT PRIMARY KEY,
-    oren_id TEXT NOT NULL,
-    capability TEXT NOT NULL,
-    status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
-    attempts INTEGER NOT NULL DEFAULT 0 CHECK(
-      typeof(attempts) = 'integer'
-      AND attempts BETWEEN 0 AND 9007199254740991
-      AND (status <> 'pending' OR attempts = 0)
-      AND (status <> 'dispatched' OR attempts >= 1)
-    ),
-    receipt_json TEXT
+const OPERATIONS_COLUMNS = `
+  effect_id TEXT PRIMARY KEY,
+  oren_id TEXT NOT NULL,
+  capability TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  receipt_json TEXT,
+  quarantined INTEGER NOT NULL DEFAULT 0 CHECK(
+    quarantined IN (0, 1)
+    AND (
+      quarantined = 1
+      OR (
+        typeof(effect_id) = 'text'
+        AND typeof(oren_id) = 'text'
+        AND typeof(capability) = 'text'
+        AND typeof(attempts) = 'integer'
+        AND attempts BETWEEN 0 AND 9007199254740991
+        AND (status <> 'pending' OR attempts = 0)
+        AND (status <> 'dispatched' OR attempts >= 1)
+      )
+    )
+  )
+`;
+
+// Runtime quarantine records have a NULL source identity and are unique by
+// effect_id. Migration evidence has a stable (source_table, source_rowid)
+// identity, allowing duplicate and NULL legacy effect_id values without
+// weakening the genuinely non-null quarantine_id primary key.
+const QUARANTINE_COLUMNS = `
+  quarantine_id INTEGER PRIMARY KEY NOT NULL,
+  effect_id TEXT,
+  reason TEXT NOT NULL,
+  quarantined_at TEXT NOT NULL,
+  source_table TEXT,
+  source_rowid INTEGER,
+  legacy_reason TEXT,
+  legacy_outbox_json TEXT,
+  legacy_operation_json TEXT,
+  CHECK(
+    (source_table IS NULL AND source_rowid IS NULL)
+    OR (
+      source_table IN ('outbox', 'operations')
+      AND typeof(source_rowid) = 'integer'
+    )
   )
 `;
 
@@ -43,12 +88,25 @@ const VALID_OUTBOX_STATE = `
   AND (o.status <> 'dispatched' OR o.attempts >= 1)
 `;
 
+const VALID_OUTBOX_STORAGE = `
+  typeof(o.effect_id) = 'text'
+  AND typeof(o.oren_id) = 'text'
+  AND typeof(o.capability) = 'text'
+  AND typeof(o.effect_json) = 'text'
+`;
+
 const VALID_OPERATION_STATE = `
   p.status IN ('pending','dispatched','completed','failed','uncertain','cancelled')
   AND typeof(p.attempts) = 'integer'
   AND p.attempts BETWEEN 0 AND 9007199254740991
   AND (p.status <> 'pending' OR p.attempts = 0)
   AND (p.status <> 'dispatched' OR p.attempts >= 1)
+`;
+
+const VALID_OPERATION_STORAGE = `
+  typeof(p.effect_id) = 'text'
+  AND typeof(p.oren_id) = 'text'
+  AND typeof(p.capability) = 'text'
 `;
 
 const CONSISTENT_PAIR = `
@@ -58,16 +116,42 @@ const CONSISTENT_PAIR = `
   AND p.attempts = o.attempts
 `;
 
+interface SchemaObject {
+  readonly sql: string;
+}
+
 export function migrate(db: DatabaseSync): void {
-  db.exec("BEGIN IMMEDIATE");
+  const rebuildEffects = effectTablesNeedRebuild(db);
+  const rebuildQuarantine = quarantineNeedsRebuild(db);
+  const needsRelaxedRebuildPragmas = rebuildEffects || rebuildQuarantine;
+  const originalForeignKeys = pragmaNumber(db, "foreign_keys");
+  const originalLegacyAlterTable = pragmaNumber(db, "legacy_alter_table");
+  let transactionStarted = false;
+
   try {
+    if (needsRelaxedRebuildPragmas) {
+      if (originalForeignKeys !== 0) db.exec("PRAGMA foreign_keys = OFF");
+      if (originalLegacyAlterTable === 0) db.exec("PRAGMA legacy_alter_table = ON");
+    }
+    db.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
     createNonEffectTables(db);
     createOrEvolveQuarantine(db);
     migrateEffectTables(db);
+    if (needsRelaxedRebuildPragmas) assertForeignKeysValid(db);
     db.exec("COMMIT");
+    transactionStarted = false;
   } catch (error) {
-    db.exec("ROLLBACK");
+    if (transactionStarted) {
+      db.exec("ROLLBACK");
+      transactionStarted = false;
+    }
     throw error;
+  } finally {
+    if (needsRelaxedRebuildPragmas) {
+      db.exec(`PRAGMA legacy_alter_table = ${originalLegacyAlterTable === 0 ? "OFF" : "ON"}`);
+      db.exec(`PRAGMA foreign_keys = ${originalForeignKeys === 0 ? "OFF" : "ON"}`);
+    }
   }
 }
 
@@ -118,91 +202,86 @@ function createNonEffectTables(db: DatabaseSync): void {
 }
 
 function createOrEvolveQuarantine(db: DatabaseSync): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS effect_quarantine (
-      effect_id TEXT PRIMARY KEY,
-      reason TEXT NOT NULL,
-      quarantined_at TEXT NOT NULL,
-      legacy_reason TEXT,
-      legacy_outbox_json TEXT,
-      legacy_operation_json TEXT
-    )
-  `);
+  const sql = tableSql(db, "effect_quarantine");
+  if (sql === undefined) {
+    createQuarantineTable(db, "effect_quarantine");
+    createQuarantineIndexes(db);
+    return;
+  }
+  if (hasRequiredQuarantineSchema(db)) {
+    createQuarantineIndexes(db);
+    return;
+  }
+
+  const objects = ownedSchemaObjects(db, ["effect_quarantine"]);
   const columns = new Set(
     db.prepare("PRAGMA table_info(effect_quarantine)").all().map((row) => String(row.name)),
   );
-  for (const column of [
-    "legacy_reason",
-    "legacy_outbox_json",
-    "legacy_operation_json",
-  ]) {
-    if (!columns.has(column)) {
-      db.exec(`ALTER TABLE effect_quarantine ADD COLUMN ${column} TEXT`);
-    }
-  }
+  createQuarantineTable(db, "__task8_effect_quarantine_new");
+  db.exec(`
+    INSERT INTO __task8_effect_quarantine_new(
+      effect_id,
+      reason,
+      quarantined_at,
+      source_table,
+      source_rowid,
+      legacy_reason,
+      legacy_outbox_json,
+      legacy_operation_json
+    )
+    SELECT
+      effect_id,
+      reason,
+      quarantined_at,
+      ${columns.has("source_table") ? "source_table" : "NULL"},
+      ${columns.has("source_rowid") ? "source_rowid" : "NULL"},
+      ${columns.has("legacy_reason") ? "legacy_reason" : "NULL"},
+      ${columns.has("legacy_outbox_json") ? "legacy_outbox_json" : "NULL"},
+      ${columns.has("legacy_operation_json") ? "legacy_operation_json" : "NULL"}
+    FROM effect_quarantine
+    ORDER BY rowid;
+    DROP TABLE effect_quarantine;
+    ALTER TABLE __task8_effect_quarantine_new RENAME TO effect_quarantine;
+  `);
+  createQuarantineIndexes(db);
+  recreateSchemaObjects(db, objects);
+}
+
+function createQuarantineTable(db: DatabaseSync, name: string): void {
+  db.exec(`CREATE TABLE ${name} (${QUARANTINE_COLUMNS})`);
+}
+
+function createQuarantineIndexes(db: DatabaseSync): void {
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS effect_quarantine_runtime_effect
+    ON effect_quarantine(effect_id)
+    WHERE source_table IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS effect_quarantine_source_row
+    ON effect_quarantine(source_table, source_rowid)
+    WHERE source_table IS NOT NULL;
+  `);
 }
 
 function migrateEffectTables(db: DatabaseSync): void {
   const outboxSql = tableSql(db, "outbox");
   const operationsSql = tableSql(db, "operations");
   if (outboxSql === undefined && operationsSql === undefined) {
-    db.exec(`${OUTBOX_TABLE}; ${OPERATIONS_TABLE};`);
+    createEffectTable(db, "outbox", OUTBOX_COLUMNS);
+    createEffectTable(db, "operations", OPERATIONS_COLUMNS);
     return;
   }
-  if (
-    outboxSql !== undefined
-    && operationsSql !== undefined
-    && hasRequiredEffectConstraints(outboxSql)
-    && hasRequiredEffectConstraints(operationsSql)
-  ) {
-    return;
-  }
+  if (!effectTablesNeedRebuild(db)) return;
 
-  const indexSql = db.prepare(`
-    SELECT sql
-    FROM sqlite_master
-    WHERE type = 'index'
-      AND tbl_name IN ('outbox', 'operations')
-      AND sql IS NOT NULL
-    ORDER BY name
-  `).all().flatMap((row) => typeof row.sql === "string" ? [row.sql] : []);
+  const objects = ownedSchemaObjects(db, ["outbox", "operations"]);
+  if (outboxSql === undefined) createLegacyOutboxPlaceholder(db);
+  if (operationsSql === undefined) createLegacyOperationsPlaceholder(db);
 
-  if (outboxSql === undefined) {
-    db.exec(`
-      CREATE TABLE __task8_outbox_legacy (
-        effect_id TEXT PRIMARY KEY,
-        oren_id TEXT NOT NULL,
-        capability TEXT NOT NULL,
-        effect_json TEXT NOT NULL,
-        status TEXT NOT NULL,
-        lease_owner TEXT,
-        lease_until TEXT,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        receipt_json TEXT
-      )
-    `);
-  } else {
-    db.exec("ALTER TABLE outbox RENAME TO __task8_outbox_legacy");
-  }
-  if (operationsSql === undefined) {
-    db.exec(`
-      CREATE TABLE __task8_operations_legacy (
-        effect_id TEXT PRIMARY KEY,
-        oren_id TEXT NOT NULL,
-        capability TEXT NOT NULL,
-        status TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        receipt_json TEXT
-      )
-    `);
-  } else {
-    db.exec("ALTER TABLE operations RENAME TO __task8_operations_legacy");
-  }
-
-  db.exec(`${OUTBOX_TABLE}; ${OPERATIONS_TABLE};`);
-  quarantineInvalidLegacyPairs(db);
+  createEffectTable(db, "__task8_outbox_new", OUTBOX_COLUMNS);
+  createEffectTable(db, "__task8_operations_new", OPERATIONS_COLUMNS);
+  classifyAndQuarantineInvalidLegacyRows(db);
   db.exec(`
-    INSERT INTO outbox(
+    INSERT INTO __task8_outbox_new(
+      rowid,
       effect_id,
       oren_id,
       capability,
@@ -211,9 +290,11 @@ function migrateEffectTables(db: DatabaseSync): void {
       lease_owner,
       lease_until,
       attempts,
-      receipt_json
+      receipt_json,
+      quarantined
     )
     SELECT
+      o.rowid,
       o.effect_id,
       o.oren_id,
       o.capability,
@@ -222,139 +303,291 @@ function migrateEffectTables(db: DatabaseSync): void {
       o.lease_owner,
       o.lease_until,
       o.attempts,
-      o.receipt_json
-    FROM __task8_outbox_legacy AS o
-    INNER JOIN __task8_operations_legacy AS p ON p.effect_id = o.effect_id
-    WHERE ${VALID_OUTBOX_STATE}
-      AND ${VALID_OPERATION_STATE}
-      AND ${CONSISTENT_PAIR};
+      o.receipt_json,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM __task8_invalid_effect_rows AS invalid
+        WHERE invalid.source_table = 'outbox'
+          AND invalid.source_rowid = o.rowid
+      ) THEN 1 ELSE 0 END
+    FROM outbox AS o
+    ORDER BY o.rowid;
 
-    INSERT INTO operations(
+    INSERT INTO __task8_operations_new(
+      rowid,
       effect_id,
       oren_id,
       capability,
       status,
       attempts,
-      receipt_json
+      receipt_json,
+      quarantined
     )
     SELECT
+      p.rowid,
       p.effect_id,
       p.oren_id,
       p.capability,
       p.status,
       p.attempts,
-      p.receipt_json
-    FROM __task8_operations_legacy AS p
-    INNER JOIN __task8_outbox_legacy AS o ON o.effect_id = p.effect_id
-    WHERE ${VALID_OUTBOX_STATE}
-      AND ${VALID_OPERATION_STATE}
-      AND ${CONSISTENT_PAIR};
+      p.receipt_json,
+      CASE WHEN EXISTS (
+        SELECT 1
+        FROM __task8_invalid_effect_rows AS invalid
+        WHERE invalid.source_table = 'operations'
+          AND invalid.source_rowid = p.rowid
+      ) THEN 1 ELSE 0 END
+    FROM operations AS p
+    ORDER BY p.rowid;
 
-    DROP TABLE __task8_outbox_legacy;
-    DROP TABLE __task8_operations_legacy;
+    DROP TABLE outbox;
+    DROP TABLE operations;
+    ALTER TABLE __task8_outbox_new RENAME TO outbox;
+    ALTER TABLE __task8_operations_new RENAME TO operations;
+    DROP TABLE __task8_invalid_effect_rows;
   `);
-  for (const sql of indexSql) db.exec(sql);
+  recreateSchemaObjects(db, objects);
 }
 
-function quarantineInvalidLegacyPairs(db: DatabaseSync): void {
-  db.exec(`
-    CREATE TEMP TABLE __task8_invalid_effects (
-      effect_id PRIMARY KEY,
-      reason TEXT NOT NULL
-    );
+function createEffectTable(db: DatabaseSync, name: string, columns: string): void {
+  db.exec(`CREATE TABLE ${name} (${columns})`);
+}
 
-    INSERT INTO __task8_invalid_effects(effect_id, reason)
+function createLegacyOutboxPlaceholder(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE outbox (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      effect_json TEXT NOT NULL,
+      status TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_until TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    )
+  `);
+}
+
+function createLegacyOperationsPlaceholder(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE operations (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    )
+  `);
+}
+
+function classifyAndQuarantineInvalidLegacyRows(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TEMP TABLE __task8_invalid_effect_rows (
+      source_table TEXT NOT NULL,
+      source_rowid INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      PRIMARY KEY(source_table, source_rowid)
+    ) WITHOUT ROWID;
+
+    INSERT INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
     SELECT
-      o.effect_id,
+      'outbox',
+      o.rowid,
       CASE
-        WHEN p.effect_id IS NULL THEN 'legacy row pair is missing operation row'
-        WHEN NOT (${VALID_OUTBOX_STATE}) THEN 'legacy outbox has an invalid status/attempt state'
-        WHEN NOT (${VALID_OPERATION_STATE}) THEN 'legacy operation has an invalid status/attempt state'
+        WHEN o.effect_id IS NULL OR p.rowid IS NULL
+          THEN 'legacy row pair is missing operation row'
+        WHEN NOT (${VALID_OUTBOX_STORAGE})
+          THEN 'legacy outbox has invalid identity/effect storage classes'
+        WHEN NOT (${VALID_OPERATION_STORAGE})
+          THEN 'legacy operation has invalid identity storage classes'
+        WHEN NOT (${VALID_OUTBOX_STATE})
+          THEN 'legacy outbox has an invalid status/attempt state'
+        WHEN NOT (${VALID_OPERATION_STATE})
+          THEN 'legacy operation has an invalid status/attempt state'
         ELSE 'legacy outbox and operation rows are inconsistent'
       END
-    FROM __task8_outbox_legacy AS o
-    LEFT JOIN __task8_operations_legacy AS p ON p.effect_id = o.effect_id
-    WHERE p.effect_id IS NULL
+    FROM outbox AS o
+    LEFT JOIN operations AS p ON p.effect_id = o.effect_id
+    WHERE o.effect_id IS NULL
+      OR p.rowid IS NULL
+      OR NOT (${VALID_OUTBOX_STORAGE})
+      OR NOT (${VALID_OPERATION_STORAGE})
       OR NOT (${VALID_OUTBOX_STATE})
       OR NOT (${VALID_OPERATION_STATE})
       OR NOT (${CONSISTENT_PAIR});
 
-    INSERT OR IGNORE INTO __task8_invalid_effects(effect_id, reason)
-    SELECT p.effect_id, 'legacy row pair is missing outbox row'
-    FROM __task8_operations_legacy AS p
-    LEFT JOIN __task8_outbox_legacy AS o ON o.effect_id = p.effect_id
-    WHERE o.effect_id IS NULL;
+    INSERT INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    SELECT
+      'operations',
+      p.rowid,
+      CASE
+        WHEN p.effect_id IS NULL OR o.rowid IS NULL
+          THEN 'legacy row pair is missing outbox row'
+        WHEN NOT (${VALID_OUTBOX_STORAGE})
+          THEN 'legacy outbox has invalid identity/effect storage classes'
+        WHEN NOT (${VALID_OPERATION_STORAGE})
+          THEN 'legacy operation has invalid identity storage classes'
+        WHEN NOT (${VALID_OUTBOX_STATE})
+          THEN 'legacy outbox has an invalid status/attempt state'
+        WHEN NOT (${VALID_OPERATION_STATE})
+          THEN 'legacy operation has an invalid status/attempt state'
+        ELSE 'legacy outbox and operation rows are inconsistent'
+      END
+    FROM operations AS p
+    LEFT JOIN outbox AS o ON o.effect_id = p.effect_id
+    WHERE p.effect_id IS NULL
+      OR o.rowid IS NULL
+      OR NOT (${VALID_OUTBOX_STORAGE})
+      OR NOT (${VALID_OPERATION_STORAGE})
+      OR NOT (${VALID_OUTBOX_STATE})
+      OR NOT (${VALID_OPERATION_STATE})
+      OR NOT (${CONSISTENT_PAIR});
 
-    INSERT INTO effect_quarantine(
+    INSERT OR IGNORE INTO effect_quarantine(
       effect_id,
       reason,
       quarantined_at,
+      source_table,
+      source_rowid,
       legacy_reason,
       legacy_outbox_json,
       legacy_operation_json
     )
     SELECT
-      invalid.effect_id,
+      o.effect_id,
       invalid.reason,
       strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+      invalid.source_table,
+      invalid.source_rowid,
       invalid.reason,
-      (
-        SELECT json_object(
-          'effect_id_type', typeof(o.effect_id),
-          'effect_id_sql', quote(o.effect_id),
-          'oren_id_type', typeof(o.oren_id),
-          'oren_id_sql', quote(o.oren_id),
-          'capability_type', typeof(o.capability),
-          'capability_sql', quote(o.capability),
-          'effect_json_type', typeof(o.effect_json),
-          'effect_json_sql', quote(o.effect_json),
-          'status_type', typeof(o.status),
-          'status_sql', quote(o.status),
-          'lease_owner_type', typeof(o.lease_owner),
-          'lease_owner_sql', quote(o.lease_owner),
-          'lease_until_type', typeof(o.lease_until),
-          'lease_until_sql', quote(o.lease_until),
-          'attempts_type', typeof(o.attempts),
-          'attempts_sql', quote(o.attempts),
-          'receipt_json_type', typeof(o.receipt_json),
-          'receipt_json_sql', quote(o.receipt_json)
-        )
-        FROM __task8_outbox_legacy AS o
-        WHERE o.effect_id = invalid.effect_id
-      ),
-      (
-        SELECT json_object(
-          'effect_id_type', typeof(p.effect_id),
-          'effect_id_sql', quote(p.effect_id),
-          'oren_id_type', typeof(p.oren_id),
-          'oren_id_sql', quote(p.oren_id),
-          'capability_type', typeof(p.capability),
-          'capability_sql', quote(p.capability),
-          'status_type', typeof(p.status),
-          'status_sql', quote(p.status),
-          'attempts_type', typeof(p.attempts),
-          'attempts_sql', quote(p.attempts),
-          'receipt_json_type', typeof(p.receipt_json),
-          'receipt_json_sql', quote(p.receipt_json)
-        )
-        FROM __task8_operations_legacy AS p
-        WHERE p.effect_id = invalid.effect_id
-      )
-    FROM __task8_invalid_effects AS invalid
-    WHERE 1
-    ON CONFLICT(effect_id) DO UPDATE SET
-      legacy_reason = COALESCE(effect_quarantine.legacy_reason, excluded.legacy_reason),
-      legacy_outbox_json = COALESCE(
-        effect_quarantine.legacy_outbox_json,
-        excluded.legacy_outbox_json
-      ),
-      legacy_operation_json = COALESCE(
-        effect_quarantine.legacy_operation_json,
-        excluded.legacy_operation_json
-      );
+      ${legacyRowEvidenceSql("o", [
+        "effect_id",
+        "oren_id",
+        "capability",
+        "effect_json",
+        "status",
+        "lease_owner",
+        "lease_until",
+        "attempts",
+        "receipt_json",
+      ])},
+      NULL
+    FROM __task8_invalid_effect_rows AS invalid
+    JOIN outbox AS o ON invalid.source_table = 'outbox'
+      AND invalid.source_rowid = o.rowid;
 
-    DROP TABLE __task8_invalid_effects;
+    INSERT OR IGNORE INTO effect_quarantine(
+      effect_id,
+      reason,
+      quarantined_at,
+      source_table,
+      source_rowid,
+      legacy_reason,
+      legacy_outbox_json,
+      legacy_operation_json
+    )
+    SELECT
+      p.effect_id,
+      invalid.reason,
+      strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+      invalid.source_table,
+      invalid.source_rowid,
+      invalid.reason,
+      NULL,
+      ${legacyRowEvidenceSql("p", [
+        "effect_id",
+        "oren_id",
+        "capability",
+        "status",
+        "attempts",
+        "receipt_json",
+      ])}
+    FROM __task8_invalid_effect_rows AS invalid
+    JOIN operations AS p ON invalid.source_table = 'operations'
+      AND invalid.source_rowid = p.rowid;
   `);
+}
+
+function legacyRowEvidenceSql(alias: string, columns: readonly string[]): string {
+  const entries = columns.flatMap((column) => {
+    const value = `${alias}.${column}`;
+    const bytes = `CASE
+      WHEN ${value} IS NULL THEN NULL
+      WHEN typeof(${value}) = 'real'
+        THEN CAST(printf('%!.17g', ${value}) AS BLOB)
+      ELSE CAST(${value} AS BLOB)
+    END`;
+    return [
+      `'${column}_type', typeof(${value})`,
+      `'${column}_hex', CASE WHEN ${value} IS NULL THEN NULL ELSE hex(${bytes}) END`,
+      `'${column}_length', length(${bytes})`,
+      `'${column}_sql', quote(${value})`,
+    ];
+  });
+  return `json_object(${entries.join(", ")})`;
+}
+
+function effectTablesNeedRebuild(db: DatabaseSync): boolean {
+  const outboxSql = tableSql(db, "outbox");
+  const operationsSql = tableSql(db, "operations");
+  if (outboxSql === undefined && operationsSql === undefined) return false;
+  return outboxSql === undefined
+    || operationsSql === undefined
+    || !hasRequiredEffectConstraints(outboxSql)
+    || !hasRequiredEffectConstraints(operationsSql);
+}
+
+function quarantineNeedsRebuild(db: DatabaseSync): boolean {
+  return tableSql(db, "effect_quarantine") !== undefined && !hasRequiredQuarantineSchema(db);
+}
+
+function hasRequiredQuarantineSchema(db: DatabaseSync): boolean {
+  const columns = db.prepare("PRAGMA table_info(effect_quarantine)").all();
+  const byName = new Map(columns.map((row) => [String(row.name), row]));
+  const id = byName.get("quarantine_id");
+  return id !== undefined
+    && String(id.type).toUpperCase() === "INTEGER"
+    && Number(id.pk) === 1
+    && Number(id.notnull) === 1
+    && byName.has("effect_id")
+    && byName.has("source_table")
+    && byName.has("source_rowid")
+    && byName.has("legacy_reason")
+    && byName.has("legacy_outbox_json")
+    && byName.has("legacy_operation_json");
+}
+
+function ownedSchemaObjects(db: DatabaseSync, tables: readonly string[]): SchemaObject[] {
+  const placeholders = tables.map(() => "?").join(", ");
+  return db.prepare(`
+    SELECT sql
+    FROM sqlite_master
+    WHERE type IN ('index', 'trigger')
+      AND tbl_name IN (${placeholders})
+      AND sql IS NOT NULL
+    ORDER BY CASE type WHEN 'index' THEN 0 ELSE 1 END, name
+  `).all(...tables).flatMap((row) => typeof row.sql === "string" ? [{ sql: row.sql }] : []);
+}
+
+function recreateSchemaObjects(db: DatabaseSync, objects: readonly SchemaObject[]): void {
+  for (const object of objects) db.exec(object.sql);
+}
+
+function assertForeignKeysValid(db: DatabaseSync): void {
+  const violations = db.prepare("PRAGMA foreign_key_check").all();
+  if (violations.length === 0) return;
+  const summary = violations.map((row) => (
+    `${String(row.table)} row ${String(row.rowid)} -> ${String(row.parent)}`
+  )).join(", ");
+  throw new Error(`Foreign key check failed after effect-table rebuild: ${summary}`);
+}
+
+function pragmaNumber(db: DatabaseSync, pragma: string): number {
+  const row = db.prepare(`PRAGMA ${pragma}`).get();
+  const value = row ? Object.values(row)[0] : undefined;
+  return Number(value);
 }
 
 function tableSql(db: DatabaseSync, table: string): string | undefined {
@@ -369,6 +602,12 @@ function hasRequiredEffectConstraints(sql: string): boolean {
   return normalized.includes(
     "status text not null check(status in ('pending','dispatched','completed','failed','uncertain','cancelled'))",
   )
+    && normalized.includes("quarantined integer not null default 0")
+    && normalized.includes("quarantined in (0, 1)")
+    && normalized.includes("quarantined = 1")
+    && normalized.includes("typeof(effect_id) = 'text'")
+    && normalized.includes("typeof(oren_id) = 'text'")
+    && normalized.includes("typeof(capability) = 'text'")
     && normalized.includes("typeof(attempts) = 'integer'")
     && normalized.includes("attempts between 0 and 9007199254740991")
     && normalized.includes("status <> 'pending' or attempts = 0")
