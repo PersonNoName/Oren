@@ -1,0 +1,13 @@
+{
+  "name": "@oren/pi-cognition",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.75.5",
+    "@earendil-works/pi-ai": "0.75.5",
+    "@oren/cognition": "*",
+    "@oren/kernel": "*",
+    "typebox": "1.1.38"
+  }
+}

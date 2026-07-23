@@ -1,0 +1,379 @@
+import { describe, expect, it, vi } from "vitest";
+import type { CapabilityDescriptor, Proposal } from "@oren/kernel";
+import { PiCognitionAdapter } from "../src/index.js";
+import {
+  assistantMessage,
+  createCommitStream,
+  createFrame,
+  createMockModel,
+  createSequenceStream,
+  failedAssistantMessage,
+} from "./fixtures.js";
+
+const immediateDescriptor: CapabilityDescriptor = {
+  extensionId: "test-memory",
+  name: "memory.lookup",
+  description: "Look up a memory",
+  inputSchema: {
+    type: "object",
+    properties: { query: { type: "string" } },
+    required: ["query"],
+  },
+  outputSchema: { type: "object" },
+  permissionRequirements: [],
+  traits: ["read_only", "replay_safe"],
+  cancellable: true,
+  timeoutMs: 1000,
+};
+
+const persistentDescriptor: CapabilityDescriptor = {
+  ...immediateDescriptor,
+  extensionId: "test-calendar",
+  name: "calendar.create",
+  description: "Create a calendar event",
+  inputSchema: {
+    type: "object",
+    properties: { title: { type: "string" } },
+    required: ["title"],
+  },
+  traits: ["external_side_effect"],
+};
+
+const noAction: Proposal = { type: "NoAction", reason: "done" };
+
+describe("PiCognitionAdapter", () => {
+  it("accepts proposals only through oren_commit", async () => {
+    let observedTimestamp: number | undefined;
+    const commitStream = createCommitStream([{
+      type: "AdvanceThread",
+      threadId: "thread-1",
+      summary: "Pi is the inner cognition engine",
+    }]);
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: (model, context, options) => {
+        observedTimestamp = context.messages[0]?.timestamp;
+        void model;
+        void options;
+        return commitStream();
+      },
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      kind: "completed",
+      proposals: [{ type: "AdvanceThread", threadId: "thread-1" }],
+    });
+    expect(observedTimestamp).toBe(1_700_000_000_000);
+  });
+
+  it("continues after an immediate capability and can then commit", async () => {
+    const invoke = vi.fn(async () => ({
+      kind: "completed",
+      output: { answer: "remembered" },
+    } as const));
+    const streamFn = createSequenceStream([
+      assistantMessage([{
+        type: "toolCall",
+        id: "lookup-1",
+        name: immediateDescriptor.name,
+        arguments: { query: "hello" },
+      }]),
+      assistantMessage([{
+        type: "toolCall",
+        id: "commit-1",
+        name: "oren_commit",
+        arguments: { proposals: [noAction] },
+      }]),
+    ]);
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn,
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [immediateDescriptor] }),
+      { invoke },
+      new AbortController().signal,
+    );
+
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ kind: "completed", proposals: [noAction] });
+  });
+
+  it("stops the episode when a persistent capability is waiting for its effect", async () => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "create-1",
+          name: persistentDescriptor.name,
+          arguments: { title: "Meet" },
+        }]),
+      ], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [persistentDescriptor] }),
+      { invoke: async () => ({ kind: "waiting_for_effect", effectId: "effect-1" }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(1);
+    expect(result).toEqual({
+      kind: "waiting_for_effect",
+      effectId: "effect-1",
+      usage: { totalTokens: 2 },
+    });
+  });
+
+  it("gives waiting effects precedence over a commit in the same turn", async () => {
+    const invoke = vi.fn(async () => ({
+      kind: "waiting_for_effect",
+      effectId: "effect-1",
+    } as const));
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([
+          {
+            type: "toolCall",
+            id: "create-1",
+            name: persistentDescriptor.name,
+            arguments: { title: "Meet" },
+          },
+          {
+            type: "toolCall",
+            id: "create-2",
+            name: persistentDescriptor.name,
+            arguments: { title: "Must not execute" },
+          },
+          {
+            type: "toolCall",
+            id: "commit-1",
+            name: "oren_commit",
+            arguments: { proposals: [noAction] },
+          },
+        ]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [persistentDescriptor] }),
+      { invoke },
+      new AbortController().signal,
+    );
+
+    expect(invoke).toHaveBeenCalledOnce();
+    expect(result.kind).toBe("waiting_for_effect");
+  });
+
+  it("honors an already-aborted signal without starting a stream", async () => {
+    let streamCalls = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      controller.signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(result).toEqual({ kind: "aborted", usage: { totalTokens: 0 } });
+  });
+
+  it("maps Pi's aborted terminal message and its usage to an aborted outcome", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        failedAssistantMessage("aborted", "request aborted", 3),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({ kind: "aborted", usage: { totalTokens: 3 } });
+  });
+
+  it("contains Pi's terminal model error as a failed outcome", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        failedAssistantMessage("error", "model unavailable", 4),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      kind: "failed",
+      message: "model unavailable",
+      usage: { totalTokens: 4 },
+    });
+  });
+
+  it("fails after maxSteps tool turns when Pi never commits", async () => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "lookup-1",
+          name: immediateDescriptor.name,
+          arguments: { query: "one" },
+        }]),
+        assistantMessage([{
+          type: "toolCall",
+          id: "lookup-2",
+          name: immediateDescriptor.name,
+          arguments: { query: "two" },
+        }]),
+      ], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [immediateDescriptor], maxSteps: 2 }),
+      { invoke: async () => ({ kind: "completed", output: null }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(2);
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Pi ended without oren_commit",
+      usage: { totalTokens: 4 },
+    });
+  });
+
+  it("does not start a model turn when maxSteps is zero", async () => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ maxSteps: 0 }),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Pi ended without oren_commit",
+      usage: { totalTokens: 0 },
+    });
+  });
+
+  it("accumulates assistant usage across turns", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "lookup-1",
+          name: immediateDescriptor.name,
+          arguments: { query: "hello" },
+        }], 5),
+        assistantMessage([{
+          type: "toolCall",
+          id: "commit-1",
+          name: "oren_commit",
+          arguments: { proposals: [noAction] },
+        }], 7),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [immediateDescriptor] }),
+      { invoke: async () => ({ kind: "completed", output: null }) },
+      new AbortController().signal,
+    );
+
+    expect(result.usage.totalTokens).toBe(12);
+  });
+
+  it("contains malformed commit input instead of accepting proposals", async () => {
+    const malformed = {
+      proposals: Array.from({ length: 17 }, () => noAction),
+    };
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "commit-1",
+          name: "oren_commit",
+          arguments: malformed,
+        }]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ maxSteps: 1 }),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result.kind).toBe("failed");
+    expect(result).not.toMatchObject({ kind: "completed" });
+  });
+
+  it("rejects proposal fields outside the typed commit schema", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "commit-1",
+          name: "oren_commit",
+          arguments: {
+            proposals: [{ ...noAction, stateMutation: { disposition: "reckless" } }],
+          },
+        }]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ maxSteps: 1 }),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result.kind).toBe("failed");
+  });
+});
