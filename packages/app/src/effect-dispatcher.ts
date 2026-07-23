@@ -1,3 +1,4 @@
+import { types as utilTypes } from "node:util";
 import {
   canonicalizeJson,
   type CapabilityInvocation,
@@ -53,17 +54,46 @@ export interface EffectDispatchResult {
   readonly status: CapabilityResult["status"] | "invalid_result" | "persistence_failed";
 }
 
+const UNKNOWN_EXTENSION_ERROR = "Unknown extension error";
+const isNativeError = utilTypes.isNativeError;
+const timeoutErrors = new WeakSet<object>();
+
 class EffectTimeoutError extends Error {
   public constructor(
     public readonly operation: "dispatch" | "reconciliation",
     public readonly timeoutMs: number,
   ) {
     super(`Effect ${operation} timed out after ${timeoutMs}ms; outcome is unknown`);
+    timeoutErrors.add(this);
   }
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (typeof error === "string") return error;
+  if (
+    (typeof error !== "object" || error === null)
+    && typeof error !== "function"
+  ) {
+    return UNKNOWN_EXTENSION_ERROR;
+  }
+  if (!isNativeError(error)) return UNKNOWN_EXTENSION_ERROR;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, "message");
+    return descriptor !== undefined
+      && Object.hasOwn(descriptor, "value")
+      && typeof descriptor.value === "string"
+      ? descriptor.value
+      : UNKNOWN_EXTENSION_ERROR;
+  } catch {
+    return UNKNOWN_EXTENSION_ERROR;
+  }
+}
+
+function isEffectTimeoutError(error: unknown): boolean {
+  return (
+    (typeof error === "object" && error !== null)
+    || typeof error === "function"
+  ) && timeoutErrors.has(error);
 }
 
 function isRecord(value: JsonValue | undefined): value is JsonObject {
@@ -179,8 +209,8 @@ export class EffectDispatcher {
         );
       }
     } catch (error) {
-      const message = error instanceof EffectTimeoutError
-        ? error.message
+      const message = isEffectTimeoutError(error)
+        ? errorMessage(error)
         : `Effect ${row.attempts > 1 ? "reconciliation" : "dispatch"} failed before its outcome was known: ${errorMessage(error)}`;
       return this.persist(row, {
         type: "EffectUncertain",

@@ -484,6 +484,155 @@ describe("EffectDispatcher", () => {
     });
   });
 
+  it("does not inspect a hostile proxy rejected by registry resolution and continues", async () => {
+    let traps = 0;
+    const hostile = new Proxy({}, {
+      getPrototypeOf: () => {
+        traps += 1;
+        throw new Error("must not inspect rejection prototype");
+      },
+      getOwnPropertyDescriptor: () => {
+        traps += 1;
+        throw new Error("must not inspect rejection descriptors");
+      },
+      get: () => {
+        traps += 1;
+        throw new Error("must not read rejection properties");
+      },
+    });
+    const { repository, terminalPayloads } = repositoryFor([
+      claimedEffect("effect-hostile-resolve", 1, "test.hostile-resolve"),
+      claimedEffect("effect-valid", 1, "test.increment"),
+    ]);
+    const registry = {
+      resolve: (capability: string) => {
+        if (capability === "test.hostile-resolve") throw hostile;
+        return {
+          descriptor: { timeoutMs: 1_000 },
+          extension: {
+            invoke: async (): Promise<CapabilityResult> => ({
+              status: "completed",
+              output: null,
+              receipt: { transactionId: "tx-valid" },
+            }),
+          },
+        };
+      },
+    };
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-hostile-resolve", status: "failed" },
+      { effectId: "effect-valid", status: "completed" },
+    ]);
+    expect(traps).toBe(0);
+    expect(terminalPayloads).toEqual([
+      {
+        type: "EffectFailed",
+        effectId: "effect-hostile-resolve",
+        code: "EXTENSION_RESOLUTION_FAILED",
+        message: "Extension resolution failed before dispatch: Unknown extension error",
+      },
+      {
+        type: "EffectCompleted",
+        effectId: "effect-valid",
+        receipt: { transactionId: "tx-valid" },
+      },
+    ]);
+  });
+
+  it("does not read a throwing Error-like message getter rejected by invoke and continues", async () => {
+    let getterCalls = 0;
+    const hostile = Object.create(Error.prototype) as Error;
+    Object.defineProperty(hostile, "message", {
+      get: () => {
+        getterCalls += 1;
+        throw new Error("must not read rejection message");
+      },
+    });
+    const { repository, terminalPayloads } = repositoryFor([
+      claimedEffect("effect-hostile-invoke"),
+      claimedEffect("effect-valid"),
+    ]);
+    const registry = registryFor({
+      invoke: async (invocation) => {
+        if (invocation.effectId === "effect-hostile-invoke") throw hostile;
+        return {
+          status: "completed",
+          output: null,
+          receipt: { transactionId: "tx-valid" },
+        };
+      },
+    });
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-hostile-invoke", status: "uncertain" },
+      { effectId: "effect-valid", status: "completed" },
+    ]);
+    expect(getterCalls).toBe(0);
+    expect(terminalPayloads).toEqual([
+      {
+        type: "EffectUncertain",
+        effectId: "effect-hostile-invoke",
+        message: "Effect dispatch failed before its outcome was known: Unknown extension error",
+      },
+      {
+        type: "EffectCompleted",
+        effectId: "effect-valid",
+        receipt: { transactionId: "tx-valid" },
+      },
+    ]);
+  });
+
+  it("does not coerce a hostile query rejection and continues with a valid later row", async () => {
+    let coercionCalls = 0;
+    const hostile = {
+      toString: () => {
+        coercionCalls += 1;
+        throw new Error("must not stringify rejection");
+      },
+      valueOf: () => {
+        coercionCalls += 1;
+        throw new Error("must not coerce rejection value");
+      },
+      [Symbol.toPrimitive]: () => {
+        coercionCalls += 1;
+        throw new Error("must not coerce rejection primitive");
+      },
+    };
+    const { repository, terminalPayloads } = repositoryFor([
+      claimedEffect("effect-hostile-query", 2),
+      claimedEffect("effect-valid", 1),
+    ]);
+    const registry = registryFor({
+      invoke: async () => ({
+        status: "completed",
+        output: null,
+        receipt: { transactionId: "tx-valid" },
+      }),
+      query: async () => {
+        throw hostile;
+      },
+    });
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-hostile-query", status: "uncertain" },
+      { effectId: "effect-valid", status: "completed" },
+    ]);
+    expect(coercionCalls).toBe(0);
+    expect(terminalPayloads).toEqual([
+      {
+        type: "EffectUncertain",
+        effectId: "effect-hostile-query",
+        message: "Effect reconciliation failed before its outcome was known: Unknown extension error",
+      },
+      {
+        type: "EffectCompleted",
+        effectId: "effect-valid",
+        receipt: { transactionId: "tx-valid" },
+      },
+    ]);
+  });
+
   it("does not turn a finishEffect persistence failure into extension uncertainty", async () => {
     const rows = [claimedEffect("effect-persist"), claimedEffect("effect-later")];
     const finishCalls: string[] = [];

@@ -1,11 +1,222 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import type { CoreEvent } from "@oren/kernel";
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
 describe("repository recovery", () => {
+  it("upgrades the exact pre-Task-8 schema without losing valid rows or corrupt evidence", () => {
+    const directory = mkdtempSync(join(tmpdir(), "oren-storage-upgrade-"));
+    const path = join(directory, "life.db");
+    const legacy = new DatabaseSync(path);
+    createPreTask8Schema(legacy);
+    legacy.exec(`
+      CREATE INDEX outbox_by_status ON outbox(status, effect_id);
+      CREATE INDEX operations_by_status_attempts ON operations(status, attempts);
+    `);
+    const completedReceipt = JSON.stringify({
+      type: "EffectCompleted",
+      effectId: "effect-terminal",
+      receipt: { providerId: "tx-terminal" },
+    });
+    const insertOutbox = legacy.prepare(`
+      INSERT INTO outbox(
+        effect_id, oren_id, capability, effect_json, status,
+        lease_owner, lease_until, attempts, receipt_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertOperation = legacy.prepare(`
+      INSERT INTO operations(
+        effect_id, oren_id, capability, status, attempts, receipt_json
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    const insertPair = (
+      effectId: string,
+      status: string,
+      attempts: number,
+      capability = "test.increment",
+      operationCapability = capability,
+      receipt: string | null = null,
+    ) => {
+      insertOutbox.run(
+        effectId,
+        "oren-1",
+        capability,
+        legacyEffectJson(effectId, capability),
+        status,
+        null,
+        null,
+        attempts,
+        receipt,
+      );
+      insertOperation.run(
+        effectId,
+        "oren-1",
+        operationCapability,
+        status,
+        attempts,
+        receipt,
+      );
+    };
+
+    insertPair("effect-invalid-attempt", "pending", 1);
+    insertOutbox.run(
+      "effect-orphan-outbox",
+      "oren-1",
+      "test.increment",
+      legacyEffectJson("effect-orphan-outbox"),
+      "pending",
+      null,
+      null,
+      0,
+      null,
+    );
+    insertOperation.run(
+      "effect-orphan-operation",
+      "oren-1",
+      "test.increment",
+      "pending",
+      0,
+      null,
+    );
+    insertPair("effect-mismatched", "pending", 0, "test.increment", "test.other");
+    insertPair("effect-terminal", "completed", 7, "test.increment", "test.increment", completedReceipt);
+    legacy.prepare(`
+      UPDATE outbox SET lease_owner = ?, lease_until = ? WHERE effect_id = ?
+    `).run("legacy-worker", "2026-07-23T01:00:00.000Z", "effect-terminal");
+    insertPair("effect-valid", "pending", 0);
+    legacy.close();
+
+    const upgraded = openDatabase(path);
+    const schema = upgraded.prepare(`
+      SELECT name, sql FROM sqlite_master
+      WHERE type = 'table' AND name IN ('outbox', 'operations')
+      ORDER BY name
+    `).all();
+    expect(schema).toHaveLength(2);
+    expect(schema.every((row) => String(row.sql).includes("typeof(attempts) = 'integer'"))).toBe(true);
+    expect(() => upgraded.prepare(`
+      UPDATE outbox SET status = 'pending', attempts = 1 WHERE effect_id = ?
+    `).run("effect-valid")).toThrow(/constraint/i);
+    expect(() => upgraded.prepare(`
+      UPDATE operations SET status = 'dispatched', attempts = 0 WHERE effect_id = ?
+    `).run("effect-valid")).toThrow(/constraint/i);
+    expect(upgraded.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND name IN ('outbox_by_status', 'operations_by_status_attempts')
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "operations_by_status_attempts" },
+      { name: "outbox_by_status" },
+    ]);
+
+    expect(upgraded.prepare(`
+      SELECT effect_id FROM outbox ORDER BY effect_id
+    `).all()).toEqual([
+      { effect_id: "effect-terminal" },
+      { effect_id: "effect-valid" },
+    ]);
+    expect(upgraded.prepare(`
+      SELECT effect_id FROM operations ORDER BY effect_id
+    `).all()).toEqual([
+      { effect_id: "effect-terminal" },
+      { effect_id: "effect-valid" },
+    ]);
+    expect(upgraded.prepare(`
+      SELECT *
+      FROM outbox
+      WHERE effect_id = 'effect-terminal'
+    `).get()).toEqual({
+      effect_id: "effect-terminal",
+      oren_id: "oren-1",
+      capability: "test.increment",
+      effect_json: legacyEffectJson("effect-terminal"),
+      status: "completed",
+      lease_owner: "legacy-worker",
+      lease_until: "2026-07-23T01:00:00.000Z",
+      attempts: 7,
+      receipt_json: completedReceipt,
+    });
+    expect(upgraded.prepare(`
+      SELECT *
+      FROM operations
+      WHERE effect_id = 'effect-terminal'
+    `).get()).toEqual({
+      effect_id: "effect-terminal",
+      oren_id: "oren-1",
+      capability: "test.increment",
+      status: "completed",
+      attempts: 7,
+      receipt_json: completedReceipt,
+    });
+
+    const quarantine = upgraded.prepare(`
+      SELECT
+        effect_id,
+        legacy_reason,
+        legacy_outbox_json,
+        legacy_operation_json
+      FROM effect_quarantine
+      ORDER BY effect_id
+    `).all();
+    expect(quarantine.map((row) => row.effect_id)).toEqual([
+      "effect-invalid-attempt",
+      "effect-mismatched",
+      "effect-orphan-operation",
+      "effect-orphan-outbox",
+    ]);
+    expect(quarantine).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        effect_id: "effect-invalid-attempt",
+        legacy_reason: expect.stringMatching(/status|attempt/i),
+        legacy_outbox_json: expect.stringContaining("\"attempts_sql\":\"1\""),
+        legacy_operation_json: expect.stringContaining("\"attempts_sql\":\"1\""),
+      }),
+      expect.objectContaining({
+        effect_id: "effect-mismatched",
+        legacy_reason: expect.stringMatching(/inconsistent|mismatch/i),
+        legacy_outbox_json: expect.stringContaining("\"capability_sql\":\"'test.increment'\""),
+        legacy_operation_json: expect.stringContaining("\"capability_sql\":\"'test.other'\""),
+      }),
+      expect.objectContaining({
+        effect_id: "effect-orphan-operation",
+        legacy_reason: expect.stringMatching(/missing outbox/i),
+        legacy_outbox_json: null,
+        legacy_operation_json: expect.stringContaining("\"effect_id_sql\":\"'effect-orphan-operation'\""),
+      }),
+      expect.objectContaining({
+        effect_id: "effect-orphan-outbox",
+        legacy_reason: expect.stringMatching(/missing operation/i),
+        legacy_outbox_json: expect.stringContaining("\"effect_id_sql\":\"'effect-orphan-outbox'\""),
+        legacy_operation_json: null,
+      }),
+    ]));
+    expect(upgraded.prepare("SELECT * FROM inbox").all()).toEqual([]);
+
+    const repo = new SqliteLifeRepository(upgraded);
+    expect(repo.claimOutbox("worker-upgrade", 10, "2026-07-23T00:00:00.000Z")).toMatchObject([
+      { effectId: "effect-valid", attempts: 1 },
+    ]);
+    const beforeReopen = upgraded.prepare(`
+      SELECT * FROM effect_quarantine ORDER BY effect_id
+    `).all();
+    repo.close();
+
+    const reopened = openDatabase(path);
+    expect(reopened.prepare(`
+      SELECT * FROM effect_quarantine ORDER BY effect_id
+    `).all()).toEqual(beforeReopen);
+    expect(reopened.prepare(`
+      SELECT effect_id, status, attempts FROM outbox ORDER BY effect_id
+    `).all()).toEqual([
+      { effect_id: "effect-terminal", status: "completed", attempts: 7 },
+      { effect_id: "effect-valid", status: "dispatched", attempts: 1 },
+    ]);
+    reopened.close();
+  });
+
   it.each([
     { name: "syntactically malformed", effectJson: "{" },
     {
@@ -651,3 +862,82 @@ describe("repository recovery", () => {
     )).toThrow(/terminal state is inconsistent/);
   });
 });
+
+function legacyEffectJson(effectId: string, capability = "test.increment"): string {
+  return JSON.stringify({
+    effectId,
+    orenId: "oren-1",
+    correlationId: effectId,
+    capability,
+    arguments: { by: 1 },
+    grantIds: [],
+    stateVersion: 0,
+  });
+}
+
+function createPreTask8Schema(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      oren_id TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      envelope_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS events_by_oren ON events(oren_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS snapshots (
+      oren_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      cursor INTEGER NOT NULL,
+      state_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inbox (
+      inbox_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      priority INTEGER NOT NULL,
+      available_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_until TEXT,
+      processed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS outbox (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      effect_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+      lease_owner TEXT,
+      lease_until TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS operations (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS grants (
+      grant_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      grant_json TEXT NOT NULL,
+      revoked_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      schedule_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      due_at TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      delivered_at TEXT
+    );
+  `);
+}
