@@ -16,18 +16,20 @@ export function toPiTool(
     executionMode: "sequential",
     async execute(_toolCallId, params, signal) {
       if (signal?.aborted) {
-        throw signal.reason instanceof Error
-          ? signal.reason
-          : new Error("Capability invocation aborted");
+        throw abortReason(signal);
       }
 
-      const outcome = await capabilityPort.invoke({
-        orenId: frame.orenId,
-        descriptor,
-        arguments: params as JsonObject,
-        stateVersion: frame.stateVersion,
-        correlationId: frame.correlationId,
-      });
+      const invocationSignal = signal ?? new AbortController().signal;
+      const outcome = await raceWithAbort(
+        capabilityPort.invoke({
+          orenId: frame.orenId,
+          descriptor,
+          arguments: params as JsonObject,
+          stateVersion: frame.stateVersion,
+          correlationId: frame.correlationId,
+        }, invocationSignal),
+        invocationSignal,
+      );
 
       switch (outcome.kind) {
         case "completed":
@@ -52,4 +54,38 @@ export function toPiTool(
       }
     },
   };
+}
+
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return Promise.reject(abortReason(signal));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error("Capability invocation aborted");
 }

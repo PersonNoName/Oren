@@ -42,7 +42,7 @@ export interface CognitionCapabilityPort {
     readonly arguments: JsonObject;
     readonly stateVersion: number;
     readonly correlationId: string;
-  }): Promise<CapabilityInvocationOutcome>;
+  }, signal: AbortSignal): Promise<CapabilityInvocationOutcome>;
 }
 
 export type CognitionOutcome =

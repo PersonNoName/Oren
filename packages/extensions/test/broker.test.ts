@@ -212,6 +212,26 @@ describe("ExtensionRegistry", () => {
     expect(() => registry.resolve("test.duplicate")).toThrow("Unknown capability: test.duplicate");
   });
 
+  it("atomically rejects a manifest that registers the reserved oren_commit capability", () => {
+    const registry = new ExtensionRegistry();
+    const invalid = extension([
+      capability({ name: "test.valid" }),
+      capability({ name: "oren_commit" }),
+    ]);
+
+    expect(() => registry.register(invalid)).toThrow(
+      "Capability name is reserved: oren_commit",
+    );
+    expect(() => registry.resolve("test.valid")).toThrow(
+      "Unknown capability: test.valid",
+    );
+
+    registry.register(extension([capability({ name: "test.recovered" })]));
+    expect(registry.resolve("test.recovered").descriptor.name).toBe(
+      "test.recovered",
+    );
+  });
+
   it("validates every descriptor before registering any of its siblings", () => {
     const registry = new ExtensionRegistry();
     const invalid = extension([

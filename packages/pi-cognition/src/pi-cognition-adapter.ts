@@ -14,9 +14,12 @@ import type {
 } from "@oren/cognition";
 import type { Proposal } from "@oren/kernel";
 import type { Static } from "typebox";
+import { Check } from "typebox/value";
 import { CommitSchema } from "./proposal-schema.js";
 import { systemPrompt, userPrompt } from "./prompts.js";
 import { toPiTool } from "./tool-adapter.js";
+
+const COMMIT_TOOL_NAME = "oren_commit";
 
 export interface PiCognitionAdapterOptions {
   readonly model: Model<any>;
@@ -42,20 +45,44 @@ export class PiCognitionAdapter implements CognitionPort {
     if (signal.aborted) {
       return { kind: "aborted", usage: { totalTokens } };
     }
-    if (frame.maxSteps <= 0) {
+    if (!Number.isFinite(frame.maxSteps)
+      || !Number.isInteger(frame.maxSteps)
+      || frame.maxSteps < 0) {
       return {
         kind: "failed",
-        message: "Pi ended without oren_commit",
+        message: "Invalid maxSteps: expected a finite nonnegative integer",
+        usage: { totalTokens },
+      };
+    }
+    if (frame.capabilities.some(({ name }) => name === COMMIT_TOOL_NAME)) {
+      return {
+        kind: "failed",
+        message: `Capability name is reserved: ${COMMIT_TOOL_NAME}`,
+        usage: { totalTokens },
+      };
+    }
+    if (frame.maxSteps === 0) {
+      return {
+        kind: "failed",
+        message: `Pi ended without ${COMMIT_TOOL_NAME}`,
         usage: { totalTokens },
       };
     }
 
     const commitTool: AgentTool<typeof CommitSchema> = {
-      name: "oren_commit",
+      name: COMMIT_TOOL_NAME,
       label: "Commit episode",
       description: "Submit up to 16 typed proposals and finish this cognitive episode.",
       parameters: CommitSchema,
       executionMode: "sequential",
+      prepareArguments(args: unknown) {
+        if (!Check(CommitSchema, args)) {
+          throw new Error(
+            "Raw oren_commit arguments do not match the commit schema.",
+          );
+        }
+        return args;
+      },
       async execute(_toolCallId, params: Static<typeof CommitSchema>) {
         committed = params.proposals as readonly Proposal[];
         return {
@@ -67,15 +94,7 @@ export class PiCognitionAdapter implements CognitionPort {
     };
 
     const capabilityTools = frame.capabilities.map((descriptor) =>
-      toPiTool(descriptor, frame, {
-        async invoke(input) {
-          const outcome = await capabilityPort.invoke(input);
-          if (outcome.kind === "waiting_for_effect") {
-            waitingEffectId = outcome.effectId;
-          }
-          return outcome;
-        },
-      })
+      toPiTool(descriptor, frame, capabilityPort)
     );
     const context: AgentContext = {
       systemPrompt: systemPrompt(frame),
@@ -100,10 +119,22 @@ export class PiCognitionAdapter implements CognitionPort {
               || message.role === "toolResult",
           ),
           toolExecution: "sequential",
-          beforeToolCall: async () =>
-            waitingEffectId !== null || committed !== null
-              ? { block: true, reason: "Episode already terminated." }
-              : undefined,
+          beforeToolCall: async () => {
+            if (waitingEffectId !== null || committed !== null) {
+              return { block: true, reason: "Episode already terminated." };
+            }
+            return undefined;
+          },
+          afterToolCall: async ({ result }, hookSignal) => {
+            if (hookSignal?.aborted) {
+              return undefined;
+            }
+            const effectId = waitingEffectFromDetails(result.details);
+            if (effectId !== null) {
+              waitingEffectId = effectId;
+            }
+            return undefined;
+          },
           shouldStopAfterTurn: () => {
             turns += 1;
             return waitingEffectId !== null
@@ -143,7 +174,7 @@ export class PiCognitionAdapter implements CognitionPort {
     }
     return {
       kind: "failed",
-      message: assistantFailure ?? "Pi ended without oren_commit",
+      message: assistantFailure ?? `Pi ended without ${COMMIT_TOOL_NAME}`,
       usage: { totalTokens },
     };
 
@@ -159,4 +190,15 @@ export class PiCognitionAdapter implements CognitionPort {
       }
     }
   }
+}
+
+function waitingEffectFromDetails(details: unknown): string | null {
+  if (typeof details !== "object" || details === null) {
+    return null;
+  }
+  const candidate = details as { kind?: unknown; effectId?: unknown };
+  return candidate.kind === "waiting_for_effect"
+    && typeof candidate.effectId === "string"
+    ? candidate.effectId
+    : null;
 }

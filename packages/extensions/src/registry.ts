@@ -12,6 +12,10 @@ const capabilityTraits: ReadonlySet<CapabilityTrait> = new Set([
   "destructive",
 ]);
 
+const reservedCapabilityNames: ReadonlySet<string> = new Set([
+  "oren_commit",
+]);
+
 function cloneJson(value: JsonObject): JsonObject {
   return structuredClone(value);
 }
@@ -36,6 +40,9 @@ function validateDescriptor(descriptor: CapabilityDescriptor, extensionId: strin
   }
   if (typeof descriptor.name !== "string" || !descriptor.name) {
     throw new Error("Capability has an invalid name");
+  }
+  if (reservedCapabilityNames.has(descriptor.name)) {
+    throw new Error(`Capability name is reserved: ${descriptor.name}`);
   }
   if (typeof descriptor.description !== "string" || !descriptor.description) {
     throw new Error(`Capability ${descriptor.name} has an invalid description`);

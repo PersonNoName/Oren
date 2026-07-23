@@ -108,6 +108,64 @@ describe("PiCognitionAdapter", () => {
     expect(result).toMatchObject({ kind: "completed", proposals: [noAction] });
   });
 
+  it("fails when Pi returns prose without a commit tool call", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{ type: "text", text: "I am done." }]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Pi ended without oren_commit",
+      usage: { totalTokens: 2 },
+    });
+  });
+
+  it("blocks a capability after a commit in the same tool-call batch", async () => {
+    const invoke = vi.fn(async () => ({
+      kind: "completed",
+      output: { answer: "must not execute" },
+    } as const));
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([
+          {
+            type: "toolCall",
+            id: "commit-1",
+            name: "oren_commit",
+            arguments: { proposals: [noAction] },
+          },
+          {
+            type: "toolCall",
+            id: "lookup-1",
+            name: immediateDescriptor.name,
+            arguments: { query: "must not execute" },
+          },
+        ]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ capabilities: [immediateDescriptor] }),
+      { invoke },
+      new AbortController().signal,
+    );
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ kind: "completed", proposals: [noAction] });
+  });
+
   it("stops the episode when a persistent capability is waiting for its effect", async () => {
     let streamCalls = 0;
     const adapter = new PiCognitionAdapter({
@@ -197,6 +255,61 @@ describe("PiCognitionAdapter", () => {
 
     expect(streamCalls).toBe(0);
     expect(result).toEqual({ kind: "aborted", usage: { totalTokens: 0 } });
+  });
+
+  it("settles promptly when aborted during a non-cooperative capability invocation", async () => {
+    let markInvocationStarted: (() => void) | undefined;
+    const invocationStarted = new Promise<void>((resolve) => {
+      markInvocationStarted = resolve;
+    });
+    let settleCapability: ((outcome: {
+      readonly kind: "waiting_for_effect";
+      readonly effectId: string;
+    }) => void) | undefined;
+    const capabilityOutcome = new Promise<{
+      readonly kind: "waiting_for_effect";
+      readonly effectId: string;
+    }>((resolve) => {
+      settleCapability = resolve;
+    });
+    const controller = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "lookup-1",
+          name: immediateDescriptor.name,
+          arguments: { query: "hang" },
+        }]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+    const run = adapter.run(
+      createFrame({ capabilities: [immediateDescriptor] }),
+      {
+        invoke: async (_input, signal) => {
+          observedSignal = signal;
+          markInvocationStarted?.();
+          return capabilityOutcome;
+        },
+      },
+      controller.signal,
+    );
+
+    await invocationStarted;
+    controller.abort(new Error("stop"));
+    settleCapability?.({ kind: "waiting_for_effect", effectId: "late-effect" });
+    const settled = await Promise.race([
+      run,
+      new Promise<"timed_out">((resolve) => {
+        setTimeout(() => resolve("timed_out"), 100);
+      }),
+    ]);
+
+    expect(observedSignal).toBe(controller.signal);
+    expect(settled).toEqual({ kind: "aborted", usage: { totalTokens: 2 } });
   });
 
   it("maps Pi's aborted terminal message and its usage to an aborted outcome", async () => {
@@ -296,6 +409,33 @@ describe("PiCognitionAdapter", () => {
     });
   });
 
+  it.each([
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["fractional", 1.5],
+    ["negative", -1],
+  ])("rejects a %s maxSteps budget before starting Pi", async (_label, maxSteps) => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ maxSteps }),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Invalid maxSteps: expected a finite nonnegative integer",
+      usage: { totalTokens: 0 },
+    });
+  });
+
   it("accumulates assistant usage across turns", async () => {
     const adapter = new PiCognitionAdapter({
       model: createMockModel(),
@@ -375,5 +515,86 @@ describe("PiCognitionAdapter", () => {
     );
 
     expect(result.kind).toBe("failed");
+  });
+
+  it.each([
+    {
+      label: "NoAction number reason",
+      proposal: { type: "NoAction", reason: 42 },
+    },
+    {
+      label: "AdvanceThread non-string fields",
+      proposal: { type: "AdvanceThread", threadId: 7, summary: true },
+    },
+    {
+      label: "ScheduleWake numeric fields",
+      proposal: {
+        type: "ScheduleWake",
+        scheduleId: 0,
+        at: 0,
+        purpose: 0,
+      },
+    },
+  ])("strictly rejects raw $label instead of accepting Pi-coerced strings", async ({ proposal }) => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "commit-1",
+          name: "oren_commit",
+          arguments: { proposals: [proposal] },
+        }]),
+      ]),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({ maxSteps: 1 }),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Pi ended without oren_commit",
+      usage: { totalTokens: 2 },
+    });
+  });
+
+  it("rejects a capability named oren_commit before starting the Pi loop", async () => {
+    const invoke = vi.fn(async () => ({
+      kind: "completed",
+      output: null,
+    } as const));
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([
+        assistantMessage([{
+          type: "toolCall",
+          id: "commit-1",
+          name: "oren_commit",
+          arguments: { proposals: [noAction] },
+        }]),
+      ], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({
+        capabilities: [{ ...immediateDescriptor, name: "oren_commit" }],
+      }),
+      { invoke },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(invoke).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Capability name is reserved: oren_commit",
+      usage: { totalTokens: 0 },
+    });
   });
 });

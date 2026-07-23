@@ -23,21 +23,25 @@ describe("toPiTool", () => {
   it("returns an immediate capability result without terminating", async () => {
     const invoke = vi.fn(async () => ({ kind: "completed", output: { value: 2 } } as const));
     const tool = toPiTool(descriptor, createFrame(), { invoke });
+    const signal = new AbortController().signal;
 
-    const result = await tool.execute("tool-1", { by: 1 }, undefined, undefined);
+    const result = await tool.execute("tool-1", { by: 1 }, signal, undefined);
 
     expect(result).toMatchObject({
       content: [{ type: "text", text: "{\"value\":2}" }],
       details: { kind: "completed", output: { value: 2 } },
     });
     expect(result.terminate).not.toBe(true);
-    expect(invoke).toHaveBeenCalledWith({
-      orenId: "oren-1",
-      descriptor,
-      arguments: { by: 1 },
-      stateVersion: 1,
-      correlationId: "corr-1",
-    });
+    expect(invoke).toHaveBeenCalledWith(
+      {
+        orenId: "oren-1",
+        descriptor,
+        arguments: { by: 1 },
+        stateVersion: 1,
+        correlationId: "corr-1",
+      },
+      signal,
+    );
   });
 
   it("terminates the Pi turn when Oren persists an external effect", async () => {
