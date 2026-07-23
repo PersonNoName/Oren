@@ -1,0 +1,9 @@
+{
+  "name": "@oren/test-counter",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/extensions": "*"
+  }
+}
