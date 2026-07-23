@@ -1,0 +1,11 @@
+export type OrenId = string;
+export type PersonId = string;
+export type EventId = string;
+export type CorrelationId = string;
+export type CausationId = string;
+export type EpisodeId = string;
+export type EffectId = string;
+export type OperationId = string;
+export type GrantId = string;
+export type ScheduleId = string;
+export type ThreadId = string;
