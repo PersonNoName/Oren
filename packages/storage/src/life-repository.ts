@@ -30,15 +30,21 @@ export class SqliteLifeRepository {
   }
 
   public loadEvents(orenId: string): EventEnvelope[] {
+    return this.loadEventsAfter(orenId, 0);
+  }
+
+  private loadEventsAfter(orenId: string, cursor: number): EventEnvelope[] {
     return this.db.prepare(`
-      SELECT envelope_json FROM events WHERE oren_id = ? ORDER BY sequence
-    `).all(orenId).map((row) => JSON.parse(String(row.envelope_json)) as EventEnvelope);
+      SELECT envelope_json FROM events WHERE oren_id = ? AND sequence > ? ORDER BY sequence
+    `).all(orenId, cursor).map((row) => JSON.parse(String(row.envelope_json)) as EventEnvelope);
   }
 
   public rehydrate(orenId: string): LifeState {
-    const row = this.db.prepare(`SELECT state_json FROM snapshots WHERE oren_id = ?`).get(orenId);
+    const row = this.db.prepare(`
+      SELECT cursor, state_json FROM snapshots WHERE oren_id = ?
+    `).get(orenId);
     if (!row) throw new Error(`Missing initial snapshot for ${orenId}`);
-    return this.loadEvents(orenId).reduce(
+    return this.loadEventsAfter(orenId, Number(row.cursor)).reduce(
       reduceLifeState,
       JSON.parse(String(row.state_json)) as LifeState,
     );
@@ -49,6 +55,7 @@ export class SqliteLifeRepository {
     events: readonly EventEnvelope[],
     effects: readonly Effect[],
   ): void {
+    this.validateOrenIdentities(orenId, events, effects);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const insertEvent = this.db.prepare(`
@@ -91,6 +98,26 @@ export class SqliteLifeRepository {
     }
   }
 
+  private validateOrenIdentities(
+    orenId: string,
+    events: readonly EventEnvelope[],
+    effects: readonly Effect[],
+  ): void {
+    for (const event of events) {
+      if (event.orenId !== orenId) {
+        throw new Error(`Event ${event.eventId} orenId does not match ${orenId}`);
+      }
+      if (event.payload.type === "EffectRequested" && event.payload.effect?.orenId !== orenId) {
+        throw new Error(`EffectRequested event ${event.eventId} has a mismatched orenId`);
+      }
+    }
+    for (const effect of effects) {
+      if (effect.orenId !== orenId) {
+        throw new Error(`Effect ${effect.effectId} orenId does not match ${orenId}`);
+      }
+    }
+  }
+
   public enqueueRawEffect(
     orenId: string,
     effectId: string,
@@ -106,14 +133,7 @@ export class SqliteLifeRepository {
       grantIds: [],
       stateVersion: 0,
     };
-    this.db.prepare(`
-      INSERT INTO outbox(effect_id, oren_id, capability, effect_json, status)
-      VALUES (?, ?, ?, ?, 'pending')
-    `).run(effectId, orenId, capability, JSON.stringify(effect));
-    this.db.prepare(`
-      INSERT INTO operations(effect_id, oren_id, capability, status)
-      VALUES (?, ?, ?, 'pending')
-    `).run(effectId, orenId, capability);
+    this.appendAndEnqueueEffects(orenId, [], [effect]);
   }
 
   public claimOutbox(worker: string, limit: number, now = new Date().toISOString()): OutboxRow[] {
@@ -124,7 +144,7 @@ export class SqliteLifeRepository {
         SELECT effect_id, oren_id, capability, effect_json, attempts
         FROM outbox
         WHERE status IN ('pending','dispatched')
-          AND (lease_until IS NULL OR lease_until < ?)
+          AND (lease_until IS NULL OR lease_until <= ?)
         ORDER BY rowid
         LIMIT ?
       `).all(now, limit);

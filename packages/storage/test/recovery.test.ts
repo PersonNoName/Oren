@@ -17,4 +17,12 @@ describe("repository recovery", () => {
     expect(second.claimOutbox("live-worker", 1, "2026-07-23T00:10:00.000Z")).toHaveLength(1);
     second.close();
   });
+
+  it("reclaims an outbox lease when it expires exactly at now", () => {
+    const repo = new SqliteLifeRepository(openDatabase(":memory:"));
+    repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+
+    expect(repo.claimOutbox("first-worker", 1, "2026-07-23T00:00:00.000Z")).toHaveLength(1);
+    expect(repo.claimOutbox("second-worker", 1, "2026-07-23T00:01:00.000Z")).toHaveLength(1);
+  });
 });
