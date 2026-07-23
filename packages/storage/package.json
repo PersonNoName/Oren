@@ -1,0 +1,9 @@
+{
+  "name": "@oren/storage",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/kernel": "*"
+  }
+}
