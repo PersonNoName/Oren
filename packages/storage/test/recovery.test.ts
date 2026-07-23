@@ -89,6 +89,7 @@ describe("repository recovery", () => {
     const repo = new SqliteLifeRepository(db);
     repo.enqueueRawEffect("oren-1", "effect-corrupt", "test.increment", { by: 1 });
     repo.enqueueRawEffect("oren-1", "effect-valid", "test.increment", { by: 2 });
+    db.exec("PRAGMA ignore_check_constraints = ON");
     corrupt(db);
 
     expect(repo.claimOutbox("worker-1", 1, "2026-07-23T00:00:00.000Z")).toMatchObject([
@@ -104,6 +105,60 @@ describe("repository recovery", () => {
       attempts: 0,
       lease_owner: null,
     });
+  });
+
+  it.each([
+    { name: "dispatched row without a prior attempt", status: "dispatched", attempts: 0 },
+    { name: "negative pending attempts", status: "pending", attempts: -1 },
+    { name: "non-integral dispatched attempts", status: "dispatched", attempts: 1.5 },
+    {
+      name: "unsafe dispatched attempts",
+      status: "dispatched",
+      attempts: Number.MAX_SAFE_INTEGER + 1,
+    },
+  ])("quarantines a $name and claims a valid later row", ({ status, attempts }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.enqueueRawEffect("oren-1", "effect-corrupt", "test.increment", { by: 1 });
+    repo.enqueueRawEffect("oren-1", "effect-valid", "test.increment", { by: 2 });
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    db.prepare(`
+      UPDATE outbox
+      SET status = ?, attempts = ?, lease_owner = NULL, lease_until = NULL
+      WHERE effect_id = ?
+    `).run(status, attempts, "effect-corrupt");
+    db.prepare(`
+      UPDATE operations SET status = ?, attempts = ? WHERE effect_id = ?
+    `).run(status, attempts, "effect-corrupt");
+
+    expect(repo.claimOutbox("worker-1", 1, "2026-07-23T00:00:00.000Z")).toMatchObject([
+      { effectId: "effect-valid", attempts: 1 },
+    ]);
+    expect(db.prepare(`
+      SELECT reason FROM effect_quarantine WHERE effect_id = ?
+    `).get("effect-corrupt")).toMatchObject({
+      reason: expect.stringMatching(/attempt|state/i),
+    });
+  });
+
+  it.each([
+    { table: "outbox", status: "pending", attempts: -1 },
+    { table: "operations", status: "pending", attempts: 1.5 },
+    { table: "outbox", status: "pending", attempts: Number.MAX_SAFE_INTEGER + 1 },
+    { table: "operations", status: "pending", attempts: 1 },
+    { table: "outbox", status: "dispatched", attempts: 0 },
+  ])("prevents invalid $table $status/$attempts state in a new database", ({
+    table,
+    status,
+    attempts,
+  }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+
+    expect(() => db.prepare(`
+      UPDATE ${table} SET status = ?, attempts = ? WHERE effect_id = ?
+    `).run(status, attempts, "effect-1")).toThrow(/constraint/i);
   });
 
   it("reclaims an expired outbox lease after restart", () => {
@@ -259,6 +314,102 @@ describe("repository recovery", () => {
   });
 
   it.each([
+    {
+      name: "different nonterminal statuses",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare(`
+          UPDATE operations SET status = 'dispatched', attempts = 1 WHERE effect_id = ?
+        `).run("effect-1");
+      },
+    },
+    {
+      name: "different dispatched attempt counts",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare(`
+          UPDATE outbox SET status = 'dispatched', attempts = 1 WHERE effect_id = ?
+        `).run("effect-1");
+        db.prepare(`
+          UPDATE operations SET status = 'dispatched', attempts = 2 WHERE effect_id = ?
+        `).run("effect-1");
+      },
+    },
+    {
+      name: "paired dispatched state without a prior attempt",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare(`
+          UPDATE outbox SET status = 'dispatched', attempts = 0 WHERE effect_id = ?
+        `).run("effect-1");
+        db.prepare(`
+          UPDATE operations SET status = 'dispatched', attempts = 0 WHERE effect_id = ?
+        `).run("effect-1");
+      },
+    },
+    {
+      name: "paired negative pending attempts",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare("UPDATE outbox SET attempts = -1 WHERE effect_id = ?").run("effect-1");
+        db.prepare("UPDATE operations SET attempts = -1 WHERE effect_id = ?").run("effect-1");
+      },
+    },
+    {
+      name: "paired non-integral dispatched attempts",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare(`
+          UPDATE outbox SET status = 'dispatched', attempts = 1.5 WHERE effect_id = ?
+        `).run("effect-1");
+        db.prepare(`
+          UPDATE operations SET status = 'dispatched', attempts = 1.5 WHERE effect_id = ?
+        `).run("effect-1");
+      },
+    },
+    {
+      name: "paired unsafe dispatched attempts",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        const unsafe = Number.MAX_SAFE_INTEGER + 1;
+        db.prepare(`
+          UPDATE outbox SET status = 'dispatched', attempts = ? WHERE effect_id = ?
+        `).run(unsafe, "effect-1");
+        db.prepare(`
+          UPDATE operations SET status = 'dispatched', attempts = ? WHERE effect_id = ?
+        `).run(unsafe, "effect-1");
+      },
+    },
+  ])("rejects $name on first finish and creates no inbox item", ({ corrupt }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    corrupt(db);
+    const beforeOutbox = db.prepare(`
+      SELECT status, CAST(attempts AS TEXT) AS attempts, receipt_json
+      FROM outbox WHERE effect_id = ?
+    `).get("effect-1");
+    const beforeOperation = db.prepare(`
+      SELECT status, CAST(attempts AS TEXT) AS attempts, receipt_json
+      FROM operations WHERE effect_id = ?
+    `).get("effect-1");
+    const payload = {
+      type: "EffectCompleted",
+      effectId: "effect-1",
+      receipt: { providerId: "tx-1" },
+    } satisfies Extract<CoreEvent, { type: "EffectCompleted" }>;
+
+    expect(() => repo.finishEffect("effect-1", "oren-1", "effect-1", payload)).toThrow(
+      /state|attempt|inconsistent/i,
+    );
+
+    expect(db.prepare(`
+      SELECT status, CAST(attempts AS TEXT) AS attempts, receipt_json
+      FROM outbox WHERE effect_id = ?
+    `).get("effect-1")).toEqual(beforeOutbox);
+    expect(db.prepare(`
+      SELECT status, CAST(attempts AS TEXT) AS attempts, receipt_json
+      FROM operations WHERE effect_id = ?
+    `).get("effect-1")).toEqual(beforeOperation);
+    expect(db.prepare("SELECT * FROM inbox").all()).toEqual([]);
+  });
+
+  it.each([
     { name: "unknown discriminant", payload: { type: "EffectBogus", effectId: "effect-1" } },
     { name: "completed without receipt", payload: { type: "EffectCompleted", effectId: "effect-1" } },
     {
@@ -305,6 +456,57 @@ describe("repository recovery", () => {
     expect(db.prepare(`
       SELECT status, receipt_json FROM operations WHERE effect_id = ?
     `).get("effect-1")).toEqual({ status: "pending", receipt_json: null });
+    expect(db.prepare("SELECT * FROM inbox").all()).toEqual([]);
+  });
+
+  it.each([
+    {
+      name: "stateful toJSON",
+      hook: (calls: { value: number }) => () => ({
+        providerId: `tx-${calls.value += 1}`,
+      }),
+    },
+    {
+      name: "omitting toJSON",
+      hook: (calls: { value: number }) => () => {
+        calls.value += 1;
+        return undefined;
+      },
+    },
+    {
+      name: "throwing toJSON",
+      hook: (calls: { value: number }) => () => {
+        calls.value += 1;
+        throw new Error("must not serialize live receipt");
+      },
+    },
+  ])("rejects a completed payload with $name without invoking it", ({ hook }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+    const calls = { value: 0 };
+    const receipt = { providerId: "tx-hidden" };
+    Object.defineProperty(receipt, "toJSON", { value: hook(calls) });
+    const payload = {
+      type: "EffectCompleted",
+      effectId: "effect-1",
+      receipt,
+    };
+
+    expect(() => repo.finishEffect(
+      "effect-1",
+      "oren-1",
+      "effect-1",
+      payload as never,
+    )).toThrow("Invalid effect terminal payload");
+
+    expect(calls.value).toBe(0);
+    expect(db.prepare(`
+      SELECT status, attempts, receipt_json FROM outbox WHERE effect_id = ?
+    `).get("effect-1")).toEqual({ status: "pending", attempts: 0, receipt_json: null });
+    expect(db.prepare(`
+      SELECT status, attempts, receipt_json FROM operations WHERE effect_id = ?
+    `).get("effect-1")).toEqual({ status: "pending", attempts: 0, receipt_json: null });
     expect(db.prepare("SELECT * FROM inbox").all()).toEqual([]);
   });
 
@@ -368,6 +570,42 @@ describe("repository recovery", () => {
       "effect-1",
       reordered,
     )).not.toThrow();
+    expect(db.prepare("SELECT COUNT(*) AS count FROM inbox").get()).toEqual({ count: 1 });
+  });
+
+  it.each([
+    {
+      name: "attempt drift",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare("UPDATE operations SET attempts = 1 WHERE effect_id = ?").run("effect-1");
+      },
+    },
+    {
+      name: "paired invalid attempts",
+      corrupt: (db: ReturnType<typeof openDatabase>) => {
+        db.prepare("UPDATE outbox SET attempts = -1 WHERE effect_id = ?").run("effect-1");
+        db.prepare("UPDATE operations SET attempts = -1 WHERE effect_id = ?").run("effect-1");
+      },
+    },
+  ])("rejects an idempotent terminal call with $name", ({ corrupt }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+    const completed = {
+      type: "EffectCompleted",
+      effectId: "effect-1",
+      receipt: { providerId: "tx-1" },
+    } satisfies Extract<CoreEvent, { type: "EffectCompleted" }>;
+    repo.finishEffect("effect-1", "oren-1", "effect-1", completed);
+    db.exec("PRAGMA ignore_check_constraints = ON");
+    corrupt(db);
+
+    expect(() => repo.finishEffect(
+      "effect-1",
+      "oren-1",
+      "effect-1",
+      completed,
+    )).toThrow(/state is inconsistent/);
     expect(db.prepare("SELECT COUNT(*) AS count FROM inbox").get()).toEqual({ count: 1 });
   });
 

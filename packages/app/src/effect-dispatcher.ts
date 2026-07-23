@@ -1,8 +1,11 @@
-import type {
-  CapabilityInvocation,
-  CapabilityResult,
-  CoreEvent,
-  Effect,
+import {
+  canonicalizeJson,
+  type CapabilityInvocation,
+  type CapabilityResult,
+  type CoreEvent,
+  type Effect,
+  type JsonObject,
+  type JsonValue,
 } from "@oren/kernel";
 
 export interface ClaimedEffect {
@@ -63,56 +66,41 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+function isRecord(value: JsonValue | undefined): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function hasExactKeys(value: JsonObject, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length
     && actual.every((key, index) => key === expected[index]);
 }
 
-function isJsonValue(value: unknown, seen = new Set<object>()): boolean {
-  if (
-    value === null
-    || typeof value === "string"
-    || typeof value === "boolean"
-  ) {
-    return true;
+function canonicalizeCapabilityResult(value: unknown): CapabilityResult | undefined {
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const result = canonical.value;
+  if (result.status === "completed") {
+    return hasExactKeys(result, ["status", "output", "receipt"])
+      && isRecord(result.receipt)
+      ? result as CapabilityResult
+      : undefined;
   }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every((item) => isJsonValue(item, seen))
-    : isRecord(value) && Object.values(value).every((item) => isJsonValue(item, seen));
-  seen.delete(value);
-  return valid;
-}
-
-function isCapabilityResult(value: unknown): value is CapabilityResult {
-  if (!isRecord(value)) return false;
-  if (value.status === "completed") {
-    return hasExactKeys(value, ["status", "output", "receipt"])
-      && isJsonValue(value.output)
-      && isRecord(value.receipt)
-      && isJsonValue(value.receipt);
+  if (result.status === "failed") {
+    return hasExactKeys(result, ["status", "code", "message"])
+      && typeof result.code === "string"
+      && typeof result.message === "string"
+      ? result as CapabilityResult
+      : undefined;
   }
-  if (value.status === "failed") {
-    return hasExactKeys(value, ["status", "code", "message"])
-      && typeof value.code === "string"
-      && typeof value.message === "string";
+  if (result.status === "uncertain") {
+    return hasExactKeys(result, ["status", "message"])
+      && typeof result.message === "string"
+      ? result as CapabilityResult
+      : undefined;
   }
-  if (value.status === "uncertain") {
-    return hasExactKeys(value, ["status", "message"])
-      && typeof value.message === "string";
-  }
-  return false;
+  return undefined;
 }
 
 export class EffectDispatcher {
@@ -201,10 +189,10 @@ export class EffectDispatcher {
       }, "uncertain");
     }
 
-    if (!isCapabilityResult(rawResult)) {
+    const result = canonicalizeCapabilityResult(rawResult);
+    if (result === undefined) {
       return { effectId: row.effectId, status: "invalid_result" };
     }
-    const result = rawResult;
     if (result.status === "completed") {
       return this.persist(row, {
         type: "EffectCompleted",

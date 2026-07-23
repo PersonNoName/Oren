@@ -1,10 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
+  canonicalizeJson,
   reduceLifeState,
   type Effect,
   type EventEnvelope,
   type Grant,
   type JsonObject,
+  type JsonValue,
   type LifeState,
   type CoreEvent,
 } from "@oren/kernel";
@@ -22,41 +24,58 @@ type TerminalEffectEvent =
   | Extract<CoreEvent, { type: "EffectFailed" }>
   | Extract<CoreEvent, { type: "EffectUncertain" }>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+type NonterminalEffectStatus = "pending" | "dispatched";
+type TerminalEffectStatus = "completed" | "failed" | "uncertain" | "cancelled";
+
+const TERMINAL_EFFECT_STATUSES = new Set<string>([
+  "completed",
+  "failed",
+  "uncertain",
+  "cancelled",
+]);
+
+function parseSafeAttemptCount(value: unknown): number | undefined {
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const attempts = Number(value);
+  return Number.isSafeInteger(attempts) && attempts >= 0 ? attempts : undefined;
 }
 
-function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+function isClaimableEffectState(
+  status: string,
+  attempts: number,
+): status is NonterminalEffectStatus {
+  return status === "pending"
+    ? attempts === 0
+    : status === "dispatched"
+      && attempts >= 1
+      && attempts < Number.MAX_SAFE_INTEGER;
+}
+
+function isValidEffectState(
+  status: string,
+  attempts: number,
+): status is NonterminalEffectStatus | TerminalEffectStatus {
+  if (status === "pending") return attempts === 0;
+  if (status === "dispatched") return attempts >= 1;
+  return TERMINAL_EFFECT_STATUSES.has(status);
+}
+
+function isRecord(value: JsonValue | undefined): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value: JsonObject, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length
     && actual.every((key, index) => key === expected[index]);
 }
 
-function isJsonValue(value: unknown, seen = new Set<object>()): boolean {
-  if (
-    value === null
-    || typeof value === "string"
-    || typeof value === "boolean"
-  ) {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (typeof value !== "object") return false;
-  if (seen.has(value)) return false;
-  seen.add(value);
-  const valid = Array.isArray(value)
-    ? value.every((item) => isJsonValue(item, seen))
-    : isRecord(value) && Object.values(value).every((item) => isJsonValue(item, seen));
-  seen.delete(value);
-  return valid;
-}
-
-function isEffect(value: unknown): value is Effect {
-  return isRecord(value)
-    && hasExactKeys(value, [
+function canonicalizeEffect(value: unknown): Effect | undefined {
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const effect = canonical.value;
+  return hasExactKeys(effect, [
       "effectId",
       "orenId",
       "correlationId",
@@ -65,38 +84,47 @@ function isEffect(value: unknown): value is Effect {
       "grantIds",
       "stateVersion",
     ])
-    && typeof value.effectId === "string"
-    && typeof value.orenId === "string"
-    && typeof value.correlationId === "string"
-    && typeof value.capability === "string"
-    && isRecord(value.arguments)
-    && isJsonValue(value.arguments)
-    && Array.isArray(value.grantIds)
-    && value.grantIds.every((grantId) => typeof grantId === "string")
-    && Number.isSafeInteger(value.stateVersion)
-    && Number(value.stateVersion) >= 0;
+    && typeof effect.effectId === "string"
+    && typeof effect.orenId === "string"
+    && typeof effect.correlationId === "string"
+    && typeof effect.capability === "string"
+    && isRecord(effect.arguments)
+    && Array.isArray(effect.grantIds)
+    && effect.grantIds.every((grantId) => typeof grantId === "string")
+    && Number.isSafeInteger(effect.stateVersion)
+    && Number(effect.stateVersion) >= 0
+    ? effect as unknown as Effect
+    : undefined;
 }
 
-function isTerminalEffectEvent(value: unknown): value is TerminalEffectEvent {
-  if (!isRecord(value) || typeof value.effectId !== "string") return false;
-  if (value.type === "EffectCompleted") {
-    return hasExactKeys(value, ["type", "effectId", "receipt"])
-      && isRecord(value.receipt)
-      && isJsonValue(value.receipt);
+function canonicalizeTerminalEffectEvent(value: unknown): TerminalEffectEvent | undefined {
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const event = canonical.value;
+  if (typeof event.effectId !== "string") return undefined;
+  if (event.type === "EffectCompleted") {
+    return hasExactKeys(event, ["type", "effectId", "receipt"])
+      && isRecord(event.receipt)
+      ? event as unknown as TerminalEffectEvent
+      : undefined;
   }
-  if (value.type === "EffectFailed") {
-    return hasExactKeys(value, ["type", "effectId", "code", "message"])
-      && typeof value.code === "string"
-      && typeof value.message === "string";
+  if (event.type === "EffectFailed") {
+    return hasExactKeys(event, ["type", "effectId", "code", "message"])
+      && typeof event.code === "string"
+      && typeof event.message === "string"
+      ? event as unknown as TerminalEffectEvent
+      : undefined;
   }
-  if (value.type === "EffectUncertain") {
-    return hasExactKeys(value, ["type", "effectId", "message"])
-      && typeof value.message === "string";
+  if (event.type === "EffectUncertain") {
+    return hasExactKeys(event, ["type", "effectId", "message"])
+      && typeof event.message === "string"
+      ? event as unknown as TerminalEffectEvent
+      : undefined;
   }
-  return false;
+  return undefined;
 }
 
-function semanticJsonEqual(left: unknown, right: unknown): boolean {
+function semanticJsonEqual(left: JsonValue, right: JsonValue): boolean {
   if (left === right) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
     return Array.isArray(left)
@@ -108,8 +136,14 @@ function semanticJsonEqual(left: unknown, right: unknown): boolean {
   const leftKeys = Object.keys(left).sort();
   const rightKeys = Object.keys(right).sort();
   return leftKeys.length === rightKeys.length
-    && leftKeys.every((key, index) =>
-      key === rightKeys[index] && semanticJsonEqual(left[key], right[key]));
+    && leftKeys.every((key, index) => {
+      const leftValue = left[key];
+      const rightValue = right[key];
+      return key === rightKeys[index]
+        && leftValue !== undefined
+        && rightValue !== undefined
+        && semanticJsonEqual(leftValue, rightValue);
+    });
 }
 
 export class SqliteLifeRepository {
@@ -282,12 +316,12 @@ export class SqliteLifeRepository {
           outbox.capability,
           outbox.effect_json,
           outbox.status,
-          outbox.attempts,
+          CAST(outbox.attempts AS TEXT) AS attempts_text,
           operations.effect_id AS operation_effect_id,
           operations.oren_id AS operation_oren_id,
           operations.capability AS operation_capability,
           operations.status AS operation_status,
-          operations.attempts AS operation_attempts
+          CAST(operations.attempts AS TEXT) AS operation_attempts_text
         FROM outbox
         LEFT JOIN operations ON operations.effect_id = outbox.effect_id
         WHERE outbox.status IN ('pending','dispatched')
@@ -324,28 +358,39 @@ export class SqliteLifeRepository {
           quarantine.run(effectId, "outbox effect_json is not valid JSON", now);
           continue;
         }
-        if (!isEffect(parsed)) {
+        const effect = canonicalizeEffect(parsed);
+        if (effect === undefined) {
           quarantine.run(effectId, "outbox effect_json is not a valid Effect", now);
           continue;
         }
         const outboxOrenId = String(row.oren_id);
         const outboxCapability = String(row.capability);
         if (
-          parsed.effectId !== effectId
-          || parsed.orenId !== outboxOrenId
-          || parsed.capability !== outboxCapability
+          effect.effectId !== effectId
+          || effect.orenId !== outboxOrenId
+          || effect.capability !== outboxCapability
         ) {
           quarantine.run(effectId, "outbox effect identity does not match its columns", now);
           continue;
         }
         const outboxStatus = String(row.status);
-        const outboxAttempts = Number(row.attempts);
+        const outboxAttempts = parseSafeAttemptCount(row.attempts_text);
+        const operationAttempts = parseSafeAttemptCount(row.operation_attempts_text);
+        if (
+          outboxAttempts === undefined
+          || operationAttempts === undefined
+          || !isClaimableEffectState(outboxStatus, outboxAttempts)
+          || !isClaimableEffectState(String(row.operation_status), operationAttempts)
+        ) {
+          quarantine.run(effectId, "outbox or operation has an invalid status/attempt state", now);
+          continue;
+        }
         if (
           row.operation_effect_id === null
           || String(row.operation_oren_id) !== outboxOrenId
           || String(row.operation_capability) !== outboxCapability
           || String(row.operation_status) !== outboxStatus
-          || Number(row.operation_attempts) !== outboxAttempts
+          || operationAttempts !== outboxAttempts
         ) {
           quarantine.run(effectId, "operation row is missing or inconsistent with outbox", now);
           continue;
@@ -365,7 +410,7 @@ export class SqliteLifeRepository {
           effectId,
           orenId: outboxOrenId,
           capability: outboxCapability,
-          effect: parsed,
+          effect,
           attempts: outboxAttempts + 1,
         });
       }
@@ -383,31 +428,39 @@ export class SqliteLifeRepository {
     correlationId: string,
     payload: TerminalEffectEvent,
   ): void {
-    if (!isTerminalEffectEvent(payload)) {
+    const canonicalPayload = canonicalizeTerminalEffectEvent(payload);
+    if (canonicalPayload === undefined) {
       throw new Error("Invalid effect terminal payload");
     }
-    if (payload.effectId !== effectId) {
+    if (canonicalPayload.effectId !== effectId) {
       throw new Error(`Effect terminal payload identity does not match ${effectId}`);
     }
-    const status = payload.type === "EffectCompleted"
+    const status = canonicalPayload.type === "EffectCompleted"
       ? "completed"
-      : payload.type === "EffectFailed"
+      : canonicalPayload.type === "EffectFailed"
         ? "failed"
         : "uncertain";
-    const receipt = JSON.stringify(payload);
+    const receipt = JSON.stringify(canonicalPayload);
+    const inboxPayload = JSON.stringify({ correlationId, event: canonicalPayload });
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const outbox = this.db.prepare(`
-        SELECT oren_id, capability, effect_json, status, receipt_json
+        SELECT
+          oren_id,
+          capability,
+          effect_json,
+          status,
+          CAST(attempts AS TEXT) AS attempts_text,
+          receipt_json
         FROM outbox WHERE effect_id = ?
       `).get(effectId);
       if (!outbox) {
         throw new Error(`Effect ${effectId} not found`);
       }
-      const effect: unknown = JSON.parse(String(outbox.effect_json));
+      const effect = canonicalizeEffect(JSON.parse(String(outbox.effect_json)));
       if (
-        !isEffect(effect)
+        effect === undefined
         ||
         String(outbox.oren_id) !== orenId
         || effect.effectId !== effectId
@@ -419,7 +472,12 @@ export class SqliteLifeRepository {
       }
 
       const operation = this.db.prepare(`
-        SELECT oren_id, capability, status, receipt_json
+        SELECT
+          oren_id,
+          capability,
+          status,
+          CAST(attempts AS TEXT) AS attempts_text,
+          receipt_json
         FROM operations WHERE effect_id = ?
       `).get(effectId);
       if (
@@ -430,10 +488,21 @@ export class SqliteLifeRepository {
         throw new Error(`Effect ${effectId} operation identity does not match outbox row`);
       }
 
-      const terminalStatuses = new Set(["completed", "failed", "uncertain", "cancelled"]);
       const outboxStatus = String(outbox.status);
       const operationStatus = String(operation.status);
-      if (terminalStatuses.has(outboxStatus)) {
+      const outboxAttempts = parseSafeAttemptCount(outbox.attempts_text);
+      const operationAttempts = parseSafeAttemptCount(operation.attempts_text);
+      if (
+        outboxAttempts === undefined
+        || operationAttempts === undefined
+        || outboxStatus !== operationStatus
+        || outboxAttempts !== operationAttempts
+        || !isValidEffectState(outboxStatus, outboxAttempts)
+        || !isValidEffectState(operationStatus, operationAttempts)
+      ) {
+        throw new Error(`Effect ${effectId} durable status/attempt state is inconsistent`);
+      }
+      if (TERMINAL_EFFECT_STATUSES.has(outboxStatus)) {
         if (
           operationStatus !== outboxStatus
           || outbox.receipt_json === null
@@ -449,48 +518,52 @@ export class SqliteLifeRepository {
         } catch {
           throw new Error(`Effect ${effectId} terminal state is inconsistent`);
         }
+        const canonicalOutboxReceipt = canonicalizeTerminalEffectEvent(outboxReceipt);
+        const canonicalOperationReceipt = canonicalizeTerminalEffectEvent(operationReceipt);
         if (
-          !isTerminalEffectEvent(outboxReceipt)
-          || !isTerminalEffectEvent(operationReceipt)
-          || !semanticJsonEqual(outboxReceipt, operationReceipt)
+          canonicalOutboxReceipt === undefined
+          || canonicalOperationReceipt === undefined
+          || !semanticJsonEqual(canonicalOutboxReceipt, canonicalOperationReceipt)
         ) {
           throw new Error(`Effect ${effectId} terminal state is inconsistent`);
         }
-        if (outboxStatus !== status || !semanticJsonEqual(outboxReceipt, payload)) {
+        if (
+          outboxStatus !== status
+          || !semanticJsonEqual(canonicalOutboxReceipt, canonicalPayload)
+        ) {
           throw new Error(`Effect ${effectId} conflicts with durable terminal result`);
         }
         const inbox = this.db.prepare(`
           SELECT oren_id, payload_json FROM inbox WHERE inbox_id = ?
         `).get(`effect-result:${effectId}`);
-        let inboxPayload: unknown;
+        let parsedInboxPayload: unknown;
         try {
-          inboxPayload = inbox ? JSON.parse(String(inbox.payload_json)) : null;
+          parsedInboxPayload = inbox ? JSON.parse(String(inbox.payload_json)) : null;
         } catch {
           throw new Error(`Effect ${effectId} terminal state is inconsistent`);
         }
+        const canonicalInboxPayload = canonicalizeJson(parsedInboxPayload);
         if (
           !inbox
           || String(inbox.oren_id) !== orenId
-          || !isRecord(inboxPayload)
-          || !hasExactKeys(inboxPayload, ["correlationId", "event"])
-          || inboxPayload.correlationId !== correlationId
-          || !semanticJsonEqual(inboxPayload.event, payload)
+          || !canonicalInboxPayload.ok
+          || !isRecord(canonicalInboxPayload.value)
+          || !hasExactKeys(canonicalInboxPayload.value, ["correlationId", "event"])
+          || canonicalInboxPayload.value.correlationId !== correlationId
+          || canonicalInboxPayload.value.event === undefined
+          || !semanticJsonEqual(canonicalInboxPayload.value.event, canonicalPayload)
         ) {
           throw new Error(`Effect ${effectId} terminal state is inconsistent`);
         }
         this.db.exec("COMMIT");
         return;
       }
-      if (terminalStatuses.has(operationStatus)) {
-        throw new Error(`Effect ${effectId} operation state is inconsistent`);
-      }
-
       const outboxUpdate = this.db.prepare(`
         UPDATE outbox
         SET status = ?, receipt_json = ?, lease_owner = NULL, lease_until = NULL
         WHERE effect_id = ? AND oren_id = ?
-          AND status NOT IN ('completed','failed','uncertain','cancelled')
-      `).run(status, receipt, effectId, orenId);
+          AND status = ? AND attempts = ?
+      `).run(status, receipt, effectId, orenId, outboxStatus, outboxAttempts);
       if (Number(outboxUpdate.changes) !== 1) {
         throw new Error(`Effect ${effectId} outbox did not transition`);
       }
@@ -498,8 +571,8 @@ export class SqliteLifeRepository {
         UPDATE operations
         SET status = ?, receipt_json = ?
         WHERE effect_id = ? AND oren_id = ?
-          AND status NOT IN ('completed','failed','uncertain','cancelled')
-      `).run(status, receipt, effectId, orenId);
+          AND status = ? AND attempts = ?
+      `).run(status, receipt, effectId, orenId, operationStatus, operationAttempts);
       if (Number(operationUpdate.changes) !== 1) {
         throw new Error(`Effect ${effectId} operation did not transition`);
       }
@@ -510,7 +583,7 @@ export class SqliteLifeRepository {
         `effect-result:${effectId}`,
         orenId,
         this.now(),
-        JSON.stringify({ correlationId, event: payload }),
+        inboxPayload,
       );
       this.db.exec("COMMIT");
     } catch (error) {

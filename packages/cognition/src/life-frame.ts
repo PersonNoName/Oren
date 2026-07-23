@@ -67,11 +67,15 @@ function snapshotJsonObject(value: JsonObject): JsonObject {
 }
 
 function snapshotJsonValue(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) {
+  if (isJsonArray(value)) {
     return value.map(snapshotJsonValue);
   }
 
   return value !== null && typeof value === "object"
     ? snapshotJsonObject(value)
     : value;
+}
+
+function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+  return Array.isArray(value);
 }

@@ -245,6 +245,120 @@ describe("EffectDispatcher", () => {
     }]);
   });
 
+  it.each([
+    {
+      name: "stateful toJSON hook",
+      build: () => {
+        let calls = 0;
+        const receipt = { transactionId: "tx-hidden" };
+        Object.defineProperty(receipt, "toJSON", {
+          value: () => ({ transactionId: `tx-${calls += 1}` }),
+        });
+        return {
+          result: { status: "completed", output: null, receipt },
+          expectUntouched: () => expect(calls).toBe(0),
+        };
+      },
+    },
+    {
+      name: "omitting toJSON hook",
+      build: () => {
+        let calls = 0;
+        const receipt = { transactionId: "tx-hidden" };
+        Object.defineProperty(receipt, "toJSON", {
+          value: () => {
+            calls += 1;
+            return undefined;
+          },
+        });
+        return {
+          result: { status: "completed", output: null, receipt },
+          expectUntouched: () => expect(calls).toBe(0),
+        };
+      },
+    },
+    {
+      name: "throwing toJSON hook",
+      build: () => {
+        let calls = 0;
+        const receipt = { transactionId: "tx-hidden" };
+        Object.defineProperty(receipt, "toJSON", {
+          value: () => {
+            calls += 1;
+            throw new Error("must not serialize live receipt");
+          },
+        });
+        return {
+          result: { status: "completed", output: null, receipt },
+          expectUntouched: () => expect(calls).toBe(0),
+        };
+      },
+    },
+    {
+      name: "throwing status getter",
+      build: () => {
+        let calls = 0;
+        const result = {};
+        Object.defineProperty(result, "status", {
+          enumerable: true,
+          get: () => {
+            calls += 1;
+            throw new Error("must not invoke status getter");
+          },
+        });
+        return {
+          result,
+          expectUntouched: () => expect(calls).toBe(0),
+        };
+      },
+    },
+    {
+      name: "hostile proxy",
+      build: () => {
+        let calls = 0;
+        const result = new Proxy({}, {
+          getPrototypeOf: () => {
+            calls += 1;
+            throw new Error("must not inspect proxy");
+          },
+        });
+        return {
+          result,
+          expectUntouched: () => expect(calls).toBe(0),
+        };
+      },
+    },
+    {
+      name: "sparse array",
+      build: () => ({
+        result: { status: "completed", output: Array(1), receipt: { transactionId: "tx-1" } },
+        expectUntouched: () => {},
+      }),
+    },
+  ])("totally rejects a $name and continues with a valid later row", async ({ build }) => {
+    const malformed = build();
+    const { repository, terminalPayloads } = repositoryFor([
+      claimedEffect("effect-malformed"),
+      claimedEffect("effect-valid"),
+    ]);
+    const registry = registryFor({
+      invoke: async (invocation) => invocation.effectId === "effect-malformed"
+        ? malformed.result as never
+        : { status: "completed", output: null, receipt: { transactionId: "tx-valid" } },
+    });
+
+    await expect(new EffectDispatcher(repository, registry, "worker-1").runOnce()).resolves.toEqual([
+      { effectId: "effect-malformed", status: "invalid_result" },
+      { effectId: "effect-valid", status: "completed" },
+    ]);
+    malformed.expectUntouched();
+    expect(terminalPayloads).toEqual([{
+      type: "EffectCompleted",
+      effectId: "effect-valid",
+      receipt: { transactionId: "tx-valid" },
+    }]);
+  });
+
   it("rejects a malformed reconciliation result without invoking or persisting", async () => {
     let invocations = 0;
     const { repository, terminalPayloads } = repositoryFor([claimedEffect("effect-1", 2)]);

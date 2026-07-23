@@ -37,7 +37,12 @@ export function migrate(db: DatabaseSync): void {
       status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
       lease_owner TEXT,
       lease_until TEXT,
-      attempts INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(
+        typeof(attempts) = 'integer'
+        AND attempts BETWEEN 0 AND 9007199254740991
+        AND (status <> 'pending' OR attempts = 0)
+        AND (status <> 'dispatched' OR attempts >= 1)
+      ),
       receipt_json TEXT
     );
 
@@ -46,7 +51,12 @@ export function migrate(db: DatabaseSync): void {
       oren_id TEXT NOT NULL,
       capability TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
-      attempts INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(
+        typeof(attempts) = 'integer'
+        AND attempts BETWEEN 0 AND 9007199254740991
+        AND (status <> 'pending' OR attempts = 0)
+        AND (status <> 'dispatched' OR attempts >= 1)
+      ),
       receipt_json TEXT
     );
 
