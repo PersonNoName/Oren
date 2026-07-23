@@ -1,45 +1,39 @@
-# Oren Life Kernel Implementation Plan
+# Oren Life Kernel with Pi Cognition Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a runnable, deterministic vertical slice of Oren’s life kernel that accepts durable events, reconstructs one Oren’s state, asks a scripted cognition adapter for typed proposals, enforces grants and budgets, invokes a test extension through a durable outbox, and schedules the next wake.
+**Goal:** Build a runnable, deterministic Phase 1 vertical slice in which Oren persists her life state and reliable actions while `pi-agent-core` runs each bounded cognitive episode.
 
-**Architecture:** A TypeScript/Node.js modular monolith hosts one single-writer `LifeActor` per Oren. SQLite WAL stores the inbox, append-only chronicle, snapshots, grants, schedules, operations, and outbox; LLM-facing cognition and extension-facing capability protocols are replaceable ports, while all accepted state changes remain deterministic and replayable.
+**Architecture:** A TypeScript modular monolith uses one event-sourced `LifeActor` per Oren and SQLite WAL for Chronicle, Inbox, Outbox, operations, grants, schedules, and snapshots. `@oren/pi-cognition` is the only package allowed to import Pi; it maps a `LifeFrame` to a Pi agent loop, exposes Oren capabilities as Pi tools, and returns typed proposals or a durable-effect suspension to the actor.
 
-**Tech Stack:** Node.js 24.15+, npm 11.12+, TypeScript (strict ESM), Vitest, built-in `node:sqlite`, npm workspaces
+**Tech Stack:** Node.js 24.15+, npm 11.12+, strict ESM TypeScript 5.9.3, Vitest 3.2.4, built-in `node:sqlite`, TypeBox 1.1.38 inside the Pi adapter, `@earendil-works/pi-ai` 0.75.5, `@earendil-works/pi-agent-core` 0.75.5
 
 ## Global Constraints
 
-- The implementation must follow `design/2026-07-22-oren-implementation-spine.md`.
+- Follow `design/2026-07-22-oren-implementation-spine.md`.
 - Only `LifeActor` may commit changes to `LifeState`.
-- Events are facts; LLM outputs are typed `Proposal` values; external work is a typed `Effect`.
-- LLM adapters and extensions never receive SQLite handles, credentials, or mutable `LifeState`.
-- Every external effect has an idempotency key and reaches a terminal receipt or an explicit unresolved state.
-- `autonomy_budget` applies only to idle autonomous cognition.
-- Foreground user interaction is not subject to a daily quota; `interaction_guardrails` only bound one cognitive episode.
-- Each background commitment has its own `commitment_budget`.
-- Phase 1 has no production model SDK, Web access, message channel, vector database, dashboard, or remote extension transport.
-- Use built-in `node:sqlite`; add no runtime dependency in Phase 1.
+- Events are facts, LLM output is an unaccepted `Proposal`, and external work is an `Effect`.
+- `LifeActor` never waits for a model or extension while holding its single-writer transaction.
+- Each cognition request records `baseStateVersion`; stale cognition results never mutate current state.
+- Each Oren has at most one running cognitive episode.
+- Foreground user input preempts an idle autonomous episode.
+- `autonomyBudget` applies only to idle cognition; foreground interaction uses per-episode guardrails, not a daily quota.
+- Persistent capabilities end the current Pi episode; their result starts a new episode through the Inbox.
+- Immediate capabilities must be read-only, replay-safe, non-destructive, free of external side effects, and not use the user’s identity.
+- Every external effect is persisted before dispatch and uses `effectId` as its idempotency key.
+- An external result that may have happened but cannot be verified becomes `uncertain` and is never blindly retried.
+- Oren owns the extension protocol. Do not depend on `@earendil-works/pi-coding-agent`.
+- Only `packages/pi-cognition` may import `@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, or TypeBox.
+- Pin Pi packages to `0.75.5`; do not use caret or tilde ranges.
+- The sibling `../pi` checkout at baseline commit `7c2775f6` is reference material and an optional local override, not an installation requirement.
+- Phase 1 performs no real Web, purchasing, messaging, calendar, or production-model calls in automated tests.
 - Tests use temporary or in-memory databases and never write under `data/` or `.oren-life/`.
-- Run `npm test`, `npm run typecheck`, and `npm run build` before the final Phase 1 commit.
+- Every task follows red-green-refactor and ends with a focused commit.
+- Before Phase 1 completion, run `npm test`, `npm run typecheck`, and `npm run build`.
 
 ---
 
-## Scope Decomposition
-
-The approved architecture contains several independently reviewable products. This plan covers only **Phase 1: runnable life-kernel vertical slice**.
-
-Follow-on plans, written only after Phase 1 passes, will cover:
-
-1. real model adapter plus prompt/evaluation harness;
-2. memory/content projection and recall;
-3. Web reading and source provenance;
-4. one real message channel;
-5. life/action dashboard and long-horizon simulation tooling.
-
-Phase 1 uses a scripted cognition adapter and a deterministic test extension so the kernel can be verified without network access or model variance.
-
-## Locked File Structure
+## Locked Package and File Structure
 
 ```text
 package.json
@@ -51,14 +45,16 @@ packages/
     package.json
     src/
       ids.ts
+      json.ts
+      capability.ts
       protocol.ts
       state.ts
       reducer.ts
+      ports.ts
       guard.ts
       life-actor.ts
       index.ts
     test/
-      state.test.ts
       reducer.test.ts
       guard.test.ts
       life-actor.test.ts
@@ -67,52 +63,55 @@ packages/
     src/
       database.ts
       migrations.ts
-      chronicle-store.ts
-      snapshot-store.ts
-      inbox-store.ts
-      outbox-store.ts
-      schedule-store.ts
-      operation-store.ts
-      grant-store.ts
+      life-repository.ts
       index.ts
     test/
-      chronicle-store.test.ts
-      snapshot-store.test.ts
-      inbox-store.test.ts
-      outbox-store.test.ts
-      schedule-store.test.ts
+      life-repository.test.ts
+      recovery.test.ts
   cognition/
     package.json
     src/
-      cognition-adapter.ts
+      types.ts
       life-frame.ts
       conductor.ts
       scripted-adapter.ts
       index.ts
     test/
       conductor.test.ts
-  capabilities/
+  extensions/
     package.json
     src/
-      manifest.ts
-      extension.ts
+      sdk.ts
       registry.ts
-      runtime.ts
+      broker.ts
       index.ts
     test/
-      runtime.test.ts
+      broker.test.ts
+  pi-cognition/
+    package.json
+    src/
+      proposal-schema.ts
+      prompts.ts
+      tool-adapter.ts
+      pi-cognition-adapter.ts
+      index.ts
+    test/
+      fixtures.ts
+      tool-adapter.test.ts
+      pi-cognition-adapter.test.ts
   app/
     package.json
     src/
-      decision-compiler.ts
+      cognition-worker.ts
       effect-dispatcher.ts
       scheduler.ts
+      episode-coordinator.ts
       life-runtime.ts
       demo.ts
       index.ts
     test/
       effect-dispatcher.test.ts
-      scheduler.test.ts
+      episode-coordinator.test.ts
       life-runtime.test.ts
 extensions/
   test-counter/
@@ -124,18 +123,20 @@ extensions/
 Dependency direction:
 
 ```text
-kernel        ← storage
-kernel        ← cognition
-kernel        ← capabilities
-kernel + storage + cognition + capabilities ← app
-capabilities  ← extensions/test-counter
+kernel
+  ↑
+storage      cognition      extensions
+                  ↑
+             pi-cognition
+                  ↑
+                 app
 ```
 
-`kernel` imports no workspace package. `storage`, `cognition`, and `capabilities` may import `@oren/kernel`; they do not import one another. `app` is the composition root.
+`app` is the only composition root. `pi-cognition` receives a capability invoker port; it never imports the extension registry or runtime.
 
 ---
 
-### Task 1: Bootstrap the Workspace and Freeze Core Protocol Types
+### Task 1: Bootstrap the Workspace and Freeze Domain Protocols
 
 **Files:**
 - Create: `package.json`
@@ -143,64 +144,61 @@ capabilities  ← extensions/test-counter
 - Create: `vitest.config.ts`
 - Create: `packages/kernel/package.json`
 - Create: `packages/kernel/src/ids.ts`
+- Create: `packages/kernel/src/json.ts`
+- Create: `packages/kernel/src/capability.ts`
 - Create: `packages/kernel/src/protocol.ts`
 - Create: `packages/kernel/src/state.ts`
+- Create: `packages/kernel/src/reducer.ts`
 - Create: `packages/kernel/src/index.ts`
-- Test: `packages/kernel/test/state.test.ts`
-- Generated: `package-lock.json`
+- Test: `packages/kernel/test/reducer.test.ts`
 
 **Interfaces:**
-- Produces: `EventEnvelope`, `CoreEvent`, `Proposal`, `Effect`, `LifeState`, `createInitialLifeState()`
 - Consumes: none
+- Produces: `EventEnvelope`, `CoreEvent`, `Proposal`, `Effect`, `CapabilityDescriptor`, `LifeState`, `createInitialLifeState()`, `reduceLifeState()`
 
-- [ ] **Step 1: Write the failing state-construction test**
+- [ ] **Step 1: Write the failing reducer test**
 
 ```ts
-// packages/kernel/test/state.test.ts
+// packages/kernel/test/reducer.test.ts
 import { describe, expect, it } from "vitest";
-import { createInitialLifeState } from "../src/index.js";
+import {
+  createInitialLifeState,
+  reduceLifeState,
+  type EventEnvelope,
+} from "../src/index.js";
 
-describe("createInitialLifeState", () => {
-  it("creates a bounded empty state for one Oren", () => {
-    expect(createInitialLifeState("oren-1", "person-1")).toEqual({
+describe("reduceLifeState", () => {
+  it("replays accepted events into one deterministic state", () => {
+    const initial = createInitialLifeState("oren-1", "person-1");
+    const event: EventEnvelope = {
+      eventId: "event-1",
       orenId: "oren-1",
-      version: 0,
-      identity: {
-        ethosVersion: 1,
-        currentDisposition: "attentive",
+      schemaVersion: 1,
+      occurredAt: "2026-07-23T00:00:00.000Z",
+      recordedAt: "2026-07-23T00:00:00.000Z",
+      source: "life-actor",
+      causationId: null,
+      correlationId: "corr-1",
+      payload: {
+        type: "ThreadAdvanced",
+        threadId: "thread-1",
+        summary: "Compare Pi and Oren boundaries",
       },
+    };
+
+    expect(reduceLifeState(initial, event)).toMatchObject({
+      version: 1,
       attention: {
-        activeThreadIds: [],
-        currentFocus: null,
-        unresolvedQuestions: [],
+        currentFocus: "Compare Pi and Oren boundaries",
+        activeThreadIds: ["thread-1"],
       },
-      relationship: {
-        primaryPersonId: "person-1",
-        currentContextRef: null,
-      },
-      commitments: [],
-      intentions: [],
-      schedules: [],
-      grantIds: [],
-      budgets: {
-        autonomyRemaining: 0,
-        interactionMaxSteps: 8,
-        commitmentRemaining: {},
-      },
-      pendingOperationIds: [],
-      chronicleCursor: 0,
+      chronicleCursor: 1,
     });
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify the workspace is not yet configured**
-
-Run: `npm test -- packages/kernel/test/state.test.ts`
-
-Expected: FAIL because the root package and kernel exports do not exist.
-
-- [ ] **Step 3: Create the root workspace configuration**
+- [ ] **Step 2: Create workspace configuration and verify the test fails**
 
 ```json
 // package.json
@@ -208,20 +206,17 @@ Expected: FAIL because the root package and kernel exports do not exist.
   "name": "oren",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "packages/*",
-    "extensions/*"
-  ],
+  "workspaces": ["packages/*", "extensions/*"],
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "tsc -p tsconfig.json"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^3.2.0"
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
+    "vitest": "3.2.4"
   }
 }
 ```
@@ -261,6 +256,268 @@ export default defineConfig({
 });
 ```
 
+Run: `npm install && npm test -- packages/kernel/test/reducer.test.ts`
+
+Expected: FAIL because `../src/index.js` does not exist.
+
+- [ ] **Step 3: Add stable protocol and state types**
+
+```ts
+// packages/kernel/src/ids.ts
+export type OrenId = string;
+export type PersonId = string;
+export type EventId = string;
+export type CorrelationId = string;
+export type CausationId = string;
+export type EpisodeId = string;
+export type EffectId = string;
+export type OperationId = string;
+export type GrantId = string;
+export type ScheduleId = string;
+export type ThreadId = string;
+```
+
+```ts
+// packages/kernel/src/json.ts
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue =
+  | JsonPrimitive
+  | JsonValue[]
+  | { readonly [key: string]: JsonValue };
+export type JsonObject = { readonly [key: string]: JsonValue };
+```
+
+```ts
+// packages/kernel/src/capability.ts
+import type { EffectId, GrantId, OrenId } from "./ids.js";
+import type { JsonObject, JsonValue } from "./json.js";
+
+export type CapabilityTrait =
+  | "read_only"
+  | "replay_safe"
+  | "reversible"
+  | "external_side_effect"
+  | "uses_user_identity"
+  | "uses_sensitive_data"
+  | "billable"
+  | "destructive";
+
+export interface CapabilityDescriptor {
+  readonly extensionId: string;
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: JsonObject;
+  readonly outputSchema: JsonObject;
+  readonly permissionRequirements: readonly string[];
+  readonly traits: readonly CapabilityTrait[];
+  readonly cancellable: boolean;
+  readonly timeoutMs: number;
+}
+
+export interface CapabilityInvocation {
+  readonly effectId: EffectId;
+  readonly orenId: OrenId;
+  readonly capability: string;
+  readonly arguments: JsonObject;
+  readonly grantIds: readonly GrantId[];
+  readonly stateVersion: number;
+  readonly deadline: string;
+}
+
+export type CapabilityResult =
+  | { readonly status: "completed"; readonly output: JsonValue; readonly receipt: JsonObject }
+  | { readonly status: "failed"; readonly code: string; readonly message: string }
+  | { readonly status: "uncertain"; readonly message: string };
+
+export function isImmediateCapability(descriptor: CapabilityDescriptor): boolean {
+  const traits = new Set(descriptor.traits);
+  return traits.has("read_only")
+    && traits.has("replay_safe")
+    && !traits.has("external_side_effect")
+    && !traits.has("uses_user_identity")
+    && !traits.has("destructive");
+}
+```
+
+```ts
+// packages/kernel/src/protocol.ts
+import type {
+  CorrelationId,
+  EffectId,
+  EpisodeId,
+  EventId,
+  GrantId,
+  OrenId,
+  ScheduleId,
+  ThreadId,
+} from "./ids.js";
+import type { JsonObject } from "./json.js";
+
+export type TriggerKind =
+  | "foreground_user"
+  | "effect_result"
+  | "commitment_due"
+  | "scheduled_wake"
+  | "health_check";
+
+export type Proposal =
+  | { readonly type: "NoAction"; readonly reason: string }
+  | { readonly type: "AdvanceThread"; readonly threadId: ThreadId; readonly summary: string }
+  | { readonly type: "UpdateDisposition"; readonly disposition: string; readonly reason: string }
+  | { readonly type: "ExpressToUser"; readonly text: string; readonly reason: string }
+  | { readonly type: "ScheduleWake"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string };
+
+export interface Effect {
+  readonly effectId: EffectId;
+  readonly orenId: OrenId;
+  readonly correlationId: CorrelationId;
+  readonly capability: string;
+  readonly arguments: JsonObject;
+  readonly grantIds: readonly GrantId[];
+  readonly stateVersion: number;
+}
+
+export type CoreEvent =
+  | { readonly type: "OrenInitialized"; readonly personId: string }
+  | { readonly type: "UserMessageReceived"; readonly personId: string; readonly text: string }
+  | { readonly type: "ThreadAdvanced"; readonly threadId: ThreadId; readonly summary: string }
+  | { readonly type: "DispositionUpdated"; readonly disposition: string; readonly reason: string }
+  | { readonly type: "CognitionRequested"; readonly episodeId: EpisodeId; readonly baseStateVersion: number; readonly triggerKind: TriggerKind }
+  | { readonly type: "CognitionCompleted"; readonly episodeId: EpisodeId; readonly baseStateVersion: number; readonly proposals: readonly Proposal[] }
+  | { readonly type: "CognitionFailed"; readonly episodeId: EpisodeId; readonly message: string }
+  | { readonly type: "EpisodeInterrupted"; readonly episodeId: EpisodeId; readonly reason: "foreground_user" | "shutdown" }
+  | { readonly type: "EffectRequested"; readonly effect: Effect }
+  | { readonly type: "EffectCompleted"; readonly effectId: EffectId; readonly receipt: JsonObject }
+  | { readonly type: "EffectFailed"; readonly effectId: EffectId; readonly code: string; readonly message: string }
+  | { readonly type: "EffectUncertain"; readonly effectId: EffectId; readonly message: string }
+  | { readonly type: "WakeScheduled"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string }
+  | { readonly type: "WakeDue"; readonly scheduleId: ScheduleId; readonly purpose: string };
+
+export interface EventEnvelope {
+  readonly eventId: EventId;
+  readonly orenId: OrenId;
+  readonly schemaVersion: 1;
+  readonly occurredAt: string;
+  readonly recordedAt: string;
+  readonly source: string;
+  readonly causationId: string | null;
+  readonly correlationId: CorrelationId;
+  readonly payload: CoreEvent;
+}
+```
+
+```ts
+// packages/kernel/src/state.ts
+import type { OrenId, PersonId } from "./ids.js";
+
+export interface LifeState {
+  readonly orenId: OrenId;
+  readonly version: number;
+  readonly identity: {
+    readonly ethosVersion: number;
+    readonly currentDisposition: string;
+  };
+  readonly attention: {
+    readonly activeThreadIds: readonly string[];
+    readonly currentFocus: string | null;
+    readonly unresolvedQuestions: readonly string[];
+  };
+  readonly relationship: {
+    readonly primaryPersonId: PersonId;
+    readonly currentContextRef: string | null;
+  };
+  readonly grantIds: readonly string[];
+  readonly pendingEffectIds: readonly string[];
+  readonly schedules: readonly string[];
+  readonly budgets: {
+    readonly autonomyRemaining: number;
+    readonly interactionMaxSteps: number;
+    readonly commitmentRemaining: Readonly<Record<string, number>>;
+  };
+  readonly chronicleCursor: number;
+}
+
+export function createInitialLifeState(orenId: OrenId, personId: PersonId): LifeState {
+  return {
+    orenId,
+    version: 0,
+    identity: { ethosVersion: 1, currentDisposition: "attentive" },
+    attention: { activeThreadIds: [], currentFocus: null, unresolvedQuestions: [] },
+    relationship: { primaryPersonId: personId, currentContextRef: null },
+    grantIds: [],
+    pendingEffectIds: [],
+    schedules: [],
+    budgets: { autonomyRemaining: 0, interactionMaxSteps: 8, commitmentRemaining: {} },
+    chronicleCursor: 0,
+  };
+}
+```
+
+- [ ] **Step 4: Implement the deterministic reducer and exports**
+
+```ts
+// packages/kernel/src/reducer.ts
+import type { EventEnvelope } from "./protocol.js";
+import type { LifeState } from "./state.js";
+
+export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeState {
+  const nextVersion = state.version + 1;
+  const base = { ...state, version: nextVersion, chronicleCursor: state.chronicleCursor + 1 };
+
+  switch (event.payload.type) {
+    case "ThreadAdvanced": {
+      const activeThreadIds = state.attention.activeThreadIds.includes(event.payload.threadId)
+        ? state.attention.activeThreadIds
+        : [...state.attention.activeThreadIds, event.payload.threadId].slice(-16);
+      return {
+        ...base,
+        attention: {
+          ...state.attention,
+          activeThreadIds,
+          currentFocus: event.payload.summary,
+        },
+      };
+    }
+    case "DispositionUpdated":
+      return {
+        ...base,
+        identity: { ...state.identity, currentDisposition: event.payload.disposition },
+      };
+    case "EffectRequested":
+      return {
+        ...base,
+        pendingEffectIds: [...state.pendingEffectIds, event.payload.effect.effectId],
+      };
+    case "EffectCompleted":
+    case "EffectFailed":
+    case "EffectUncertain":
+      return {
+        ...base,
+        pendingEffectIds: state.pendingEffectIds.filter((id) => id !== event.payload.effectId),
+      };
+    case "WakeScheduled":
+      return {
+        ...base,
+        schedules: state.schedules.includes(event.payload.scheduleId)
+          ? state.schedules
+          : [...state.schedules, event.payload.scheduleId],
+      };
+    default:
+      return base;
+  }
+}
+```
+
+```ts
+// packages/kernel/src/index.ts
+export * from "./ids.js";
+export * from "./json.js";
+export * from "./capability.js";
+export * from "./protocol.js";
+export * from "./state.js";
+export * from "./reducer.js";
+```
+
 ```json
 // packages/kernel/package.json
 {
@@ -271,356 +528,362 @@ export default defineConfig({
 }
 ```
 
-Run: `npm install`
+Run: `npm test -- packages/kernel/test/reducer.test.ts && npm run typecheck`
 
-Expected: PASS and create `package-lock.json`.
+Expected: PASS.
 
-- [ ] **Step 4: Add stable identifiers and protocol types**
-
-```ts
-// packages/kernel/src/ids.ts
-export type OrenId = string;
-export type PersonId = string;
-export type EventId = string;
-export type CorrelationId = string;
-export type IntentId = string;
-export type EffectId = string;
-export type GrantId = string;
-export type OperationId = string;
-export type ScheduleId = string;
-export type ThreadId = string;
-export type CommitmentId = string;
-```
-
-```ts
-// packages/kernel/src/protocol.ts
-import type {
-  CommitmentId,
-  CorrelationId,
-  EffectId,
-  EventId,
-  GrantId,
-  IntentId,
-  OrenId,
-  ScheduleId,
-  ThreadId,
-} from "./ids.js";
-
-export type JsonPrimitive = string | number | boolean | null;
-export type JsonValue =
-  | JsonPrimitive
-  | JsonValue[]
-  | { [key: string]: JsonValue };
-
-export type CoreEvent =
-  | { type: "OrenInitialized"; personId: string }
-  | { type: "UserMessageReceived"; personId: string; text: string }
-  | { type: "WakeDue"; scheduleId: ScheduleId; purpose: string }
-  | { type: "ThreadActivated"; threadId: ThreadId; summary: string }
-  | { type: "ThreadAdvanced"; threadId: ThreadId; summary: string }
-  | {
-      type: "CommitmentCreated";
-      commitmentId: CommitmentId;
-      summary: string;
-      nextStep: string;
-      budgetRemaining: number;
-    }
-  | {
-      type: "CommitmentAdvanced";
-      commitmentId: CommitmentId;
-      nextStep: string;
-    }
-  | {
-      type: "IntentFormed";
-      intentId: IntentId;
-      reason: string;
-      proposedAction: string;
-      expiresAt: string;
-    }
-  | {
-      type: "WakeScheduled";
-      scheduleId: ScheduleId;
-      dueAt: string;
-      purpose: string;
-    }
-  | { type: "GrantRecorded"; grantId: GrantId }
-  | {
-      type: "BudgetConsumed";
-      budget: "autonomy" | "commitment";
-      amount: number;
-      commitmentId: CommitmentId | null;
-    }
-  | {
-      type: "EffectRequested";
-      effectId: EffectId;
-      capability: string;
-      intentId: IntentId;
-    }
-  | {
-      type: "CapabilityCompleted";
-      effectId: EffectId;
-      capability: string;
-      receipt: JsonValue;
-    }
-  | {
-      type: "CapabilityFailed";
-      effectId: EffectId;
-      capability: string;
-      category:
-        | "Retryable"
-        | "NeedsReconciliation"
-        | "NeedsAttention"
-        | "Terminal";
-      message: string;
-    };
-
-export interface EventEnvelope<TPayload extends CoreEvent = CoreEvent> {
-  eventId: EventId;
-  orenId: OrenId;
-  schemaVersion: 1;
-  occurredAt: string;
-  recordedAt: string;
-  source: string;
-  causationId: EventId | null;
-  correlationId: CorrelationId;
-  payload: TPayload;
-}
-
-export type Proposal =
-  | { type: "NoAction"; reason: string }
-  | { type: "AdvanceThread"; threadId: ThreadId; summary: string }
-  | {
-      type: "CreateOrUpdateCommitment";
-      commitmentId: CommitmentId;
-      summary: string;
-      nextStep: string;
-    }
-  | {
-      type: "FormIntent";
-      intentId: IntentId;
-      reason: string;
-      proposedAction: string;
-      expiresAt: string;
-    }
-  | {
-      type: "RequestCapability";
-      intentId: IntentId;
-      capability: string;
-      arguments: JsonValue;
-      riskTraits: string[];
-      commitmentId: CommitmentId | null;
-    }
-  | {
-      type: "ScheduleWake";
-      scheduleId: ScheduleId;
-      dueAt: string;
-      purpose: string;
-    };
-
-export interface Effect {
-  effectId: EffectId;
-  orenId: OrenId;
-  intentId: IntentId;
-  capability: string;
-  arguments: JsonValue;
-  grantIds: GrantId[];
-  stateVersion: number;
-  deadline: string;
-  idempotencyKey: string;
-  correlationId: CorrelationId;
-}
-
-export interface ScheduledWake {
-  scheduleId: ScheduleId;
-  orenId: OrenId;
-  dueAt: string;
-  purpose: string;
-}
-
-export interface DecisionBatch {
-  events: EventEnvelope[];
-  effects: Effect[];
-  schedules: ScheduledWake[];
-}
-```
-
-- [ ] **Step 5: Add the initial bounded state**
-
-```ts
-// packages/kernel/src/state.ts
-import type {
-  CommitmentId,
-  GrantId,
-  OrenId,
-  OperationId,
-  PersonId,
-  ScheduleId,
-  ThreadId,
-} from "./ids.js";
-
-export interface LifeState {
-  orenId: OrenId;
-  version: number;
-  identity: {
-    ethosVersion: number;
-    currentDisposition: string;
-  };
-  attention: {
-    activeThreadIds: ThreadId[];
-    currentFocus: string | null;
-    unresolvedQuestions: string[];
-  };
-  relationship: {
-    primaryPersonId: PersonId;
-    currentContextRef: string | null;
-  };
-  commitments: Array<{
-    commitmentId: CommitmentId;
-    summary: string;
-    nextStep: string;
-    status: "active" | "blocked" | "completed" | "cancelled";
-  }>;
-  intentions: Array<{
-    intentId: string;
-    reason: string;
-    proposedAction: string;
-    expiresAt: string;
-  }>;
-  schedules: Array<{
-    scheduleId: ScheduleId;
-    dueAt: string;
-    purpose: string;
-  }>;
-  grantIds: GrantId[];
-  budgets: {
-    autonomyRemaining: number;
-    interactionMaxSteps: number;
-    commitmentRemaining: Record<CommitmentId, number>;
-  };
-  pendingOperationIds: OperationId[];
-  chronicleCursor: number;
-}
-
-export function createInitialLifeState(
-  orenId: OrenId,
-  primaryPersonId: PersonId,
-): LifeState {
-  return {
-    orenId,
-    version: 0,
-    identity: {
-      ethosVersion: 1,
-      currentDisposition: "attentive",
-    },
-    attention: {
-      activeThreadIds: [],
-      currentFocus: null,
-      unresolvedQuestions: [],
-    },
-    relationship: {
-      primaryPersonId,
-      currentContextRef: null,
-    },
-    commitments: [],
-    intentions: [],
-    schedules: [],
-    grantIds: [],
-    budgets: {
-      autonomyRemaining: 0,
-      interactionMaxSteps: 8,
-      commitmentRemaining: {},
-    },
-    pendingOperationIds: [],
-    chronicleCursor: 0,
-  };
-}
-```
-
-```ts
-// packages/kernel/src/index.ts
-export * from "./ids.js";
-export * from "./protocol.js";
-export * from "./state.js";
-```
-
-- [ ] **Step 6: Run the task checks**
-
-Run: `npm test -- packages/kernel/test/state.test.ts && npm run typecheck`
-
-Expected: PASS; one test passes and TypeScript reports no errors.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit the frozen domain layer**
 
 ```bash
 git add package.json package-lock.json tsconfig.json vitest.config.ts packages/kernel
-git commit -m "chore: bootstrap Oren TypeScript workspace"
+git commit -m "feat(kernel): freeze life protocol and reducer"
 ```
 
 ---
 
-### Task 2: Implement the SQLite Chronicle
+### Task 2: Implement SQLite Chronicle, Inbox, Outbox, and Recovery State
 
 **Files:**
 - Create: `packages/storage/package.json`
 - Create: `packages/storage/src/database.ts`
 - Create: `packages/storage/src/migrations.ts`
-- Create: `packages/storage/src/chronicle-store.ts`
+- Create: `packages/storage/src/life-repository.ts`
 - Create: `packages/storage/src/index.ts`
-- Test: `packages/storage/test/chronicle-store.test.ts`
+- Test: `packages/storage/test/life-repository.test.ts`
+- Test: `packages/storage/test/recovery.test.ts`
 
 **Interfaces:**
-- Consumes: `EventEnvelope` from `@oren/kernel`
-- Produces: `SqliteDatabase`, `ChronicleStore.append()`, `ChronicleStore.list()`, `ChronicleStore.lastSequence()`
+- Consumes: `EventEnvelope`, `Effect`, `LifeState`, `reduceLifeState()`
+- Produces: `SqliteLifeRepository`, atomic `appendAndEnqueueEffects()`, durable Inbox/Outbox/operation/schedule leases
 
-- [ ] **Step 1: Write the failing append-and-replay test**
+- [ ] **Step 1: Write failing persistence and restart tests**
 
 ```ts
-// packages/storage/test/chronicle-store.test.ts
+// packages/storage/test/life-repository.test.ts
 import { describe, expect, it } from "vitest";
-import type { EventEnvelope } from "@oren/kernel";
-import {
-  ChronicleStore,
-  SqliteDatabase,
-  applyMigrations,
-} from "../src/index.js";
+import { createInitialLifeState, type EventEnvelope } from "@oren/kernel";
+import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
-function initializedEvent(): EventEnvelope {
-  return {
-    eventId: "event-1",
-    orenId: "oren-1",
-    schemaVersion: 1,
-    occurredAt: "2026-07-23T00:00:00.000Z",
-    recordedAt: "2026-07-23T00:00:00.000Z",
-    source: "test",
-    causationId: null,
-    correlationId: "correlation-1",
-    payload: { type: "OrenInitialized", personId: "person-1" },
-  };
-}
+describe("SqliteLifeRepository", () => {
+  it("commits an event and outbox effect atomically", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+    const event = {
+      eventId: "event-1",
+      orenId: "oren-1",
+      schemaVersion: 1,
+      occurredAt: "2026-07-23T00:00:00.000Z",
+      recordedAt: "2026-07-23T00:00:00.000Z",
+      source: "life-actor",
+      causationId: null,
+      correlationId: "corr-1",
+      payload: {
+        type: "EffectRequested",
+        effect: {
+          effectId: "effect-1",
+          orenId: "oren-1",
+          correlationId: "corr-1",
+          capability: "test.increment",
+          arguments: { by: 1 },
+          grantIds: ["grant-1"],
+          stateVersion: 0,
+        },
+      },
+    } satisfies EventEnvelope;
 
-describe("ChronicleStore", () => {
-  it("appends once and replays in sequence order", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const store = new ChronicleStore(database);
+    repo.appendAndEnqueueEffects("oren-1", [event], [event.payload.effect]);
 
-    expect(store.append(initializedEvent())).toBe(1);
-    expect(store.append(initializedEvent())).toBe(1);
-    expect(store.lastSequence("oren-1")).toBe(1);
-    expect(store.list("oren-1", 0)).toEqual([
-      { sequence: 1, event: initializedEvent() },
-    ]);
+    expect(repo.loadEvents("oren-1")).toHaveLength(1);
+    expect(repo.claimOutbox("worker-1", 1)[0]?.effectId).toBe("effect-1");
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+```ts
+// packages/storage/test/recovery.test.ts
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
-Run: `npm test -- packages/storage/test/chronicle-store.test.ts`
+describe("repository recovery", () => {
+  it("reclaims an expired outbox lease after restart", () => {
+    const directory = mkdtempSync(join(tmpdir(), "oren-storage-"));
+    const path = join(directory, "life.db");
+    const first = new SqliteLifeRepository(openDatabase(path));
+    first.enqueueRawEffect("oren-1", "effect-1", "test.increment", { by: 1 });
+    expect(first.claimOutbox("dead-worker", 1, "2026-07-23T00:00:00.000Z")).toHaveLength(1);
+    first.close();
 
-Expected: FAIL because `@oren/storage` files do not exist.
+    const second = new SqliteLifeRepository(openDatabase(path));
+    expect(second.claimOutbox("live-worker", 1, "2026-07-23T00:10:00.000Z")).toHaveLength(1);
+    second.close();
+  });
+});
+```
 
-- [ ] **Step 3: Add the storage package and shared database wrapper**
+- [ ] **Step 2: Run tests and verify missing storage exports**
+
+Run: `npm test -- packages/storage/test`
+
+Expected: FAIL because `@oren/storage` does not exist.
+
+- [ ] **Step 3: Add schema and database initialization**
+
+```ts
+// packages/storage/src/database.ts
+import { DatabaseSync } from "node:sqlite";
+import { migrate } from "./migrations.js";
+
+export function openDatabase(path: string): DatabaseSync {
+  const db = new DatabaseSync(path);
+  db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+  migrate(db);
+  return db;
+}
+```
+
+```ts
+// packages/storage/src/migrations.ts
+import type { DatabaseSync } from "node:sqlite";
+
+export function migrate(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS events (
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      oren_id TEXT NOT NULL,
+      recorded_at TEXT NOT NULL,
+      envelope_json TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS events_by_oren ON events(oren_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS snapshots (
+      oren_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      cursor INTEGER NOT NULL,
+      state_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inbox (
+      inbox_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      priority INTEGER NOT NULL,
+      available_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_until TEXT,
+      processed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS outbox (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      effect_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+      lease_owner TEXT,
+      lease_until TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS operations (
+      effect_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+      attempts INTEGER NOT NULL DEFAULT 0,
+      receipt_json TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS grants (
+      grant_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      grant_json TEXT NOT NULL,
+      revoked_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS schedules (
+      schedule_id TEXT PRIMARY KEY,
+      oren_id TEXT NOT NULL,
+      due_at TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      delivered_at TEXT
+    );
+  `);
+}
+```
+
+- [ ] **Step 4: Implement repository transactions and leases**
+
+```ts
+// packages/storage/src/life-repository.ts
+import type { DatabaseSync } from "node:sqlite";
+import {
+  reduceLifeState,
+  type Effect,
+  type EventEnvelope,
+  type JsonObject,
+  type LifeState,
+} from "@oren/kernel";
+
+interface OutboxRow {
+  readonly effectId: string;
+  readonly orenId: string;
+  readonly capability: string;
+  readonly effect: Effect;
+  readonly attempts: number;
+}
+
+export class SqliteLifeRepository {
+  public constructor(private readonly db: DatabaseSync) {}
+
+  public close(): void {
+    this.db.close();
+  }
+
+  public initialize(state: LifeState): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO snapshots(oren_id, version, cursor, state_json)
+      VALUES (?, ?, ?, ?)
+    `).run(state.orenId, state.version, state.chronicleCursor, JSON.stringify(state));
+  }
+
+  public loadEvents(orenId: string): EventEnvelope[] {
+    return this.db.prepare(`
+      SELECT envelope_json FROM events WHERE oren_id = ? ORDER BY sequence
+    `).all(orenId).map((row) => JSON.parse(String(row.envelope_json)) as EventEnvelope);
+  }
+
+  public rehydrate(orenId: string): LifeState {
+    const row = this.db.prepare(`SELECT state_json FROM snapshots WHERE oren_id = ?`).get(orenId);
+    if (!row) throw new Error(`Missing initial snapshot for ${orenId}`);
+    return this.loadEvents(orenId).reduce(
+      reduceLifeState,
+      JSON.parse(String(row.state_json)) as LifeState,
+    );
+  }
+
+  public appendAndEnqueueEffects(
+    orenId: string,
+    events: readonly EventEnvelope[],
+    effects: readonly Effect[],
+  ): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const insertEvent = this.db.prepare(`
+        INSERT INTO events(event_id, oren_id, recorded_at, envelope_json) VALUES (?, ?, ?, ?)
+      `);
+      for (const event of events) {
+        insertEvent.run(event.eventId, orenId, event.recordedAt, JSON.stringify(event));
+        if (event.payload.type === "WakeScheduled") {
+          this.db.prepare(`
+            INSERT INTO schedules(schedule_id, oren_id, due_at, purpose)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(schedule_id) DO UPDATE SET
+              due_at = excluded.due_at,
+              purpose = excluded.purpose,
+              delivered_at = NULL
+          `).run(
+            event.payload.scheduleId,
+            orenId,
+            event.payload.at,
+            event.payload.purpose,
+          );
+        }
+      }
+      const insertEffect = this.db.prepare(`
+        INSERT INTO outbox(effect_id, oren_id, capability, effect_json, status)
+        VALUES (?, ?, ?, ?, 'pending')
+      `);
+      for (const effect of effects) {
+        insertEffect.run(effect.effectId, orenId, effect.capability, JSON.stringify(effect));
+        this.db.prepare(`
+          INSERT INTO operations(effect_id, oren_id, capability, status)
+          VALUES (?, ?, ?, 'pending')
+        `).run(effect.effectId, orenId, effect.capability);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public enqueueRawEffect(
+    orenId: string,
+    effectId: string,
+    capability: string,
+    arguments_: JsonObject,
+  ): void {
+    const effect: Effect = {
+      effectId,
+      orenId,
+      correlationId: effectId,
+      capability,
+      arguments: arguments_,
+      grantIds: [],
+      stateVersion: 0,
+    };
+    this.db.prepare(`
+      INSERT INTO outbox(effect_id, oren_id, capability, effect_json, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `).run(effectId, orenId, capability, JSON.stringify(effect));
+    this.db.prepare(`
+      INSERT INTO operations(effect_id, oren_id, capability, status)
+      VALUES (?, ?, ?, 'pending')
+    `).run(effectId, orenId, capability);
+  }
+
+  public claimOutbox(worker: string, limit: number, now = new Date().toISOString()): OutboxRow[] {
+    const leaseUntil = new Date(Date.parse(now) + 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare(`
+        SELECT effect_id, oren_id, capability, effect_json, attempts
+        FROM outbox
+        WHERE status IN ('pending','dispatched')
+          AND (lease_until IS NULL OR lease_until < ?)
+        ORDER BY rowid
+        LIMIT ?
+      `).all(now, limit);
+      const lease = this.db.prepare(`
+        UPDATE outbox
+        SET status = 'dispatched', lease_owner = ?, lease_until = ?, attempts = attempts + 1
+        WHERE effect_id = ?
+      `);
+      for (const row of rows) lease.run(worker, leaseUntil, String(row.effect_id));
+      for (const row of rows) {
+        this.db.prepare(`
+          UPDATE operations
+          SET status = 'dispatched', attempts = attempts + 1
+          WHERE effect_id = ?
+        `).run(String(row.effect_id));
+      }
+      this.db.exec("COMMIT");
+      return rows.map((row) => ({
+        effectId: String(row.effect_id),
+        orenId: String(row.oren_id),
+        capability: String(row.capability),
+        effect: JSON.parse(String(row.effect_json)) as Effect,
+        attempts: Number(row.attempts) + 1,
+      }));
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+}
+```
+
+```ts
+// packages/storage/src/index.ts
+export * from "./database.js";
+export * from "./life-repository.js";
+```
 
 ```json
 // packages/storage/package.json
@@ -635,551 +898,179 @@ Expected: FAIL because `@oren/storage` files do not exist.
 }
 ```
 
-```ts
-// packages/storage/src/database.ts
-import { DatabaseSync } from "node:sqlite";
+Run: `npm test -- packages/storage/test && npm run typecheck`
 
-export class SqliteDatabase {
-  readonly raw: DatabaseSync;
+Expected: PASS.
 
-  constructor(filename: string) {
-    this.raw = new DatabaseSync(filename);
-    this.raw.exec("PRAGMA foreign_keys = ON");
-    if (filename !== ":memory:") {
-      this.raw.exec("PRAGMA journal_mode = WAL");
-    }
-  }
-
-  transaction<T>(work: () => T): T {
-    this.raw.exec("BEGIN IMMEDIATE");
-    try {
-      const result = work();
-      this.raw.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.raw.exec("ROLLBACK");
-      throw error;
-    }
-  }
-
-  close(): void {
-    this.raw.close();
-  }
-}
-```
-
-- [ ] **Step 4: Add the initial migration**
-
-```ts
-// packages/storage/src/migrations.ts
-import type { SqliteDatabase } from "./database.js";
-
-export function applyMigrations(database: SqliteDatabase): void {
-  database.raw.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id TEXT NOT NULL UNIQUE,
-      oren_id TEXT NOT NULL,
-      schema_version INTEGER NOT NULL,
-      occurred_at TEXT NOT NULL,
-      recorded_at TEXT NOT NULL,
-      source TEXT NOT NULL,
-      causation_id TEXT,
-      correlation_id TEXT NOT NULL,
-      payload_json TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS events_oren_sequence
-      ON events (oren_id, sequence);
-  `);
-}
-```
-
-- [ ] **Step 5: Implement idempotent chronicle append and replay**
-
-```ts
-// packages/storage/src/chronicle-store.ts
-import type { EventEnvelope } from "@oren/kernel";
-import type { SqliteDatabase } from "./database.js";
-
-interface EventRow {
-  sequence: number;
-  event_id: string;
-  oren_id: string;
-  schema_version: number;
-  occurred_at: string;
-  recorded_at: string;
-  source: string;
-  causation_id: string | null;
-  correlation_id: string;
-  payload_json: string;
-}
-
-export class ChronicleStore {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  append(event: EventEnvelope): number {
-    this.database.raw
-      .prepare(`
-        INSERT INTO events (
-          event_id, oren_id, schema_version, occurred_at, recorded_at,
-          source, causation_id, correlation_id, payload_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(event_id) DO NOTHING
-      `)
-      .run(
-        event.eventId,
-        event.orenId,
-        event.schemaVersion,
-        event.occurredAt,
-        event.recordedAt,
-        event.source,
-        event.causationId,
-        event.correlationId,
-        JSON.stringify(event.payload),
-      );
-
-    const row = this.database.raw
-      .prepare("SELECT sequence FROM events WHERE event_id = ?")
-      .get(event.eventId) as { sequence: number };
-    return row.sequence;
-  }
-
-  list(
-    orenId: string,
-    afterSequence: number,
-  ): Array<{ sequence: number; event: EventEnvelope }> {
-    const rows = this.database.raw
-      .prepare(`
-        SELECT * FROM events
-        WHERE oren_id = ? AND sequence > ?
-        ORDER BY sequence ASC
-      `)
-      .all(orenId, afterSequence) as unknown as EventRow[];
-
-    return rows.map((row) => ({
-      sequence: row.sequence,
-      event: {
-        eventId: row.event_id,
-        orenId: row.oren_id,
-        schemaVersion: 1,
-        occurredAt: row.occurred_at,
-        recordedAt: row.recorded_at,
-        source: row.source,
-        causationId: row.causation_id,
-        correlationId: row.correlation_id,
-        payload: JSON.parse(row.payload_json) as EventEnvelope["payload"],
-      },
-    }));
-  }
-
-  lastSequence(orenId: string): number {
-    const row = this.database.raw
-      .prepare(`
-        SELECT COALESCE(MAX(sequence), 0) AS sequence
-        FROM events WHERE oren_id = ?
-      `)
-      .get(orenId) as { sequence: number };
-    return row.sequence;
-  }
-}
-```
-
-```ts
-// packages/storage/src/index.ts
-export * from "./database.js";
-export * from "./migrations.js";
-export * from "./chronicle-store.js";
-```
-
-- [ ] **Step 6: Run the task checks**
-
-Run: `npm install && npm test -- packages/storage/test/chronicle-store.test.ts && npm run typecheck`
-
-Expected: PASS; duplicate append returns the original sequence and only one event is replayed.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit durable storage**
 
 ```bash
-git add package-lock.json packages/storage
-git commit -m "feat: add SQLite chronicle store"
+git add packages/storage
+git commit -m "feat(storage): add durable life repository"
 ```
 
 ---
 
-### Task 3: Add Deterministic Reduction, Snapshots, and Rehydration
+### Task 3: Add Grants, Budgets, and Deterministic Guard Decisions
 
 **Files:**
-- Create: `packages/kernel/src/reducer.ts`
+- Create: `packages/kernel/src/guard.ts`
 - Modify: `packages/kernel/src/index.ts`
-- Test: `packages/kernel/test/reducer.test.ts`
-- Create: `packages/storage/src/snapshot-store.ts`
-- Modify: `packages/storage/src/migrations.ts`
-- Modify: `packages/storage/src/index.ts`
-- Test: `packages/storage/test/snapshot-store.test.ts`
+- Modify: `packages/storage/src/life-repository.ts`
+- Test: `packages/kernel/test/guard.test.ts`
 
 **Interfaces:**
-- Consumes: `LifeState`, `EventEnvelope`, `ChronicleStore`
-- Produces: `reduceLifeState()`, `SnapshotStore.save()`, `SnapshotStore.latest()`, `rehydrateLifeState()`
+- Consumes: `Proposal`, `CapabilityDescriptor`, `LifeState`
+- Produces: `Grant`, `GuardDecision`, `Guard.evaluate()`
 
-- [ ] **Step 1: Write the failing deterministic reducer test**
+- [ ] **Step 1: Write failing tests for foreground and autonomous budget behavior**
 
 ```ts
-// packages/kernel/test/reducer.test.ts
+// packages/kernel/test/guard.test.ts
 import { describe, expect, it } from "vitest";
-import {
-  createInitialLifeState,
-  reduceLifeState,
-  type EventEnvelope,
-} from "../src/index.js";
+import { createInitialLifeState, Guard, type Grant } from "../src/index.js";
 
-describe("reduceLifeState", () => {
-  it("replays thread and wake facts without mutating the input", () => {
-    const initial = createInitialLifeState("oren-1", "person-1");
-    const event: EventEnvelope = {
-      eventId: "event-2",
-      orenId: "oren-1",
-      schemaVersion: 1,
-      occurredAt: "2026-07-23T01:00:00.000Z",
-      recordedAt: "2026-07-23T01:00:00.000Z",
-      source: "conductor",
-      causationId: "event-1",
-      correlationId: "correlation-1",
-      payload: {
-        type: "ThreadActivated",
-        threadId: "thread-1",
-        summary: "Digital forgetting",
-      },
-    };
+const grant: Grant = {
+  grantId: "grant-1",
+  capabilityPattern: "test.*",
+  expiresAt: "2026-08-01T00:00:00.000Z",
+  revoked: false,
+};
 
-    const next = reduceLifeState(initial, 2, event);
+describe("Guard", () => {
+  it("does not charge the autonomy budget for foreground cognition", () => {
+    const state = createInitialLifeState("oren-1", "person-1");
+    const decision = new Guard().evaluateCognition(state, "foreground_user", 3);
+    expect(decision).toEqual({ allowed: true, autonomyCost: 0 });
+  });
 
-    expect(initial.attention.activeThreadIds).toEqual([]);
-    expect(next.attention.activeThreadIds).toEqual(["thread-1"]);
-    expect(next.attention.currentFocus).toBe("Digital forgetting");
-    expect(next.version).toBe(1);
-    expect(next.chronicleCursor).toBe(2);
+  it("requires a live grant for a persistent capability", () => {
+    const decision = new Guard().evaluateCapability({
+      capability: "test.increment",
+      grants: [grant],
+      now: "2026-07-23T00:00:00.000Z",
+    });
+    expect(decision.allowed).toBe(true);
   });
 });
 ```
 
-- [ ] **Step 2: Run the reducer test and verify failure**
+- [ ] **Step 2: Run the guard test and verify it fails**
 
-Run: `npm test -- packages/kernel/test/reducer.test.ts`
+Run: `npm test -- packages/kernel/test/guard.test.ts`
 
-Expected: FAIL because `reduceLifeState` is not exported.
+Expected: FAIL because `Guard` and `Grant` are not exported.
 
-- [ ] **Step 3: Implement the pure reducer**
+- [ ] **Step 3: Implement explicit guard inputs and pure decisions**
 
 ```ts
-// packages/kernel/src/reducer.ts
-import type { EventEnvelope } from "./protocol.js";
+// packages/kernel/src/guard.ts
+import type { TriggerKind } from "./protocol.js";
 import type { LifeState } from "./state.js";
 
-export function reduceLifeState(
-  state: LifeState,
-  sequence: number,
-  event: EventEnvelope,
-): LifeState {
-  const next = structuredClone(state);
-  const payload = event.payload;
-
-  switch (payload.type) {
-    case "ThreadActivated":
-      if (!next.attention.activeThreadIds.includes(payload.threadId)) {
-        next.attention.activeThreadIds.push(payload.threadId);
-      }
-      next.attention.currentFocus = payload.summary;
-      break;
-    case "ThreadAdvanced":
-      if (!next.attention.activeThreadIds.includes(payload.threadId)) {
-        next.attention.activeThreadIds.push(payload.threadId);
-      }
-      next.attention.currentFocus = payload.summary;
-      break;
-    case "CommitmentCreated":
-      next.commitments.push({
-        commitmentId: payload.commitmentId,
-        summary: payload.summary,
-        nextStep: payload.nextStep,
-        status: "active",
-      });
-      next.budgets.commitmentRemaining[payload.commitmentId] =
-        payload.budgetRemaining;
-      break;
-    case "CommitmentAdvanced": {
-      const commitment = next.commitments.find(
-        (item) => item.commitmentId === payload.commitmentId,
-      );
-      if (commitment) commitment.nextStep = payload.nextStep;
-      break;
-    }
-    case "IntentFormed":
-      next.intentions.push({
-        intentId: payload.intentId,
-        reason: payload.reason,
-        proposedAction: payload.proposedAction,
-        expiresAt: payload.expiresAt,
-      });
-      break;
-    case "WakeScheduled":
-      next.schedules = next.schedules.filter(
-        (item) => item.scheduleId !== payload.scheduleId,
-      );
-      next.schedules.push({
-        scheduleId: payload.scheduleId,
-        dueAt: payload.dueAt,
-        purpose: payload.purpose,
-      });
-      break;
-    case "GrantRecorded":
-      if (!next.grantIds.includes(payload.grantId)) {
-        next.grantIds.push(payload.grantId);
-      }
-      break;
-    case "BudgetConsumed":
-      if (payload.budget === "autonomy") {
-        next.budgets.autonomyRemaining = Math.max(
-          0,
-          next.budgets.autonomyRemaining - payload.amount,
-        );
-      } else if (payload.commitmentId !== null) {
-        const remaining =
-          next.budgets.commitmentRemaining[payload.commitmentId] ?? 0;
-        next.budgets.commitmentRemaining[payload.commitmentId] = Math.max(
-          0,
-          remaining - payload.amount,
-        );
-      }
-      break;
-    case "EffectRequested":
-      if (!next.pendingOperationIds.includes(payload.effectId)) {
-        next.pendingOperationIds.push(payload.effectId);
-      }
-      break;
-    case "CapabilityCompleted":
-    case "CapabilityFailed":
-      next.pendingOperationIds = next.pendingOperationIds.filter(
-        (operationId) => operationId !== payload.effectId,
-      );
-      break;
-    case "OrenInitialized":
-    case "UserMessageReceived":
-    case "WakeDue":
-      break;
-  }
-
-  next.version += 1;
-  next.chronicleCursor = sequence;
-  return next;
-}
-```
-
-Add `export * from "./reducer.js";` to `packages/kernel/src/index.ts`.
-
-- [ ] **Step 4: Write the failing snapshot rehydration test**
-
-```ts
-// packages/storage/test/snapshot-store.test.ts
-import { describe, expect, it } from "vitest";
-import {
-  createInitialLifeState,
-  reduceLifeState,
-  type EventEnvelope,
-} from "@oren/kernel";
-import {
-  applyMigrations,
-  ChronicleStore,
-  rehydrateLifeState,
-  SnapshotStore,
-  SqliteDatabase,
-} from "../src/index.js";
-
-describe("rehydrateLifeState", () => {
-  it("loads a snapshot and reduces only later events", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const chronicle = new ChronicleStore(database);
-    const snapshots = new SnapshotStore(database);
-    const initial = createInitialLifeState("oren-1", "person-1");
-
-    snapshots.save("oren-1", 0, initial);
-    const event: EventEnvelope = {
-      eventId: "event-2",
-      orenId: "oren-1",
-      schemaVersion: 1,
-      occurredAt: "2026-07-23T01:00:00.000Z",
-      recordedAt: "2026-07-23T01:00:00.000Z",
-      source: "test",
-      causationId: null,
-      correlationId: "correlation-2",
-      payload: {
-        type: "ThreadActivated",
-        threadId: "thread-1",
-        summary: "Digital forgetting",
-      },
-    };
-    chronicle.append(event);
-
-    const state = rehydrateLifeState(
-      "oren-1",
-      "person-1",
-      chronicle,
-      snapshots,
-      reduceLifeState,
-    );
-    expect(state.attention.activeThreadIds).toEqual(["thread-1"]);
-    expect(state.chronicleCursor).toBe(1);
-  });
-});
-```
-
-- [ ] **Step 5: Add snapshots and rehydration**
-
-Append to `applyMigrations()`:
-
-```sql
-CREATE TABLE IF NOT EXISTS snapshots (
-  oren_id TEXT NOT NULL,
-  sequence INTEGER NOT NULL,
-  state_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (oren_id, sequence)
-);
-```
-
-```ts
-// packages/storage/src/snapshot-store.ts
-import {
-  createInitialLifeState,
-  type EventEnvelope,
-  type LifeState,
-} from "@oren/kernel";
-import type { ChronicleStore } from "./chronicle-store.js";
-import type { SqliteDatabase } from "./database.js";
-
-export class SnapshotStore {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  save(orenId: string, sequence: number, state: LifeState): void {
-    this.database.raw
-      .prepare(`
-        INSERT OR REPLACE INTO snapshots
-          (oren_id, sequence, state_json, created_at)
-        VALUES (?, ?, ?, ?)
-      `)
-      .run(orenId, sequence, JSON.stringify(state), new Date().toISOString());
-  }
-
-  latest(
-    orenId: string,
-  ): { sequence: number; state: LifeState } | null {
-    const row = this.database.raw
-      .prepare(`
-        SELECT sequence, state_json
-        FROM snapshots
-        WHERE oren_id = ?
-        ORDER BY sequence DESC
-        LIMIT 1
-      `)
-      .get(orenId) as
-      | { sequence: number; state_json: string }
-      | undefined;
-    return row
-      ? {
-          sequence: row.sequence,
-          state: JSON.parse(row.state_json) as LifeState,
-        }
-      : null;
-  }
+export interface Grant {
+  readonly grantId: string;
+  readonly capabilityPattern: string;
+  readonly expiresAt: string;
+  readonly revoked: boolean;
 }
 
-export function rehydrateLifeState(
-  orenId: string,
-  personId: string,
-  chronicle: ChronicleStore,
-  snapshots: SnapshotStore,
-  reduce: (
+export type GuardDecision =
+  | { readonly allowed: true; readonly autonomyCost: number }
+  | { readonly allowed: false; readonly reason: string };
+
+function matches(pattern: string, capability: string): boolean {
+  return pattern.endsWith("*")
+    ? capability.startsWith(pattern.slice(0, -1))
+    : pattern === capability;
+}
+
+export class Guard {
+  public evaluateCognition(
     state: LifeState,
-    sequence: number,
-    event: EventEnvelope,
-  ) => LifeState,
-): LifeState {
-  const snapshot = snapshots.latest(orenId);
-  let state =
-    snapshot?.state ?? createInitialLifeState(orenId, personId);
-  const after = snapshot?.sequence ?? 0;
-  for (const item of chronicle.list(orenId, after)) {
-    state = reduce(state, item.sequence, item.event);
+    trigger: TriggerKind,
+    requestedSteps: number,
+  ): GuardDecision {
+    if (requestedSteps > state.budgets.interactionMaxSteps) {
+      return { allowed: false, reason: "episode_step_limit" };
+    }
+    if (trigger === "foreground_user" || trigger === "effect_result") {
+      return { allowed: true, autonomyCost: 0 };
+    }
+    if (state.budgets.autonomyRemaining < requestedSteps) {
+      return { allowed: false, reason: "autonomy_budget_exhausted" };
+    }
+    return { allowed: true, autonomyCost: requestedSteps };
   }
-  return state;
+
+  public evaluateCapability(input: {
+    readonly capability: string;
+    readonly grants: readonly Grant[];
+    readonly now: string;
+  }): GuardDecision {
+    const grant = input.grants.find((candidate) =>
+      !candidate.revoked
+      && candidate.expiresAt > input.now
+      && matches(candidate.capabilityPattern, input.capability));
+    return grant
+      ? { allowed: true, autonomyCost: 0 }
+      : { allowed: false, reason: "missing_or_expired_grant" };
+  }
 }
 ```
 
-Export `SnapshotStore` and `rehydrateLifeState` from `packages/storage/src/index.ts`.
+- [ ] **Step 4: Export and verify deterministic decisions**
 
-- [ ] **Step 6: Run the task checks**
+```ts
+// append to packages/kernel/src/index.ts
+export * from "./guard.js";
+```
 
-Run: `npm test -- packages/kernel/test/reducer.test.ts packages/storage/test/snapshot-store.test.ts && npm run typecheck`
+```ts
+// add to packages/storage/src/life-repository.ts
+import type { Grant } from "@oren/kernel";
 
-Expected: PASS; reducer is immutable and snapshot rehydration consumes only later events.
+public putGrant(orenId: string, grant: Grant): void {
+  this.db.prepare(`
+    INSERT INTO grants(grant_id, oren_id, grant_json, revoked_at)
+    VALUES (?, ?, ?, NULL)
+    ON CONFLICT(grant_id) DO UPDATE SET grant_json = excluded.grant_json
+  `).run(grant.grantId, orenId, JSON.stringify(grant));
+}
 
-- [ ] **Step 7: Commit**
+public loadGrants(orenId: string): Grant[] {
+  return this.db.prepare(`
+    SELECT grant_json FROM grants WHERE oren_id = ? AND revoked_at IS NULL
+  `).all(orenId).map((row) => JSON.parse(String(row.grant_json)) as Grant);
+}
+```
+
+Run: `npm test -- packages/kernel/test/guard.test.ts packages/storage/test/life-repository.test.ts && npm run typecheck`
+
+Expected: PASS.
+
+- [ ] **Step 5: Commit the guard**
 
 ```bash
 git add packages/kernel packages/storage
-git commit -m "feat: add deterministic life-state replay"
+git commit -m "feat(kernel): enforce grants and cognition budgets"
 ```
 
 ---
 
-### Task 4: Add the Durable Inbox and Single-Writer LifeActor
+### Task 4: Implement the Single-Writer LifeActor and Async Cognition Requests
 
 **Files:**
-- Create: `packages/storage/src/inbox-store.ts`
-- Modify: `packages/storage/src/migrations.ts`
-- Modify: `packages/storage/src/index.ts`
-- Test: `packages/storage/test/inbox-store.test.ts`
+- Create: `packages/kernel/src/ports.ts`
 - Create: `packages/kernel/src/life-actor.ts`
 - Modify: `packages/kernel/src/index.ts`
 - Test: `packages/kernel/test/life-actor.test.ts`
 
 **Interfaces:**
-- Consumes: `ChronicleStore`, `SnapshotStore`, `reduceLifeState()`
-- Produces: `InboxStore.enqueue()`, `InboxStore.nextPending()`, `InboxStore.completeAsEvent()`, `LifeActor.processOne()`, `LifeActor.commitDecisions()`
+- Consumes: durable Inbox events and `LifeRepositoryPort`
+- Produces: `LifeActor.handleUserMessage()`, `LifeActor.acceptCognition()`, `LifeActor.requestEffect()`, `CognitionJob`
 
-- [ ] **Step 1: Write failing inbox idempotency and actor-order tests**
-
-```ts
-// packages/storage/test/inbox-store.test.ts
-import { describe, expect, it } from "vitest";
-import {
-  applyMigrations,
-  InboxStore,
-  SqliteDatabase,
-} from "../src/index.js";
-
-describe("InboxStore", () => {
-  it("deduplicates one incoming event by inbox id", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const inbox = new InboxStore(database);
-    const event = {
-      eventId: "inbox-1",
-      orenId: "oren-1",
-      schemaVersion: 1 as const,
-      occurredAt: "2026-07-23T00:00:00.000Z",
-      recordedAt: "2026-07-23T00:00:00.000Z",
-      source: "test",
-      causationId: null,
-      correlationId: "correlation-1",
-      payload: { type: "WakeDue" as const, scheduleId: "s-1", purpose: "think" },
-    };
-    inbox.enqueue(event);
-    inbox.enqueue(event);
-    expect(inbox.pendingCount("oren-1")).toBe(1);
-  });
-});
-```
+- [ ] **Step 1: Write a failing test showing the actor schedules cognition without awaiting it**
 
 ```ts
 // packages/kernel/test/life-actor.test.ts
@@ -1187,267 +1078,251 @@ import { describe, expect, it } from "vitest";
 import {
   createInitialLifeState,
   LifeActor,
-  reduceLifeState,
+  type CognitionJob,
   type EventEnvelope,
+  type LifeRepositoryPort,
 } from "../src/index.js";
 
 describe("LifeActor", () => {
-  it("serially reduces one accepted event", async () => {
-    const events: Array<{ sequence: number; event: EventEnvelope }> = [];
-    let state = createInitialLifeState("oren-1", "person-1");
-    const actor = new LifeActor({
-      loadState: () => state,
-      takeNext: () => ({
-        eventId: "event-1",
-        orenId: "oren-1",
-        schemaVersion: 1,
-        occurredAt: "2026-07-23T00:00:00.000Z",
-        recordedAt: "2026-07-23T00:00:00.000Z",
-        source: "test",
-        causationId: null,
-        correlationId: "correlation-1",
-        payload: {
-          type: "ThreadActivated",
-          threadId: "thread-1",
-          summary: "Digital forgetting",
-        },
-      }),
-      commitInboxEvent: (event) => {
-        const item = { sequence: 1, event };
-        events.push(item);
-        state = reduceLifeState(state, item.sequence, item.event);
-        return item;
-      },
-      commitDecisionBatch: () => [],
-    });
+  it("persists CognitionRequested and returns a job immediately", () => {
+    const events: EventEnvelope[] = [];
+    const repository: LifeRepositoryPort = {
+      loadState: () => createInitialLifeState("oren-1", "person-1"),
+      commit: (_orenId, accepted) => events.push(...accepted),
+      commitInbox: (_inboxId, _orenId, accepted) => events.push(...accepted),
+    };
+    let id = 0;
+    const actor = new LifeActor(
+      repository,
+      () => `id-${++id}`,
+      () => "2026-07-23T00:00:00.000Z",
+    );
 
-    const result = await actor.processOne();
-    expect(result?.state.attention.activeThreadIds).toEqual(["thread-1"]);
-    expect(events).toHaveLength(1);
+    const job = actor.handleUserMessage("oren-1", "person-1", "hello");
+
+    expect(job).toMatchObject<CognitionJob>({
+      orenId: "oren-1",
+      episodeId: "id-1",
+      baseStateVersion: 2,
+      triggerKind: "foreground_user",
+    });
+    expect(events.map((event) => event.payload.type)).toEqual([
+      "UserMessageReceived",
+      "CognitionRequested",
+    ]);
+  });
+
+  it("rejects a cognition result based on an older state version", () => {
+    const state = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 3,
+    };
+    const repository: LifeRepositoryPort = {
+      loadState: () => state,
+      commit: () => { throw new Error("stale result must not commit"); },
+      commitInbox: () => { throw new Error("stale result must not commit"); },
+    };
+    const actor = new LifeActor(repository, () => "id", () => "2026-07-23T00:00:00.000Z");
+
+    expect(actor.acceptCognition({
+      orenId: "oren-1",
+      episodeId: "episode-old",
+      baseStateVersion: 2,
+      triggerKind: "health_check",
+      correlationId: "corr-old",
+    }, [{ type: "NoAction", reason: "nothing" }])).toEqual({
+      accepted: false,
+      reason: "stale_state_version",
+    });
   });
 });
 ```
 
-- [ ] **Step 2: Run both tests and verify failure**
+- [ ] **Step 2: Run the actor test and verify missing interfaces**
 
-Run: `npm test -- packages/storage/test/inbox-store.test.ts packages/kernel/test/life-actor.test.ts`
+Run: `npm test -- packages/kernel/test/life-actor.test.ts`
 
-Expected: FAIL because `InboxStore` and `LifeActor` do not exist.
+Expected: FAIL because `LifeRepositoryPort`, `CognitionJob`, and `LifeActor` do not exist.
 
-- [ ] **Step 3: Add the durable inbox**
-
-Append to `applyMigrations()`:
-
-```sql
-CREATE TABLE IF NOT EXISTS inbox (
-  inbox_id TEXT PRIMARY KEY,
-  oren_id TEXT NOT NULL,
-  event_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('pending', 'completed')),
-  received_at TEXT NOT NULL,
-  completed_sequence INTEGER
-);
-CREATE INDEX IF NOT EXISTS inbox_pending
-  ON inbox (oren_id, status, received_at);
-```
+- [ ] **Step 3: Define ports and cognition job**
 
 ```ts
-// packages/storage/src/inbox-store.ts
-import type { EventEnvelope } from "@oren/kernel";
-import type { ChronicleStore } from "./chronicle-store.js";
-import type { SqliteDatabase } from "./database.js";
+// packages/kernel/src/ports.ts
+import type { EventEnvelope, TriggerKind } from "./protocol.js";
+import type { LifeState } from "./state.js";
 
-export class InboxStore {
-  constructor(private readonly database: SqliteDatabase) {}
+export interface LifeRepositoryPort {
+  loadState(orenId: string): LifeState;
+  commit(orenId: string, events: readonly EventEnvelope[]): void;
+  commitInbox(inboxId: string, orenId: string, events: readonly EventEnvelope[]): void;
+}
 
-  enqueue(event: EventEnvelope): void {
-    this.database.raw
-      .prepare(`
-        INSERT INTO inbox
-          (inbox_id, oren_id, event_json, status, received_at)
-        VALUES (?, ?, ?, 'pending', ?)
-        ON CONFLICT(inbox_id) DO NOTHING
-      `)
-      .run(
-        event.eventId,
-        event.orenId,
-        JSON.stringify(event),
-        event.recordedAt,
-      );
-  }
-
-  nextPending(orenId: string): EventEnvelope | null {
-    const row = this.database.raw
-      .prepare(`
-        SELECT event_json FROM inbox
-        WHERE oren_id = ? AND status = 'pending'
-        ORDER BY received_at ASC, inbox_id ASC
-        LIMIT 1
-      `)
-      .get(orenId) as { event_json: string } | undefined;
-    return row ? (JSON.parse(row.event_json) as EventEnvelope) : null;
-  }
-
-  completeAsEvent(
-    event: EventEnvelope,
-    chronicle: ChronicleStore,
-  ): number {
-    return this.database.transaction(() => {
-      const sequence = chronicle.append(event);
-      this.database.raw
-        .prepare(`
-          UPDATE inbox
-          SET status = 'completed', completed_sequence = ?
-          WHERE inbox_id = ?
-        `)
-        .run(sequence, event.eventId);
-      return sequence;
-    });
-  }
-
-  pendingCount(orenId: string): number {
-    const row = this.database.raw
-      .prepare(`
-        SELECT COUNT(*) AS count FROM inbox
-        WHERE oren_id = ? AND status = 'pending'
-      `)
-      .get(orenId) as { count: number };
-    return row.count;
-  }
+export interface CognitionJob {
+  readonly orenId: string;
+  readonly episodeId: string;
+  readonly baseStateVersion: number;
+  readonly triggerKind: TriggerKind;
+  readonly correlationId: string;
 }
 ```
 
-Export `InboxStore` from `packages/storage/src/index.ts`.
-
-- [ ] **Step 4: Add the dependency-injected single-writer actor**
+- [ ] **Step 4: Implement short actor transactions and stale-result rejection**
 
 ```ts
 // packages/kernel/src/life-actor.ts
-import type {
-  DecisionBatch,
-  EventEnvelope,
-} from "./protocol.js";
-import type { LifeState } from "./state.js";
-
-export interface LifeActorPorts {
-  loadState(): LifeState;
-  takeNext(): EventEnvelope | null;
-  commitInboxEvent(event: EventEnvelope): {
-    sequence: number;
-    event: EventEnvelope;
-  };
-  commitDecisionBatch(batch: DecisionBatch): Array<{
-    sequence: number;
-    event: EventEnvelope;
-  }>;
-}
+import type { Effect, EventEnvelope, Proposal } from "./protocol.js";
+import type { CognitionJob, LifeRepositoryPort } from "./ports.js";
 
 export class LifeActor {
-  private running = false;
+  public constructor(
+    private readonly repository: LifeRepositoryPort,
+    private readonly nextId: () => string,
+    private readonly now: () => string,
+  ) {}
 
-  constructor(private readonly ports: LifeActorPorts) {}
-
-  async processOne(): Promise<
-    { event: EventEnvelope; state: LifeState } | null
-  > {
-    if (this.running) {
-      throw new Error("LifeActor is already processing");
-    }
-    this.running = true;
-    try {
-      const event = this.ports.takeNext();
-      if (!event) return null;
-      this.ports.commitInboxEvent(event);
-      return { event, state: this.ports.loadState() };
-    } finally {
-      this.running = false;
-    }
+  public handleUserMessage(orenId: string, personId: string, text: string): CognitionJob {
+    const before = this.repository.loadState(orenId);
+    const episodeId = this.nextId();
+    const correlationId = this.nextId();
+    const received = this.envelope(orenId, correlationId, {
+      type: "UserMessageReceived",
+      personId,
+      text,
+    });
+    const requested = this.envelope(orenId, correlationId, {
+      type: "CognitionRequested",
+      episodeId,
+      baseStateVersion: before.version + 2,
+      triggerKind: "foreground_user",
+    });
+    this.repository.commit(orenId, [received, requested]);
+    return {
+      orenId,
+      episodeId,
+      baseStateVersion: before.version + 2,
+      triggerKind: "foreground_user",
+      correlationId,
+    };
   }
 
-  commitDecisions(batch: DecisionBatch): LifeState {
-    if (this.running) {
-      throw new Error("LifeActor is already processing");
+  public acceptCognition(
+    job: CognitionJob,
+    proposals: readonly Proposal[],
+  ): { readonly accepted: boolean; readonly reason?: string } {
+    const current = this.repository.loadState(job.orenId);
+    if (current.version !== job.baseStateVersion) {
+      return { accepted: false, reason: "stale_state_version" };
     }
-    this.running = true;
-    try {
-      this.ports.commitDecisionBatch(batch);
-      return this.ports.loadState();
-    } finally {
-      this.running = false;
+    const completed = this.envelope(job.orenId, job.correlationId, {
+      type: "CognitionCompleted",
+      episodeId: job.episodeId,
+      baseStateVersion: job.baseStateVersion,
+      proposals,
+    });
+    const accepted = proposals.flatMap((proposal): EventEnvelope[] => {
+      switch (proposal.type) {
+        case "AdvanceThread":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "ThreadAdvanced",
+            threadId: proposal.threadId,
+            summary: proposal.summary,
+          })];
+        case "UpdateDisposition":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "DispositionUpdated",
+            disposition: proposal.disposition,
+            reason: proposal.reason,
+          })];
+        case "ScheduleWake":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "WakeScheduled",
+            scheduleId: proposal.scheduleId,
+            at: proposal.at,
+            purpose: proposal.purpose,
+          })];
+        case "NoAction":
+        case "ExpressToUser":
+          return [];
+      }
+    });
+    this.repository.commit(job.orenId, [completed, ...accepted]);
+    return { accepted: true };
+  }
+
+  public requestEffect(
+    orenId: string,
+    correlationId: string,
+    effect: Effect,
+  ): { readonly accepted: boolean; readonly reason?: string } {
+    const current = this.repository.loadState(orenId);
+    if (current.version !== effect.stateVersion) {
+      return { accepted: false, reason: "stale_state_version" };
     }
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, { type: "EffectRequested", effect }),
+    ]);
+    return { accepted: true };
+  }
+
+  public recordCognitionExit(
+    job: CognitionJob,
+    exit:
+      | { readonly kind: "failed"; readonly message: string }
+      | { readonly kind: "aborted"; readonly reason: "foreground_user" | "shutdown" },
+  ): void {
+    const payload: EventEnvelope["payload"] = exit.kind === "failed"
+      ? { type: "CognitionFailed", episodeId: job.episodeId, message: exit.message }
+      : { type: "EpisodeInterrupted", episodeId: job.episodeId, reason: exit.reason };
+    this.repository.commit(job.orenId, [
+      this.envelope(job.orenId, job.correlationId, payload),
+    ]);
+  }
+
+  private envelope(
+    orenId: string,
+    correlationId: string,
+    payload: EventEnvelope["payload"],
+  ): EventEnvelope {
+    const timestamp = this.now();
+    return {
+      eventId: this.nextId(),
+      orenId,
+      schemaVersion: 1,
+      occurredAt: timestamp,
+      recordedAt: timestamp,
+      source: "life-actor",
+      causationId: null,
+      correlationId,
+      payload,
+    };
   }
 }
 ```
 
-Export `LifeActor` and `LifeActorPorts` from `packages/kernel/src/index.ts`.
-
-- [ ] **Step 5: Add the serial ordering test**
-
-Add this test inside the existing `describe("LifeActor", ...)` block:
-
 ```ts
-it("commits queued facts in mailbox order", async () => {
-  let state = createInitialLifeState("oren-1", "person-1");
-  const queue: EventEnvelope[] = ["thread-1", "thread-2"].map(
-    (threadId, index) => ({
-      eventId: `event-${index + 1}`,
-      orenId: "oren-1",
-      schemaVersion: 1,
-      occurredAt: `2026-07-23T00:00:0${index}.000Z`,
-      recordedAt: `2026-07-23T00:00:0${index}.000Z`,
-      source: "test",
-      causationId: null,
-      correlationId: "correlation-order",
-      payload: {
-        type: "ThreadActivated",
-        threadId,
-        summary: threadId,
-      },
-    }),
-  );
-  let sequence = 0;
-  const actor = new LifeActor({
-    loadState: () => state,
-    takeNext: () => queue.shift() ?? null,
-    commitInboxEvent: (event) => {
-      sequence += 1;
-      state = reduceLifeState(state, sequence, event);
-      return { sequence, event };
-    },
-    commitDecisionBatch: () => [],
-  });
-
-  await actor.processOne();
-  await actor.processOne();
-
-  expect(state.attention.activeThreadIds).toEqual([
-    "thread-1",
-    "thread-2",
-  ]);
-  expect(state.chronicleCursor).toBe(2);
-});
+// append to packages/kernel/src/index.ts
+export * from "./ports.js";
+export * from "./life-actor.js";
 ```
 
-- [ ] **Step 6: Run the task checks**
+Run: `npm test -- packages/kernel/test/life-actor.test.ts && npm run typecheck`
 
-Run: `npm test -- packages/storage/test/inbox-store.test.ts packages/kernel/test/life-actor.test.ts && npm run typecheck`
+Expected: PASS.
 
-Expected: PASS; inbox deduplicates inputs and one actor processes them serially.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit the actor**
 
 ```bash
-git add packages/kernel packages/storage
-git commit -m "feat: add durable life actor inbox"
+git add packages/kernel
+git commit -m "feat(kernel): add asynchronous single-writer life actor"
 ```
 
 ---
 
-### Task 5: Implement LifeFrame and the Scripted Cognition Adapter
+### Task 5: Define LifeFrame, CognitionPort, and Deterministic Conductor Tests
 
 **Files:**
 - Create: `packages/cognition/package.json`
-- Create: `packages/cognition/src/cognition-adapter.ts`
+- Create: `packages/cognition/src/types.ts`
 - Create: `packages/cognition/src/life-frame.ts`
 - Create: `packages/cognition/src/conductor.ts`
 - Create: `packages/cognition/src/scripted-adapter.ts`
@@ -1455,75 +1330,191 @@ git commit -m "feat: add durable life actor inbox"
 - Test: `packages/cognition/test/conductor.test.ts`
 
 **Interfaces:**
-- Consumes: `LifeState`, `EventEnvelope`, `Proposal`
-- Produces: `LifeFrame`, `CognitionAdapter.run()`, `Conductor.deliberate()`, `ScriptedCognitionAdapter`
+- Consumes: `CognitionJob`, `LifeState`, `CapabilityDescriptor`
+- Produces: `LifeFrame`, `CognitionPort.run()`, `CognitionOutcome`, `Conductor.createFrame()`
 
-- [ ] **Step 1: Write the failing conductor test**
+- [ ] **Step 1: Write a failing bounded-frame test**
 
 ```ts
 // packages/cognition/test/conductor.test.ts
 import { describe, expect, it } from "vitest";
-import {
-  createInitialLifeState,
-  type EventEnvelope,
-} from "@oren/kernel";
-import {
-  Conductor,
-  ScriptedCognitionAdapter,
-} from "../src/index.js";
+import { createInitialLifeState } from "@oren/kernel";
+import { Conductor } from "../src/index.js";
 
 describe("Conductor", () => {
-  it("lets the adapter choose proposals from one LifeFrame", async () => {
-    const trigger: EventEnvelope = {
-      eventId: "wake-1",
+  it("builds a bounded LifeFrame with capability summaries", () => {
+    const frame = new Conductor().createFrame({
+      state: createInitialLifeState("oren-1", "person-1"),
+      correlationId: "corr-1",
+      trigger: { kind: "foreground_user", summary: "hello" },
+      capabilities: [{
+        extensionId: "test",
+        name: "test.read",
+        description: "Read a deterministic value",
+        inputSchema: { type: "object" },
+        outputSchema: { type: "number" },
+        permissionRequirements: [],
+        traits: ["read_only", "replay_safe"],
+        cancellable: true,
+        timeoutMs: 1000,
+      }],
+      maxSteps: 8,
+    });
+
+    expect(frame).toMatchObject({
       orenId: "oren-1",
-      schemaVersion: 1,
-      occurredAt: "2026-07-23T02:00:00.000Z",
-      recordedAt: "2026-07-23T02:00:00.000Z",
-      source: "scheduler",
-      causationId: null,
-      correlationId: "episode-1",
-      payload: {
-        type: "WakeDue",
-        scheduleId: "schedule-1",
-        purpose: "advance thread-1",
-      },
-    };
-    const adapter = new ScriptedCognitionAdapter([
-      {
-        type: "AdvanceThread",
-        threadId: "thread-1",
-        summary: "Read one source",
-      },
-      {
-        type: "ScheduleWake",
-        scheduleId: "schedule-2",
-        dueAt: "2026-07-24T02:00:00.000Z",
-        purpose: "continue thread-1",
-      },
-    ]);
-    const conductor = new Conductor(adapter);
-
-    const result = await conductor.deliberate(
-      createInitialLifeState("oren-1", "person-1"),
-      trigger,
-      [],
-    );
-
-    expect(result.frame.triggerEventId).toBe("wake-1");
-    expect(result.proposals).toHaveLength(2);
-    expect(adapter.calls).toBe(1);
+      stateVersion: 0,
+      trigger: { kind: "foreground_user" },
+      maxSteps: 8,
+    });
+    expect(frame.capabilities[0]?.name).toBe("test.read");
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+- [ ] **Step 2: Run the test and verify the package is absent**
 
 Run: `npm test -- packages/cognition/test/conductor.test.ts`
 
-Expected: FAIL because the cognition package does not exist.
+Expected: FAIL because `@oren/cognition` does not exist.
 
-- [ ] **Step 3: Add cognition ports and frame construction**
+- [ ] **Step 3: Define cognition boundaries**
+
+```ts
+// packages/cognition/src/types.ts
+import type {
+  CapabilityDescriptor,
+  JsonObject,
+  JsonValue,
+  Proposal,
+  TriggerKind,
+} from "@oren/kernel";
+
+export interface LifeFrame {
+  readonly orenId: string;
+  readonly correlationId: string;
+  readonly stateVersion: number;
+  readonly identity: { readonly ethosVersion: number; readonly disposition: string };
+  readonly attention: { readonly focus: string | null; readonly threadIds: readonly string[] };
+  readonly relationship: { readonly primaryPersonId: string; readonly contextRef: string | null };
+  readonly trigger: { readonly kind: TriggerKind; readonly summary: string };
+  readonly capabilities: readonly CapabilityDescriptor[];
+  readonly maxSteps: number;
+}
+
+export type CapabilityInvocationOutcome =
+  | { readonly kind: "completed"; readonly output: JsonValue }
+  | { readonly kind: "waiting_for_effect"; readonly effectId: string }
+  | { readonly kind: "rejected"; readonly reason: string };
+
+export interface CognitionCapabilityPort {
+  invoke(input: {
+    readonly orenId: string;
+    readonly descriptor: CapabilityDescriptor;
+    readonly arguments: JsonObject;
+    readonly stateVersion: number;
+    readonly correlationId: string;
+  }): Promise<CapabilityInvocationOutcome>;
+}
+
+export type CognitionOutcome =
+  | { readonly kind: "completed"; readonly proposals: readonly Proposal[]; readonly usage: { readonly totalTokens: number } }
+  | { readonly kind: "waiting_for_effect"; readonly effectId: string; readonly usage: { readonly totalTokens: number } }
+  | { readonly kind: "failed"; readonly message: string; readonly usage: { readonly totalTokens: number } }
+  | { readonly kind: "aborted"; readonly usage: { readonly totalTokens: number } };
+
+export interface CognitionPort {
+  run(frame: LifeFrame, capabilityPort: CognitionCapabilityPort, signal: AbortSignal): Promise<CognitionOutcome>;
+}
+```
+
+```ts
+// packages/cognition/src/life-frame.ts
+import type { CapabilityDescriptor, LifeState, TriggerKind } from "@oren/kernel";
+import type { LifeFrame } from "./types.js";
+
+export interface CreateFrameInput {
+  readonly state: LifeState;
+  readonly correlationId: string;
+  readonly trigger: { readonly kind: TriggerKind; readonly summary: string };
+  readonly capabilities: readonly CapabilityDescriptor[];
+  readonly maxSteps: number;
+}
+
+export function createLifeFrame(input: CreateFrameInput): LifeFrame {
+  return {
+    orenId: input.state.orenId,
+    correlationId: input.correlationId,
+    stateVersion: input.state.version,
+    identity: {
+      ethosVersion: input.state.identity.ethosVersion,
+      disposition: input.state.identity.currentDisposition,
+    },
+    attention: {
+      focus: input.state.attention.currentFocus,
+      threadIds: input.state.attention.activeThreadIds.slice(0, 16),
+    },
+    relationship: {
+      primaryPersonId: input.state.relationship.primaryPersonId,
+      contextRef: input.state.relationship.currentContextRef,
+    },
+    trigger: input.trigger,
+    capabilities: input.capabilities,
+    maxSteps: input.maxSteps,
+  };
+}
+```
+
+- [ ] **Step 4: Add the conductor and scripted adapter**
+
+```ts
+// packages/cognition/src/conductor.ts
+import { createLifeFrame, type CreateFrameInput } from "./life-frame.js";
+
+export class Conductor {
+  public createFrame(input: CreateFrameInput) {
+    return createLifeFrame(input);
+  }
+}
+```
+
+```ts
+// packages/cognition/src/scripted-adapter.ts
+import type {
+  CognitionCapabilityPort,
+  CognitionOutcome,
+  CognitionPort,
+  LifeFrame,
+} from "./types.js";
+
+export type CognitionScript = (
+  frame: LifeFrame,
+  capabilityPort: CognitionCapabilityPort,
+  signal: AbortSignal,
+) => Promise<CognitionOutcome>;
+
+export class ScriptedCognitionAdapter implements CognitionPort {
+  public constructor(private readonly script: CognitionScript) {}
+
+  public async run(
+    frame: LifeFrame,
+    capabilityPort: CognitionCapabilityPort,
+    signal: AbortSignal,
+  ): Promise<CognitionOutcome> {
+    return signal.aborted
+      ? { kind: "aborted", usage: { totalTokens: 0 } }
+      : this.script(frame, capabilityPort, signal);
+  }
+}
+```
+
+```ts
+// packages/cognition/src/index.ts
+export * from "./types.js";
+export * from "./life-frame.js";
+export * from "./conductor.js";
+export * from "./scripted-adapter.js";
+```
 
 ```json
 // packages/cognition/package.json
@@ -1538,699 +1529,378 @@ Expected: FAIL because the cognition package does not exist.
 }
 ```
 
-```ts
-// packages/cognition/src/life-frame.ts
-import type {
-  EventEnvelope,
-  JsonValue,
-  LifeState,
-} from "@oren/kernel";
+Run: `npm test -- packages/cognition/test/conductor.test.ts && npm run typecheck`
 
-export interface CapabilitySummary {
-  name: string;
-  riskTraits: string[];
-  constraints: JsonValue;
-}
+Expected: PASS.
 
-export interface LifeFrame {
-  triggerEventId: string;
-  trigger: EventEnvelope["payload"];
-  stateVersion: number;
-  identity: LifeState["identity"];
-  attention: LifeState["attention"];
-  commitments: LifeState["commitments"];
-  relationship: LifeState["relationship"];
-  pendingOperationIds: string[];
-  availableCapabilities: CapabilitySummary[];
-  budgets: LifeState["budgets"];
-  previousWakeReason: string | null;
-}
-
-export function createLifeFrame(
-  state: LifeState,
-  trigger: EventEnvelope,
-  capabilities: CapabilitySummary[],
-): LifeFrame {
-  return {
-    triggerEventId: trigger.eventId,
-    trigger: structuredClone(trigger.payload),
-    stateVersion: state.version,
-    identity: structuredClone(state.identity),
-    attention: structuredClone(state.attention),
-    commitments: structuredClone(state.commitments),
-    relationship: structuredClone(state.relationship),
-    pendingOperationIds: [...state.pendingOperationIds],
-    availableCapabilities: structuredClone(capabilities),
-    budgets: structuredClone(state.budgets),
-    previousWakeReason:
-      trigger.payload.type === "WakeDue"
-        ? trigger.payload.purpose
-        : null,
-  };
-}
-```
-
-```ts
-// packages/cognition/src/cognition-adapter.ts
-import type { Proposal } from "@oren/kernel";
-import type { LifeFrame } from "./life-frame.js";
-
-export interface CognitionAdapter {
-  run(frame: Readonly<LifeFrame>): Promise<Proposal[]>;
-}
-```
-
-- [ ] **Step 4: Add the conductor and deterministic adapter**
-
-```ts
-// packages/cognition/src/conductor.ts
-import type {
-  EventEnvelope,
-  LifeState,
-  Proposal,
-} from "@oren/kernel";
-import type { CognitionAdapter } from "./cognition-adapter.js";
-import {
-  createLifeFrame,
-  type CapabilitySummary,
-  type LifeFrame,
-} from "./life-frame.js";
-
-export class Conductor {
-  constructor(private readonly adapter: CognitionAdapter) {}
-
-  async deliberate(
-    state: LifeState,
-    trigger: EventEnvelope,
-    capabilities: CapabilitySummary[],
-  ): Promise<{ frame: LifeFrame; proposals: Proposal[] }> {
-    const frame = createLifeFrame(state, trigger, capabilities);
-    const proposals = await this.adapter.run(structuredClone(frame));
-    return { frame, proposals };
-  }
-}
-```
-
-```ts
-// packages/cognition/src/scripted-adapter.ts
-import type { Proposal } from "@oren/kernel";
-import type { CognitionAdapter } from "./cognition-adapter.js";
-import type { LifeFrame } from "./life-frame.js";
-
-export class ScriptedCognitionAdapter implements CognitionAdapter {
-  calls = 0;
-
-  constructor(private readonly script: Proposal[]) {}
-
-  async run(_frame: Readonly<LifeFrame>): Promise<Proposal[]> {
-    this.calls += 1;
-    return structuredClone(this.script);
-  }
-}
-```
-
-```ts
-// packages/cognition/src/index.ts
-export * from "./cognition-adapter.js";
-export * from "./life-frame.js";
-export * from "./conductor.js";
-export * from "./scripted-adapter.js";
-```
-
-- [ ] **Step 5: Run the task checks**
-
-Run: `npm install && npm test -- packages/cognition/test/conductor.test.ts && npm run typecheck`
-
-Expected: PASS; the adapter sees one frame and returns typed proposals without mutating state.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit cognition ports**
 
 ```bash
-git add package-lock.json packages/cognition
-git commit -m "feat: add life-frame cognition protocol"
+git add packages/cognition
+git commit -m "feat(cognition): define bounded life frames and port"
 ```
 
 ---
 
-### Task 6: Enforce Grants and the Three Resource Boundaries
+### Task 6: Build the Oren Extension SDK, Registry, and Double-Lane Broker
 
 **Files:**
-- Create: `packages/kernel/src/guard.ts`
-- Modify: `packages/kernel/src/index.ts`
-- Test: `packages/kernel/test/guard.test.ts`
-- Create: `packages/storage/src/grant-store.ts`
-- Modify: `packages/storage/src/migrations.ts`
-- Modify: `packages/storage/src/index.ts`
-
-**Interfaces:**
-- Consumes: `Proposal`, `LifeState`, capability risk traits
-- Produces: `Grant`, `GuardContext`, `GuardDecision`, `evaluateProposal()`, `GrantStore`
-
-- [ ] **Step 1: Write failing budget-separation tests**
-
-```ts
-// packages/kernel/test/guard.test.ts
-import { describe, expect, it } from "vitest";
-import {
-  createInitialLifeState,
-  evaluateProposal,
-  type GuardContext,
-  type Proposal,
-} from "../src/index.js";
-
-const proposal: Proposal = {
-  type: "RequestCapability",
-  intentId: "intent-1",
-  capability: "test.increment",
-  arguments: { amount: 1 },
-  riskTraits: ["read_only"],
-  commitmentId: null,
-};
-
-function context(
-  triggerKind: GuardContext["triggerKind"],
-): GuardContext {
-  return {
-    now: "2026-07-23T00:00:00.000Z",
-    triggerKind,
-    episodeStep: 1,
-    grants: [],
-  };
-}
-
-describe("evaluateProposal", () => {
-  it("blocks idle autonomy when its budget is empty", () => {
-    const state = createInitialLifeState("oren-1", "person-1");
-    expect(evaluateProposal(state, proposal, context("autonomy"))).toEqual({
-      accepted: false,
-      reason: "autonomy_budget_exhausted",
-      grantIds: [],
-    });
-  });
-
-  it("does not apply the autonomy budget to foreground interaction", () => {
-    const state = createInitialLifeState("oren-1", "person-1");
-    expect(evaluateProposal(state, proposal, context("interaction"))).toEqual({
-      accepted: true,
-      reason: "accepted",
-      grantIds: [],
-    });
-  });
-
-  it("stops one interaction episode at its technical step bound", () => {
-    const state = createInitialLifeState("oren-1", "person-1");
-    expect(
-      evaluateProposal(state, proposal, {
-        ...context("interaction"),
-        episodeStep: 9,
-      }),
-    ).toEqual({
-      accepted: false,
-      reason: "interaction_step_limit",
-      grantIds: [],
-    });
-  });
-});
-```
-
-- [ ] **Step 2: Run the tests and verify failure**
-
-Run: `npm test -- packages/kernel/test/guard.test.ts`
-
-Expected: FAIL because `evaluateProposal` does not exist.
-
-- [ ] **Step 3: Implement grants and proposal evaluation**
-
-```ts
-// packages/kernel/src/guard.ts
-import type { GrantId } from "./ids.js";
-import type { JsonValue, Proposal } from "./protocol.js";
-import type { LifeState } from "./state.js";
-
-export interface Grant {
-  grantId: GrantId;
-  issuer: string;
-  subject: string;
-  capabilityPattern: string;
-  resourceScope: JsonValue;
-  constraints: JsonValue;
-  approvalMode: "always" | "within_scope";
-  issuedAt: string;
-  expiresAt: string | null;
-  revocable: boolean;
-  revokedAt: string | null;
-  delegationChain: string[];
-}
-
-export interface GuardContext {
-  now: string;
-  triggerKind: "autonomy" | "interaction" | "commitment";
-  episodeStep: number;
-  grants: Grant[];
-}
-
-export interface GuardDecision {
-  accepted: boolean;
-  reason: string;
-  grantIds: GrantId[];
-}
-
-function matchingGrants(
-  proposal: Extract<Proposal, { type: "RequestCapability" }>,
-  context: GuardContext,
-): Grant[] {
-  return context.grants.filter((grant) => {
-    const active =
-      grant.revokedAt === null &&
-      (grant.expiresAt === null || grant.expiresAt > context.now);
-    const matches =
-      grant.capabilityPattern === proposal.capability ||
-      grant.capabilityPattern === "*";
-    return active && matches;
-  });
-}
-
-export function evaluateProposal(
-  state: LifeState,
-  proposal: Proposal,
-  context: GuardContext,
-): GuardDecision {
-  if (
-    context.triggerKind === "interaction" &&
-    context.episodeStep > state.budgets.interactionMaxSteps
-  ) {
-    return {
-      accepted: false,
-      reason: "interaction_step_limit",
-      grantIds: [],
-    };
-  }
-
-  if (
-    context.triggerKind === "autonomy" &&
-    state.budgets.autonomyRemaining <= 0
-  ) {
-    return {
-      accepted: false,
-      reason: "autonomy_budget_exhausted",
-      grantIds: [],
-    };
-  }
-
-  if (context.triggerKind === "commitment") {
-    const commitmentId =
-      proposal.type === "RequestCapability"
-        ? proposal.commitmentId
-        : null;
-    if (
-      commitmentId === null ||
-      (state.budgets.commitmentRemaining[commitmentId] ?? 0) <= 0
-    ) {
-      return {
-        accepted: false,
-        reason: "commitment_budget_exhausted",
-        grantIds: [],
-      };
-    }
-  }
-
-  if (proposal.type !== "RequestCapability") {
-    return { accepted: true, reason: "accepted", grantIds: [] };
-  }
-
-  const requiresGrant = proposal.riskTraits.some((trait) =>
-    [
-      "external_side_effect",
-      "uses_user_identity",
-      "uses_sensitive_data",
-      "billable",
-      "destructive",
-    ].includes(trait),
-  );
-  const grants = matchingGrants(proposal, context);
-  if (requiresGrant && grants.length === 0) {
-    return {
-      accepted: false,
-      reason: "grant_required",
-      grantIds: [],
-    };
-  }
-
-  return {
-    accepted: true,
-    reason: "accepted",
-    grantIds: grants.map((grant) => grant.grantId),
-  };
-}
-```
-
-Export the guard types and function from `packages/kernel/src/index.ts`.
-
-- [ ] **Step 4: Add durable grants**
-
-Append to `applyMigrations()`:
-
-```sql
-CREATE TABLE IF NOT EXISTS grants (
-  grant_id TEXT PRIMARY KEY,
-  oren_id TEXT NOT NULL,
-  grant_json TEXT NOT NULL,
-  issued_at TEXT NOT NULL,
-  revoked_at TEXT
-);
-CREATE INDEX IF NOT EXISTS grants_for_oren
-  ON grants (oren_id, revoked_at);
-```
-
-Create `GrantStore` with these exact methods:
-
-```ts
-// packages/storage/src/grant-store.ts
-import type { Grant } from "@oren/kernel";
-import type { SqliteDatabase } from "./database.js";
-
-export class GrantStore {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  put(orenId: string, grant: Grant): void {
-    this.database.raw
-      .prepare(`
-        INSERT OR REPLACE INTO grants
-          (grant_id, oren_id, grant_json, issued_at, revoked_at)
-        VALUES (?, ?, ?, ?, ?)
-      `)
-      .run(
-        grant.grantId,
-        orenId,
-        JSON.stringify(grant),
-        grant.issuedAt,
-        grant.revokedAt,
-      );
-  }
-
-  active(orenId: string, now: string): Grant[] {
-    const rows = this.database.raw
-      .prepare(`
-        SELECT grant_json FROM grants
-        WHERE oren_id = ?
-          AND revoked_at IS NULL
-      `)
-      .all(orenId) as unknown as Array<{ grant_json: string }>;
-    return rows
-      .map((row) => JSON.parse(row.grant_json) as Grant)
-      .filter((grant) => grant.expiresAt === null || grant.expiresAt > now);
-  }
-
-  revoke(grantId: string, revokedAt: string): void {
-    this.database.raw
-      .prepare("UPDATE grants SET revoked_at = ? WHERE grant_id = ?")
-      .run(revokedAt, grantId);
-  }
-}
-```
-
-Export `GrantStore` from `packages/storage/src/index.ts`.
-
-- [ ] **Step 5: Add grant-required and commitment-budget tests**
-
-Add these cases to `guard.test.ts`:
-
-```ts
-it("requires a grant for a billable effect", () => {
-  const state = createInitialLifeState("oren-1", "person-1");
-  const billable: Proposal = {
-    ...proposal,
-    riskTraits: ["billable"],
-  };
-  expect(evaluateProposal(state, billable, context("interaction")).reason)
-    .toBe("grant_required");
-});
-
-it("uses a separate commitment budget", () => {
-  const state = createInitialLifeState("oren-1", "person-1");
-  state.budgets.commitmentRemaining["commitment-1"] = 0;
-  const committed: Proposal = {
-    ...proposal,
-    commitmentId: "commitment-1",
-  };
-  expect(evaluateProposal(state, committed, context("commitment")).reason)
-    .toBe("commitment_budget_exhausted");
-});
-```
-
-- [ ] **Step 6: Run the task checks**
-
-Run: `npm test -- packages/kernel/test/guard.test.ts && npm run typecheck`
-
-Expected: PASS; autonomy, interaction, commitment, and grant decisions are distinct.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add packages/kernel packages/storage
-git commit -m "feat: enforce grants and resource boundaries"
-```
-
----
-
-### Task 7: Build the Capability Registry and Test Extension
-
-**Files:**
-- Create: `packages/capabilities/package.json`
-- Create: `packages/capabilities/src/manifest.ts`
-- Create: `packages/capabilities/src/extension.ts`
-- Create: `packages/capabilities/src/registry.ts`
-- Create: `packages/capabilities/src/runtime.ts`
-- Create: `packages/capabilities/src/index.ts`
-- Test: `packages/capabilities/test/runtime.test.ts`
+- Create: `packages/extensions/package.json`
+- Create: `packages/extensions/src/sdk.ts`
+- Create: `packages/extensions/src/registry.ts`
+- Create: `packages/extensions/src/broker.ts`
+- Create: `packages/extensions/src/index.ts`
 - Create: `extensions/test-counter/package.json`
 - Create: `extensions/test-counter/src/index.ts`
+- Test: `packages/extensions/test/broker.test.ts`
 
 **Interfaces:**
-- Consumes: `Effect`, `JsonValue`
-- Produces: `ExtensionManifest`, `Invocation`, `CapabilityResult`, `Extension`, `ExtensionRegistry`, `CapabilityRuntime`
+- Consumes: Oren capability protocol and `Guard`
+- Produces: `OrenExtension`, `ExtensionRegistry`, `CapabilityBroker.invoke()`, immediate-versus-persistent routing
 
-- [ ] **Step 1: Write the failing extension-runtime test**
+- [ ] **Step 1: Write failing lane-selection tests**
 
 ```ts
-// packages/capabilities/test/runtime.test.ts
+// packages/extensions/test/broker.test.ts
 import { describe, expect, it } from "vitest";
-import { CounterExtension } from "@oren/test-counter";
-import {
-  CapabilityRuntime,
-  ExtensionRegistry,
-} from "../src/index.js";
+import { CapabilityBroker, ExtensionRegistry } from "../src/index.js";
+import testCounter from "../../../extensions/test-counter/src/index.js";
 
-describe("CapabilityRuntime", () => {
-  it("discovers and invokes a typed extension without LifeState access", async () => {
+describe("CapabilityBroker", () => {
+  it("executes an immediate read in-process", async () => {
     const registry = new ExtensionRegistry();
-    const extension = new CounterExtension();
-    registry.register(extension);
-    const runtime = new CapabilityRuntime(
+    registry.register(testCounter);
+    const effects: string[] = [];
+    const broker = new CapabilityBroker(
       registry,
-      () => "2026-07-23T00:00:00.000Z",
+      (effect) => {
+        effects.push(effect.effectId);
+        return true;
+      },
+      () => true,
     );
 
-    const result = await runtime.invoke({
-      invocationId: "invocation-1",
+    const result = await broker.invoke({
       orenId: "oren-1",
-      intentId: "intent-1",
-      capability: "test.increment",
-      arguments: { amount: 2 },
+      correlationId: "corr-read",
+      capability: "test.read",
+      arguments: {},
       grantIds: [],
-      stateVersion: 3,
-      deadline: "2026-07-23T01:00:00.000Z",
-      idempotencyKey: "effect-1",
-      correlationId: "episode-1",
+      stateVersion: 1,
+      effectId: "effect-read",
     });
 
-    expect(result).toEqual({
-      type: "Completed",
-      receipt: { value: 2 },
+    expect(result).toEqual({ kind: "completed", output: 0 });
+    expect(effects).toEqual([]);
+  });
+
+  it("persists a side effect without executing it inline", async () => {
+    const registry = new ExtensionRegistry();
+    registry.register(testCounter);
+    const effects: string[] = [];
+    const broker = new CapabilityBroker(
+      registry,
+      (effect) => {
+        effects.push(effect.effectId);
+        return true;
+      },
+      () => true,
+    );
+
+    const result = await broker.invoke({
+      orenId: "oren-1",
+      correlationId: "corr-1",
+      capability: "test.increment",
+      arguments: { by: 1 },
+      grantIds: ["grant-1"],
+      stateVersion: 1,
+      effectId: "effect-1",
     });
+
+    expect(result).toEqual({ kind: "waiting_for_effect", effectId: "effect-1" });
+    expect(effects).toEqual(["effect-1"]);
+  });
+
+  it("rejects a protected capability before persisting an effect", async () => {
+    const registry = new ExtensionRegistry();
+    registry.register(testCounter);
+    const effects: string[] = [];
+    const broker = new CapabilityBroker(
+      registry,
+      (effect) => {
+        effects.push(effect.effectId);
+        return true;
+      },
+      () => false,
+    );
+
+    const result = await broker.invoke({
+      orenId: "oren-1",
+      correlationId: "corr-denied",
+      capability: "test.increment",
+      arguments: { by: 1 },
+      grantIds: [],
+      stateVersion: 1,
+      effectId: "effect-denied",
+    });
+
+    expect(result).toEqual({ kind: "rejected", reason: "missing_or_expired_grant" });
+    expect(effects).toEqual([]);
+  });
+
+  it("rejects a manifest whose capability claims another extension", () => {
+    const registry = new ExtensionRegistry();
+    const invalid = {
+      ...testCounter,
+      manifest: {
+        ...testCounter.manifest,
+        id: "invalid",
+        capabilities: testCounter.manifest.capabilities.map((capability) => ({
+          ...capability,
+          extensionId: "someone-else",
+        })),
+      },
+    };
+
+    expect(() => registry.register(invalid)).toThrow("wrong extensionId");
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+- [ ] **Step 2: Run tests and verify the SDK is missing**
 
-Run: `npm test -- packages/capabilities/test/runtime.test.ts`
+Run: `npm test -- packages/extensions/test`
 
-Expected: FAIL because the capability packages do not exist.
+Expected: FAIL because extension APIs do not exist.
 
-- [ ] **Step 3: Define the extension protocol**
+- [ ] **Step 3: Define the Oren-native extension API**
 
-```json
-// packages/capabilities/package.json
-{
-  "name": "@oren/capabilities",
-  "private": true,
-  "type": "module",
-  "exports": "./src/index.ts",
-  "dependencies": {
-    "@oren/kernel": "*"
-  }
+```ts
+// packages/extensions/src/sdk.ts
+import type {
+  CapabilityDescriptor,
+  CapabilityInvocation,
+  CapabilityResult,
+  JsonObject,
+} from "@oren/kernel";
+
+export interface ExtensionContext {
+  readonly extensionId: string;
+  reportProgress(invocationId: string, message: string): void;
+  emitObservation(source: string, payload: JsonObject): void;
+}
+
+export interface OrenExtension {
+  readonly manifest: {
+    readonly id: string;
+    readonly version: string;
+    readonly protocolVersion: 1;
+    readonly capabilities: readonly CapabilityDescriptor[];
+    readonly eventSources: readonly string[];
+  };
+  activate(context: ExtensionContext): Promise<void>;
+  deactivate(): Promise<void>;
+  invoke(invocation: CapabilityInvocation, signal: AbortSignal): Promise<CapabilityResult>;
+  query?(effectId: string, signal: AbortSignal): Promise<CapabilityResult>;
+  cancel?(effectId: string, signal: AbortSignal): Promise<void>;
 }
 ```
 
 ```ts
-// packages/capabilities/src/manifest.ts
-import type { JsonValue } from "@oren/kernel";
-
-export interface CapabilityDefinition {
-  name: string;
-  description: string;
-  inputSchema: JsonValue;
-  outputSchema: JsonValue;
-  permissionRequirements: string[];
-  riskTraits: string[];
-  idempotency: "required";
-  cancellable: boolean;
-  timeoutMs: number;
-}
-
-export interface ExtensionManifest {
-  id: string;
-  version: string;
-  protocolVersion: 1;
-  capabilities: CapabilityDefinition[];
-  eventSources: string[];
-}
-```
-
-```ts
-// packages/capabilities/src/extension.ts
-import type { JsonValue } from "@oren/kernel";
-import type { ExtensionManifest } from "./manifest.js";
-
-export interface Invocation {
-  invocationId: string;
-  orenId: string;
-  intentId: string;
-  capability: string;
-  arguments: JsonValue;
-  grantIds: string[];
-  stateVersion: number;
-  deadline: string;
-  idempotencyKey: string;
-  correlationId: string;
-}
-
-export type CapabilityResult =
-  | { type: "Progress"; message: string }
-  | { type: "Completed"; receipt: JsonValue }
-  | {
-      type: "Failed";
-      category:
-        | "Retryable"
-        | "NeedsReconciliation"
-        | "NeedsAttention"
-        | "Terminal";
-      message: string;
-    };
-
-export interface Extension {
-  readonly manifest: ExtensionManifest;
-  invoke(invocation: Readonly<Invocation>): Promise<CapabilityResult>;
-  cancel?(invocationId: string): Promise<CapabilityResult>;
-  status?(idempotencyKey: string): Promise<CapabilityResult>;
-}
-```
-
-- [ ] **Step 4: Add registry and runtime**
-
-```ts
-// packages/capabilities/src/registry.ts
-import type { Extension } from "./extension.js";
-import type { CapabilityDefinition } from "./manifest.js";
+// packages/extensions/src/registry.ts
+import type { CapabilityDescriptor } from "@oren/kernel";
+import type { OrenExtension } from "./sdk.js";
 
 export class ExtensionRegistry {
-  private readonly extensions = new Map<string, Extension>();
-  private readonly capabilities = new Map<string, Extension>();
+  private readonly extensions = new Map<string, OrenExtension>();
+  private readonly capabilities = new Map<string, CapabilityDescriptor>();
 
-  register(extension: Extension): void {
+  public register(extension: OrenExtension): void {
+    if (extension.manifest.protocolVersion !== 1) {
+      throw new Error(`Unsupported extension protocol: ${extension.manifest.protocolVersion}`);
+    }
     if (this.extensions.has(extension.manifest.id)) {
-      throw new Error(`Extension already registered: ${extension.manifest.id}`);
+      throw new Error(`Duplicate extension: ${extension.manifest.id}`);
     }
     for (const capability of extension.manifest.capabilities) {
-      if (this.capabilities.has(capability.name)) {
-        throw new Error(`Capability already registered: ${capability.name}`);
+      if (capability.extensionId !== extension.manifest.id) {
+        throw new Error(`Capability ${capability.name} has the wrong extensionId`);
       }
-      this.capabilities.set(capability.name, extension);
+      if (capability.timeoutMs <= 0) {
+        throw new Error(`Capability ${capability.name} has an invalid timeout`);
+      }
+      if (this.capabilities.has(capability.name)) {
+        throw new Error(`Duplicate capability: ${capability.name}`);
+      }
+      this.capabilities.set(capability.name, capability);
     }
     this.extensions.set(extension.manifest.id, extension);
   }
 
-  extensionFor(capability: string): Extension {
-    const extension = this.capabilities.get(capability);
-    if (!extension) throw new Error(`Unknown capability: ${capability}`);
-    return extension;
+  public listCapabilities(): readonly CapabilityDescriptor[] {
+    return [...this.capabilities.values()];
   }
 
-  listCapabilities(): string[] {
-    return [...this.capabilities.keys()].sort();
-  }
-
-  listDefinitions(): CapabilityDefinition[] {
-    return [...this.capabilities.entries()]
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([name, extension]) => {
-        const definition = extension.manifest.capabilities.find(
-          (item) => item.name === name,
-        );
-        if (!definition) throw new Error(`Missing definition: ${name}`);
-        return structuredClone(definition);
-      });
+  public resolve(name: string): { descriptor: CapabilityDescriptor; extension: OrenExtension } {
+    const descriptor = this.capabilities.get(name);
+    if (!descriptor) throw new Error(`Unknown capability: ${name}`);
+    const extension = this.extensions.get(descriptor.extensionId);
+    if (!extension) throw new Error(`Inactive extension: ${descriptor.extensionId}`);
+    return { descriptor, extension };
   }
 }
 ```
 
+- [ ] **Step 4: Implement the broker and deterministic test extension**
+
 ```ts
-// packages/capabilities/src/runtime.ts
-import type {
-  CapabilityResult,
-  Invocation,
-} from "./extension.js";
+// packages/extensions/src/broker.ts
+import {
+  isImmediateCapability,
+  type CapabilityDescriptor,
+  type Effect,
+  type JsonObject,
+} from "@oren/kernel";
+import type { CapabilityInvocationOutcome } from "@oren/cognition";
 import type { ExtensionRegistry } from "./registry.js";
 
-export class CapabilityRuntime {
-  constructor(
+export interface BrokerInput {
+  readonly orenId: string;
+  readonly correlationId: string;
+  readonly capability: string;
+  readonly arguments: JsonObject;
+  readonly grantIds: readonly string[];
+  readonly stateVersion: number;
+  readonly effectId: string;
+}
+
+export class CapabilityBroker {
+  public constructor(
     private readonly registry: ExtensionRegistry,
-    private readonly now: () => string = () => new Date().toISOString(),
+    private readonly persistEffect: (effect: Effect) => boolean,
+    private readonly authorize: (
+      input: BrokerInput,
+      descriptor: CapabilityDescriptor,
+    ) => boolean,
   ) {}
 
-  async invoke(
-    invocation: Invocation,
-  ): Promise<CapabilityResult> {
-    const extension = this.registry.extensionFor(invocation.capability);
-    const definition = extension.manifest.capabilities.find(
-      (item) => item.name === invocation.capability,
-    );
-    if (!definition) {
-      throw new Error(`Missing definition: ${invocation.capability}`);
+  public async invoke(input: BrokerInput): Promise<CapabilityInvocationOutcome> {
+    const { descriptor, extension } = this.registry.resolve(input.capability);
+    if (descriptor.permissionRequirements.length > 0 && !this.authorize(input, descriptor)) {
+      return { kind: "rejected", reason: "missing_or_expired_grant" };
     }
-    const deadline = Date.parse(invocation.deadline);
-    if (!Number.isFinite(deadline) || deadline <= Date.parse(this.now())) {
-      return {
-        type: "Failed",
-        category: "Terminal",
-        message: "Invocation deadline has passed",
+    if (!isImmediateCapability(descriptor)) {
+      const effect: Effect = {
+        effectId: input.effectId,
+        orenId: input.orenId,
+        correlationId: input.correlationId,
+        capability: input.capability,
+        arguments: input.arguments,
+        grantIds: input.grantIds,
+        stateVersion: input.stateVersion,
       };
+      if (!this.persistEffect(effect)) {
+        return { kind: "rejected", reason: "stale_state_version" };
+      }
+      return { kind: "waiting_for_effect", effectId: effect.effectId };
     }
-    return extension.invoke(Object.freeze(structuredClone(invocation)));
+    const result = await extension.invoke({
+      effectId: input.effectId,
+      orenId: input.orenId,
+      capability: input.capability,
+      arguments: input.arguments,
+      grantIds: input.grantIds,
+      stateVersion: input.stateVersion,
+      deadline: new Date(Date.now() + descriptor.timeoutMs).toISOString(),
+    }, new AbortController().signal);
+    return result.status === "completed"
+      ? { kind: "completed", output: result.output }
+      : { kind: "rejected", reason: result.message };
   }
 }
 ```
 
 ```ts
-// packages/capabilities/src/index.ts
-export * from "./manifest.js";
-export * from "./extension.js";
-export * from "./registry.js";
-export * from "./runtime.js";
+// extensions/test-counter/src/index.ts
+import type { OrenExtension } from "@oren/extensions";
+
+let value = 0;
+
+const extension: OrenExtension = {
+  manifest: {
+    id: "test-counter",
+    version: "1.0.0",
+    protocolVersion: 1,
+    eventSources: [],
+    capabilities: [
+      {
+        extensionId: "test-counter",
+        name: "test.read",
+        description: "Read the counter",
+        inputSchema: { type: "object", additionalProperties: false },
+        outputSchema: { type: "number" },
+        permissionRequirements: [],
+        traits: ["read_only", "replay_safe"],
+        cancellable: true,
+        timeoutMs: 1000,
+      },
+      {
+        extensionId: "test-counter",
+        name: "test.increment",
+        description: "Increment the counter",
+        inputSchema: {
+          type: "object",
+          properties: { by: { type: "number" } },
+          required: ["by"],
+          additionalProperties: false,
+        },
+        outputSchema: { type: "number" },
+        permissionRequirements: ["test.write"],
+        traits: ["external_side_effect"],
+        cancellable: false,
+        timeoutMs: 1000,
+      },
+    ],
+  },
+  async activate() {},
+  async deactivate() {},
+  async invoke(invocation) {
+    if (invocation.capability === "test.read") {
+      return { status: "completed", output: value, receipt: { observed: true } };
+    }
+    const by = Number(invocation.arguments.by);
+    value += by;
+    return {
+      status: "completed",
+      output: value,
+      receipt: { effectId: invocation.effectId, value },
+    };
+  },
+};
+
+export default extension;
 ```
 
-- [ ] **Step 5: Add the deterministic counter extension**
+```ts
+// packages/extensions/src/index.ts
+export * from "./sdk.js";
+export * from "./registry.js";
+export * from "./broker.js";
+```
+
+```json
+// packages/extensions/package.json
+{
+  "name": "@oren/extensions",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/cognition": "*",
+    "@oren/kernel": "*"
+  }
+}
+```
 
 ```json
 // extensions/test-counter/package.json
@@ -2240,400 +1910,721 @@ export * from "./runtime.js";
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@oren/capabilities": "*"
+    "@oren/extensions": "*"
   }
 }
 ```
 
-```ts
-// extensions/test-counter/src/index.ts
-import type {
-  CapabilityResult,
-  Extension,
-  ExtensionManifest,
-  Invocation,
-} from "@oren/capabilities";
+Run:
 
-export class CounterExtension implements Extension {
-  private value = 0;
-  private readonly receipts = new Map<string, CapabilityResult>();
+`npm test -- packages/extensions/test && npm run typecheck`
 
-  readonly manifest: ExtensionManifest = {
-    id: "test-counter",
-    version: "1.0.0",
-    protocolVersion: 1,
-    capabilities: [
-      {
-        name: "test.increment",
-        description: "Increment a deterministic in-memory counter",
-        inputSchema: {
-          type: "object",
-          properties: { amount: { type: "number" } },
-          required: ["amount"],
-        },
-        outputSchema: {
-          type: "object",
-          properties: { value: { type: "number" } },
-          required: ["value"],
-        },
-        permissionRequirements: [],
-        riskTraits: ["reversible"],
-        idempotency: "required",
-        cancellable: false,
-        timeoutMs: 1000,
-      },
-    ],
-    eventSources: [],
-  };
+Expected: PASS.
 
-  async invoke(
-    invocation: Readonly<Invocation>,
-  ): Promise<CapabilityResult> {
-    const existing = this.receipts.get(invocation.idempotencyKey);
-    if (existing) return structuredClone(existing);
-    const argumentsValue = invocation.arguments as { amount?: unknown };
-    if (typeof argumentsValue.amount !== "number") {
-      return {
-        type: "Failed",
-        category: "Terminal",
-        message: "amount must be a number",
-      };
-    }
-    this.value += argumentsValue.amount;
-    const result: CapabilityResult = {
-      type: "Completed",
-      receipt: { value: this.value },
-    };
-    this.receipts.set(
-      invocation.idempotencyKey,
-      structuredClone(result),
-    );
-    return result;
-  }
-}
-```
-
-- [ ] **Step 6: Run the task checks**
-
-Run: `npm install && npm test -- packages/capabilities/test/runtime.test.ts && npm run typecheck`
-
-Expected: PASS; the runtime invokes a discovered capability and returns `{ value: 2 }`.
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit the Oren extension boundary**
 
 ```bash
-git add package-lock.json packages/capabilities extensions/test-counter
-git commit -m "feat: add capability extension protocol"
+git add packages/extensions extensions/test-counter package-lock.json
+git commit -m "feat(extensions): add native capability broker"
 ```
 
 ---
 
-### Task 8: Add Durable Effects, Operations, and Recovery
+### Task 7: Adapt Pi Tools and Run a Typed Cognitive Episode
 
 **Files:**
-- Create: `packages/storage/src/outbox-store.ts`
-- Create: `packages/storage/src/operation-store.ts`
-- Modify: `packages/storage/src/migrations.ts`
-- Modify: `packages/storage/src/index.ts`
-- Test: `packages/storage/test/outbox-store.test.ts`
+- Create: `packages/pi-cognition/package.json`
+- Create: `packages/pi-cognition/src/proposal-schema.ts`
+- Create: `packages/pi-cognition/src/prompts.ts`
+- Create: `packages/pi-cognition/src/tool-adapter.ts`
+- Create: `packages/pi-cognition/src/pi-cognition-adapter.ts`
+- Create: `packages/pi-cognition/src/index.ts`
+- Create: `packages/pi-cognition/test/fixtures.ts`
+- Test: `packages/pi-cognition/test/tool-adapter.test.ts`
+- Test: `packages/pi-cognition/test/pi-cognition-adapter.test.ts`
+
+**Interfaces:**
+- Consumes: `LifeFrame`, `CognitionCapabilityPort`, Pi `runAgentLoop()`
+- Produces: `PiCognitionAdapter`, internal `oren_commit` tool, capability-to-`AgentTool` mapping, typed `CognitionOutcome`
+
+- [ ] **Step 1: Write failing adapter tests with a fake Pi stream**
+
+```ts
+// packages/pi-cognition/test/pi-cognition-adapter.test.ts
+import { describe, expect, it } from "vitest";
+import { PiCognitionAdapter } from "../src/index.js";
+import {
+  createCommitStream,
+  createFrame,
+  createMockModel,
+} from "./fixtures.js";
+
+describe("PiCognitionAdapter", () => {
+  it("accepts proposals only through oren_commit", async () => {
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createCommitStream([{
+        type: "AdvanceThread",
+        threadId: "thread-1",
+        summary: "Pi is the inner cognition engine",
+      }]),
+    });
+    const result = await adapter.run(
+      createFrame(),
+      { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+      new AbortController().signal,
+    );
+
+    expect(result).toMatchObject({
+      kind: "completed",
+      proposals: [{ type: "AdvanceThread", threadId: "thread-1" }],
+    });
+  });
+});
+```
+
+```ts
+// packages/pi-cognition/test/tool-adapter.test.ts
+import { describe, expect, it } from "vitest";
+import { toPiTool } from "../src/index.js";
+import { createFrame } from "./fixtures.js";
+
+describe("toPiTool", () => {
+  it("terminates the Pi turn when Oren persists an external effect", async () => {
+    const descriptor = {
+      extensionId: "test-counter",
+      name: "test.increment",
+      description: "Increment the counter",
+      inputSchema: {
+        type: "object",
+        properties: { by: { type: "number" } },
+        required: ["by"],
+      },
+      outputSchema: { type: "number" },
+      permissionRequirements: ["test.write"],
+      traits: ["external_side_effect"],
+      cancellable: false,
+      timeoutMs: 1000,
+    } as const;
+    const tool = toPiTool(descriptor, createFrame(), {
+      invoke: async () => ({ kind: "waiting_for_effect", effectId: "effect-1" }),
+    });
+
+    const result = await tool.execute("tool-1", { by: 1 }, undefined, undefined);
+
+    expect(result.terminate).toBe(true);
+    expect(result.details).toEqual({
+      kind: "waiting_for_effect",
+      effectId: "effect-1",
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Add exact Pi dependencies and verify the test fails**
+
+```json
+// packages/pi-cognition/package.json
+{
+  "name": "@oren/pi-cognition",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.75.5",
+    "@earendil-works/pi-ai": "0.75.5",
+    "@oren/cognition": "*",
+    "@oren/kernel": "*",
+    "typebox": "1.1.38"
+  }
+}
+```
+
+Run: `npm install && npm test -- packages/pi-cognition/test/pi-cognition-adapter.test.ts`
+
+Expected: FAIL because `PiCognitionAdapter` and fixtures are missing.
+
+- [ ] **Step 3: Implement test fixtures and the typed commit tool**
+
+```ts
+// packages/pi-cognition/src/proposal-schema.ts
+import { Type } from "typebox";
+
+export const ProposalSchema = Type.Union([
+  Type.Object({ type: Type.Literal("NoAction"), reason: Type.String() }),
+  Type.Object({
+    type: Type.Literal("AdvanceThread"),
+    threadId: Type.String(),
+    summary: Type.String(),
+  }),
+  Type.Object({
+    type: Type.Literal("UpdateDisposition"),
+    disposition: Type.String(),
+    reason: Type.String(),
+  }),
+  Type.Object({
+    type: Type.Literal("ExpressToUser"),
+    text: Type.String(),
+    reason: Type.String(),
+  }),
+  Type.Object({
+    type: Type.Literal("ScheduleWake"),
+    scheduleId: Type.String(),
+    at: Type.String(),
+    purpose: Type.String(),
+  }),
+]);
+
+export const CommitSchema = Type.Object({
+  proposals: Type.Array(ProposalSchema, { maxItems: 16 }),
+});
+```
+
+```ts
+// packages/pi-cognition/test/fixtures.ts
+import {
+  type AssistantMessage,
+  type AssistantMessageEvent,
+  EventStream,
+  type Model,
+} from "@earendil-works/pi-ai";
+import type { Proposal } from "@oren/kernel";
+import type { LifeFrame } from "@oren/cognition";
+
+class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+  public constructor(message: AssistantMessage) {
+    super(
+      (event) => event.type === "done" || event.type === "error",
+      (event) => event.type === "done" ? event.message : event.error,
+    );
+    queueMicrotask(() => this.push({ type: "done", reason: "stop", message }));
+  }
+}
+
+export function createMockModel(): Model<"openai-responses"> {
+  return {
+    id: "mock",
+    name: "mock",
+    api: "openai-responses",
+    provider: "mock",
+    baseUrl: "https://example.invalid",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 8192,
+    maxTokens: 2048,
+  };
+}
+
+export function createCommitStream(proposals: readonly Proposal[]) {
+  return () => new MockAssistantStream({
+    role: "assistant",
+    content: [{
+      type: "toolCall",
+      id: "commit-1",
+      name: "oren_commit",
+      arguments: { proposals },
+    }],
+    api: "openai-responses",
+    provider: "mock",
+    model: "mock",
+    usage: {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 2,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  });
+}
+
+export function createSequenceStream(
+  contents: readonly AssistantMessage["content"][],
+) {
+  let index = 0;
+  return () => {
+    const content = contents[index++];
+    if (!content) throw new Error("Fake Pi stream exhausted");
+    return new MockAssistantStream({
+      role: "assistant",
+      content,
+      api: "openai-responses",
+      provider: "mock",
+      model: "mock",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    });
+  };
+}
+
+export function createFrame(): LifeFrame {
+  return {
+    orenId: "oren-1",
+    correlationId: "corr-1",
+    stateVersion: 1,
+    identity: { ethosVersion: 1, disposition: "attentive" },
+    attention: { focus: null, threadIds: [] },
+    relationship: { primaryPersonId: "person-1", contextRef: null },
+    trigger: { kind: "foreground_user", summary: "hello" },
+    capabilities: [],
+    maxSteps: 8,
+  };
+}
+```
+
+- [ ] **Step 4: Implement Pi capability tools, commit collection, stop rules, and usage mapping**
+
+```ts
+// packages/pi-cognition/src/tool-adapter.ts
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { TSchema } from "typebox";
+import type { CognitionCapabilityPort, LifeFrame } from "@oren/cognition";
+import type { CapabilityDescriptor, JsonObject } from "@oren/kernel";
+
+export function toPiTool(
+  descriptor: CapabilityDescriptor,
+  frame: LifeFrame,
+  capabilityPort: CognitionCapabilityPort,
+): AgentTool {
+  return {
+    name: descriptor.name,
+    label: descriptor.name,
+    description: descriptor.description,
+    parameters: descriptor.inputSchema as TSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      const outcome = await capabilityPort.invoke({
+        orenId: frame.orenId,
+        descriptor,
+        arguments: params as JsonObject,
+        stateVersion: frame.stateVersion,
+        correlationId: frame.correlationId,
+      });
+      if (outcome.kind === "completed") {
+        return {
+          content: [{ type: "text", text: JSON.stringify(outcome.output) }],
+          details: outcome,
+        };
+      }
+      if (outcome.kind === "waiting_for_effect") {
+        return {
+          content: [{ type: "text", text: `Effect queued: ${outcome.effectId}` }],
+          details: outcome,
+          terminate: true,
+        };
+      }
+      return {
+        content: [{ type: "text", text: outcome.reason }],
+        details: outcome,
+      };
+    },
+  };
+}
+```
+
+```ts
+// packages/pi-cognition/src/prompts.ts
+import type { LifeFrame } from "@oren/cognition";
+
+export function systemPrompt(frame: LifeFrame): string {
+  return [
+    "You are Oren's bounded cognition engine.",
+    "Think autonomously, but do not claim that an external action happened without a tool receipt.",
+    "Submit accepted state proposals only by calling oren_commit.",
+    `Maximum turns: ${frame.maxSteps}.`,
+    `Identity: ${JSON.stringify(frame.identity)}`,
+    `Attention: ${JSON.stringify(frame.attention)}`,
+  ].join("\n");
+}
+
+export function userPrompt(frame: LifeFrame): string {
+  return JSON.stringify({
+    trigger: frame.trigger,
+    relationship: frame.relationship,
+  });
+}
+```
+
+```ts
+// packages/pi-cognition/src/pi-cognition-adapter.ts
+import {
+  runAgentLoop,
+  type AgentContext,
+  type AgentEvent,
+  type AgentTool,
+  type StreamFn,
+} from "@earendil-works/pi-agent-core";
+import type { Model } from "@earendil-works/pi-ai";
+import type {
+  CognitionCapabilityPort,
+  CognitionOutcome,
+  CognitionPort,
+  LifeFrame,
+} from "@oren/cognition";
+import type { Proposal } from "@oren/kernel";
+import { CommitSchema } from "./proposal-schema.js";
+import { systemPrompt, userPrompt } from "./prompts.js";
+import { toPiTool } from "./tool-adapter.js";
+
+export class PiCognitionAdapter implements CognitionPort {
+  public constructor(private readonly options: {
+    readonly model: Model<any>;
+    readonly streamFn: StreamFn;
+  }) {}
+
+  public async run(
+    frame: LifeFrame,
+    capabilityPort: CognitionCapabilityPort,
+    signal: AbortSignal,
+  ): Promise<CognitionOutcome> {
+    let committed: readonly Proposal[] | null = null;
+    let waitingEffectId: string | null = null;
+    let totalTokens = 0;
+    let turns = 0;
+
+    const commitTool: AgentTool = {
+      name: "oren_commit",
+      label: "Commit episode",
+      description: "Submit typed proposals and finish this cognitive episode.",
+      parameters: CommitSchema,
+      executionMode: "sequential",
+      async execute(_id, params) {
+        committed = (params as { proposals: readonly Proposal[] }).proposals;
+        return {
+          content: [{ type: "text", text: "Episode committed." }],
+          details: { committed: true },
+          terminate: true,
+        };
+      },
+    };
+    const capabilityTools = frame.capabilities.map((descriptor) =>
+      toPiTool(descriptor, frame, {
+        async invoke(input) {
+          const result = await capabilityPort.invoke(input);
+          if (result.kind === "waiting_for_effect") waitingEffectId = result.effectId;
+          return result;
+        },
+      }));
+    const context: AgentContext = {
+      systemPrompt: systemPrompt(frame),
+      messages: [],
+      tools: [...capabilityTools, commitTool],
+    };
+    const events: AgentEvent[] = [];
+
+    try {
+      await runAgentLoop(
+        [{ role: "user", content: userPrompt(frame), timestamp: Date.now() }],
+        context,
+        {
+          model: this.options.model,
+          convertToLlm: (messages) => messages.filter(
+            (message) => message.role === "user"
+              || message.role === "assistant"
+              || message.role === "toolResult",
+          ),
+          toolExecution: "sequential",
+          shouldStopAfterTurn: () =>
+            waitingEffectId !== null || committed !== null || ++turns >= frame.maxSteps,
+        },
+        (event) => {
+          events.push(event);
+          if (event.type === "message_end" && event.message.role === "assistant") {
+            totalTokens += event.message.usage.totalTokens;
+          }
+        },
+        signal,
+        this.options.streamFn,
+      );
+    } catch (error) {
+      return signal.aborted
+        ? { kind: "aborted", usage: { totalTokens } }
+        : {
+            kind: "failed",
+            message: error instanceof Error ? error.message : String(error),
+            usage: { totalTokens },
+          };
+    }
+
+    if (signal.aborted) return { kind: "aborted", usage: { totalTokens } };
+    if (waitingEffectId) {
+      return { kind: "waiting_for_effect", effectId: waitingEffectId, usage: { totalTokens } };
+    }
+    return committed
+      ? { kind: "completed", proposals: committed, usage: { totalTokens } }
+      : { kind: "failed", message: "Pi ended without oren_commit", usage: { totalTokens } };
+  }
+}
+```
+
+```ts
+// packages/pi-cognition/src/index.ts
+export * from "./prompts.js";
+export * from "./tool-adapter.js";
+export * from "./pi-cognition-adapter.js";
+```
+
+Run: `npm test -- packages/pi-cognition/test && npm run typecheck`
+
+Expected: PASS. Confirm with `rg -n "@earendil-works/pi|from \"typebox" packages --glob '*.ts'` that matches occur only under `packages/pi-cognition`.
+
+- [ ] **Step 5: Commit Pi cognition integration**
+
+```bash
+git add packages/pi-cognition package-lock.json
+git commit -m "feat(cognition): run bounded episodes with Pi"
+```
+
+---
+
+### Task 8: Dispatch Durable Effects Without Blind Retries
+
+**Files:**
 - Create: `packages/app/package.json`
 - Create: `packages/app/src/effect-dispatcher.ts`
 - Create: `packages/app/src/index.ts`
+- Modify: `packages/storage/src/life-repository.ts`
 - Test: `packages/app/test/effect-dispatcher.test.ts`
+- Test: `packages/storage/test/recovery.test.ts`
 
 **Interfaces:**
-- Consumes: `Effect`, `CapabilityRuntime`, `InboxStore`
-- Produces: `OutboxStore`, `OperationStore`, `EffectDispatcher.dispatchNext()`
+- Consumes: Outbox lease, `ExtensionRegistry.resolve()`, extension `invoke()` and optional `query()`
+- Produces: `EffectDispatcher.runOnce()`, terminal receipt events, `uncertain` recovery
 
-- [ ] **Step 1: Write the failing crash-safe dispatch test**
+- [ ] **Step 1: Write a failing test for dispatch-after-unknown recovery**
 
 ```ts
 // packages/app/test/effect-dispatcher.test.ts
 import { describe, expect, it } from "vitest";
-import {
-  CapabilityRuntime,
-  ExtensionRegistry,
-} from "@oren/capabilities";
-import { CounterExtension } from "@oren/test-counter";
-import {
-  applyMigrations,
-  InboxStore,
-  OperationStore,
-  OutboxStore,
-  SqliteDatabase,
-} from "@oren/storage";
 import { EffectDispatcher } from "../src/index.js";
 
 describe("EffectDispatcher", () => {
-  it("does not execute an already completed idempotency key twice", async () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const outbox = new OutboxStore(database);
-    const operations = new OperationStore(database);
-    const inbox = new InboxStore(database);
-    const registry = new ExtensionRegistry();
-    registry.register(new CounterExtension());
-    const runtime = new CapabilityRuntime(registry);
-    const dispatcher = new EffectDispatcher(
-      database,
-      outbox,
-      operations,
-      inbox,
-      runtime,
-    );
-
-    outbox.enqueue({
-      effectId: "effect-1",
-      orenId: "oren-1",
-      intentId: "intent-1",
-      capability: "test.increment",
-      arguments: { amount: 2 },
-      grantIds: [],
-      stateVersion: 1,
-      deadline: "2099-07-23T00:00:00.000Z",
-      idempotencyKey: "increment-once",
-      correlationId: "episode-1",
-    });
-
-    await dispatcher.dispatchNext("oren-1");
-    outbox.requeue("effect-1");
-    await dispatcher.dispatchNext("oren-1");
-
-    expect(operations.completedReceipt("increment-once")).toEqual({
-      value: 2,
-    });
-    expect(inbox.pendingCount("oren-1")).toBe(1);
-  });
-});
-```
-
-```ts
-// packages/storage/test/outbox-store.test.ts
-import { describe, expect, it } from "vitest";
-import type { Effect } from "@oren/kernel";
-import {
-  applyMigrations,
-  OutboxStore,
-  SqliteDatabase,
-} from "../src/index.js";
-
-describe("OutboxStore", () => {
-  it("enqueues one durable effect by effect id", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const outbox = new OutboxStore(database);
-    const effect: Effect = {
-      effectId: "effect-1",
-      orenId: "oren-1",
-      intentId: "intent-1",
-      capability: "test.increment",
-      arguments: { amount: 2 },
-      grantIds: [],
-      stateVersion: 1,
-      deadline: "2099-07-23T00:00:00.000Z",
-      idempotencyKey: "increment-once",
-      correlationId: "episode-1",
+  it("marks a dispatched non-queryable effect uncertain instead of sending it twice", async () => {
+    let invocations = 0;
+    const repository = {
+      claimOutbox: () => [{
+        effectId: "effect-1",
+        orenId: "oren-1",
+        capability: "test.increment",
+        effect: {
+          effectId: "effect-1",
+          orenId: "oren-1",
+          correlationId: "corr-1",
+          capability: "test.increment",
+          arguments: { by: 1 },
+          grantIds: ["grant-1"],
+          stateVersion: 1,
+        },
+        attempts: 2,
+      }],
+      finishEffect: (
+        _effectId: string,
+        _orenId: string,
+        _correlationId: string,
+        payload: { type: string },
+      ) => {
+        terminalPayloads.push(payload.type);
+      },
+    };
+    const terminalPayloads: string[] = [];
+    const registry = {
+      resolve: () => ({
+        descriptor: { timeoutMs: 1000 },
+        extension: { invoke: async () => { invocations++; throw new Error("not expected"); } },
+      }),
     };
 
-    outbox.enqueue(effect);
-    outbox.enqueue(effect);
+    const dispatcher = new EffectDispatcher(repository, registry, "worker-1");
+    const results = await dispatcher.runOnce();
 
-    expect(outbox.nextPending("oren-1")).toEqual(effect);
-    outbox.markDispatched("effect-1");
-    expect(outbox.nextPending("oren-1")).toBeNull();
-    expect(outbox.recoverDispatched()).toBe(1);
-    expect(outbox.nextPending("oren-1")).toEqual(effect);
+    expect(invocations).toBe(0);
+    expect(results).toEqual([{ effectId: "effect-1", status: "uncertain" }]);
+    expect(terminalPayloads).toEqual(["EffectUncertain"]);
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+- [ ] **Step 2: Run the test and verify the dispatcher is absent**
 
-Run: `npm test -- packages/app/test/effect-dispatcher.test.ts packages/storage/test/outbox-store.test.ts`
+Run: `npm test -- packages/app/test/effect-dispatcher.test.ts`
 
-Expected: FAIL because outbox, operations, app package, and dispatcher do not exist.
+Expected: FAIL because `@oren/app` does not exist.
 
-- [ ] **Step 3: Add outbox and operation tables**
-
-Append to `applyMigrations()`:
-
-```sql
-CREATE TABLE IF NOT EXISTS outbox (
-  effect_id TEXT PRIMARY KEY,
-  oren_id TEXT NOT NULL,
-  effect_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('pending', 'dispatched', 'completed')),
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS outbox_pending
-  ON outbox (oren_id, status, created_at);
-
-CREATE TABLE IF NOT EXISTS operations (
-  idempotency_key TEXT PRIMARY KEY,
-  effect_id TEXT NOT NULL,
-  oren_id TEXT NOT NULL,
-  capability TEXT NOT NULL,
-  status TEXT NOT NULL,
-  result_json TEXT,
-  updated_at TEXT NOT NULL
-);
-```
+- [ ] **Step 3: Atomically persist effect terminal state and its Inbox result**
 
 ```ts
-// packages/storage/src/outbox-store.ts
-import type { Effect } from "@oren/kernel";
-import type { SqliteDatabase } from "./database.js";
-
-export class OutboxStore {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  enqueue(effect: Effect): void {
-    this.database.raw
-      .prepare(`
-        INSERT INTO outbox
-          (effect_id, oren_id, effect_json, status, created_at)
-        VALUES (?, ?, ?, 'pending', ?)
-        ON CONFLICT(effect_id) DO NOTHING
-      `)
-      .run(
-        effect.effectId,
-        effect.orenId,
-        JSON.stringify(effect),
-        new Date().toISOString(),
-      );
+// add to packages/storage/src/life-repository.ts
+public finishEffect(
+  effectId: string,
+  orenId: string,
+  correlationId: string,
+  payload:
+    | Extract<CoreEvent, { type: "EffectCompleted" }>
+    | Extract<CoreEvent, { type: "EffectFailed" }>
+    | Extract<CoreEvent, { type: "EffectUncertain" }>,
+): void {
+  const status = payload.type === "EffectCompleted"
+    ? "completed"
+    : payload.type === "EffectFailed"
+      ? "failed"
+      : "uncertain";
+  this.db.exec("BEGIN IMMEDIATE");
+  try {
+    this.db.prepare(`
+      UPDATE outbox
+      SET status = ?, receipt_json = ?, lease_owner = NULL, lease_until = NULL
+      WHERE effect_id = ? AND status NOT IN ('completed','failed','uncertain','cancelled')
+    `).run(status, JSON.stringify(payload), effectId);
+    this.db.prepare(`
+      UPDATE operations SET status = ?, receipt_json = ? WHERE effect_id = ?
+    `).run(status, JSON.stringify(payload), effectId);
+    this.db.prepare(`
+      INSERT OR IGNORE INTO inbox(
+        inbox_id, oren_id, priority, available_at, payload_json
+      ) VALUES (?, ?, 4, ?, ?)
+    `).run(
+      `effect-result:${effectId}`,
+      orenId,
+      new Date().toISOString(),
+      JSON.stringify({ correlationId, event: payload }),
+    );
+    this.db.exec("COMMIT");
+  } catch (error) {
+    this.db.exec("ROLLBACK");
+    throw error;
   }
+}
+```
 
-  nextPending(orenId: string): Effect | null {
-    const row = this.database.raw
-      .prepare(`
-        SELECT effect_json FROM outbox
-        WHERE oren_id = ? AND status = 'pending'
-        ORDER BY created_at ASC, effect_id ASC
-        LIMIT 1
-      `)
-      .get(orenId) as { effect_json: string } | undefined;
-    return row ? (JSON.parse(row.effect_json) as Effect) : null;
-  }
+- [ ] **Step 4: Implement reconciliation-first dispatch**
 
-  markDispatched(effectId: string): void {
-    this.setStatus(effectId, "dispatched");
-  }
+```ts
+// packages/app/src/effect-dispatcher.ts
+import type { CapabilityInvocation, CapabilityResult } from "@oren/kernel";
 
-  markCompleted(effectId: string): void {
-    this.setStatus(effectId, "completed");
-  }
+interface ClaimedEffect {
+  readonly effectId: string;
+  readonly orenId: string;
+  readonly capability: string;
+  readonly effect: {
+    readonly effectId: string;
+    readonly correlationId: string;
+    readonly capability: string;
+    readonly arguments: CapabilityInvocation["arguments"];
+    readonly grantIds: readonly string[];
+    readonly stateVersion: number;
+  };
+  readonly attempts: number;
+}
 
-  requeue(effectId: string): void {
-    this.setStatus(effectId, "pending");
-  }
-
-  recoverDispatched(): number {
-    const result = this.database.raw
-      .prepare(`
-        UPDATE outbox
-        SET status = 'pending'
-        WHERE status = 'dispatched'
-      `)
-      .run();
-    return Number(result.changes);
-  }
-
-  private setStatus(
+interface EffectRepository {
+  claimOutbox(worker: string, limit: number): ClaimedEffect[];
+  finishEffect(
     effectId: string,
-    status: "pending" | "dispatched" | "completed",
-  ): void {
-    this.database.raw
-      .prepare("UPDATE outbox SET status = ? WHERE effect_id = ?")
-      .run(status, effectId);
+    orenId: string,
+    correlationId: string,
+    payload:
+      | { readonly type: "EffectCompleted"; readonly effectId: string; readonly receipt: CapabilityInvocation["arguments"] }
+      | { readonly type: "EffectFailed"; readonly effectId: string; readonly code: string; readonly message: string }
+      | { readonly type: "EffectUncertain"; readonly effectId: string; readonly message: string },
+  ): void;
+}
+
+interface EffectRegistry {
+  resolve(name: string): {
+    descriptor: { readonly timeoutMs: number };
+    extension: {
+      invoke(invocation: CapabilityInvocation, signal: AbortSignal): Promise<CapabilityResult>;
+      query?(effectId: string, signal: AbortSignal): Promise<CapabilityResult>;
+    };
+  };
+}
+
+export class EffectDispatcher {
+  public constructor(
+    private readonly repository: EffectRepository,
+    private readonly registry: EffectRegistry,
+    private readonly workerId: string,
+  ) {}
+
+  public async runOnce(): Promise<Array<{ effectId: string; status: string }>> {
+    const claimed = this.repository.claimOutbox(this.workerId, 8);
+    const results: Array<{ effectId: string; status: string }> = [];
+    for (const row of claimed) {
+      const { descriptor, extension } = this.registry.resolve(row.capability);
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), descriptor.timeoutMs);
+      try {
+        let result: CapabilityResult;
+        if (row.attempts > 1) {
+          if (!extension.query) {
+            this.repository.finishEffect(row.effectId, row.orenId, row.effect.correlationId, {
+              type: "EffectUncertain",
+              effectId: row.effectId,
+              message: "Dispatch outcome cannot be queried",
+            });
+            results.push({ effectId: row.effectId, status: "uncertain" });
+            continue;
+          }
+          result = await extension.query(row.effectId, controller.signal);
+        } else {
+          result = await extension.invoke({
+            effectId: row.effect.effectId,
+            orenId: row.orenId,
+            capability: row.effect.capability,
+            arguments: row.effect.arguments,
+            grantIds: row.effect.grantIds,
+            stateVersion: row.effect.stateVersion,
+            deadline: new Date(Date.now() + descriptor.timeoutMs).toISOString(),
+          }, controller.signal);
+        }
+        if (result.status === "completed") {
+          this.repository.finishEffect(row.effectId, row.orenId, row.effect.correlationId, {
+            type: "EffectCompleted",
+            effectId: row.effectId,
+            receipt: result.receipt,
+          });
+        } else if (result.status === "uncertain") {
+          this.repository.finishEffect(row.effectId, row.orenId, row.effect.correlationId, {
+            type: "EffectUncertain",
+            effectId: row.effectId,
+            message: result.message,
+          });
+        } else {
+          this.repository.finishEffect(row.effectId, row.orenId, row.effect.correlationId, {
+            type: "EffectFailed",
+            effectId: row.effectId,
+            code: result.code,
+            message: result.message,
+          });
+        }
+        results.push({ effectId: row.effectId, status: result.status });
+      } catch (error) {
+        this.repository.finishEffect(row.effectId, row.orenId, row.effect.correlationId, {
+          type: "EffectUncertain",
+          effectId: row.effectId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        results.push({ effectId: row.effectId, status: "uncertain" });
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return results;
   }
 }
 ```
-
-```ts
-// packages/storage/src/operation-store.ts
-import type { Effect, JsonValue } from "@oren/kernel";
-import type { SqliteDatabase } from "./database.js";
-
-export class OperationStore {
-  constructor(private readonly database: SqliteDatabase) {}
-
-  begin(effect: Effect, now: string): void {
-    this.database.raw
-      .prepare(`
-        INSERT INTO operations (
-          idempotency_key, effect_id, oren_id, capability,
-          status, result_json, updated_at
-        ) VALUES (?, ?, ?, ?, 'running', NULL, ?)
-        ON CONFLICT(idempotency_key) DO NOTHING
-      `)
-      .run(
-        effect.idempotencyKey,
-        effect.effectId,
-        effect.orenId,
-        effect.capability,
-        now,
-      );
-  }
-
-  complete(
-    effect: Effect,
-    receipt: JsonValue,
-    now: string,
-  ): void {
-    this.database.raw
-      .prepare(`
-        UPDATE operations
-        SET status = 'completed', result_json = ?, updated_at = ?
-        WHERE idempotency_key = ?
-      `)
-      .run(JSON.stringify(receipt), now, effect.idempotencyKey);
-  }
-
-  fail(
-    effect: Effect,
-    result: unknown,
-    now: string,
-  ): void {
-    this.database.raw
-      .prepare(`
-        UPDATE operations
-        SET status = 'failed', result_json = ?, updated_at = ?
-        WHERE idempotency_key = ?
-      `)
-      .run(JSON.stringify(result), now, effect.idempotencyKey);
-  }
-
-  progress(
-    effect: Effect,
-    result: unknown,
-    now: string,
-  ): void {
-    this.database.raw
-      .prepare(`
-        UPDATE operations
-        SET status = 'running', result_json = ?, updated_at = ?
-        WHERE idempotency_key = ?
-      `)
-      .run(JSON.stringify(result), now, effect.idempotencyKey);
-  }
-
-  completedReceipt(idempotencyKey: string): JsonValue | null {
-    const row = this.database.raw
-      .prepare(`
-        SELECT result_json FROM operations
-        WHERE idempotency_key = ? AND status = 'completed'
-      `)
-      .get(idempotencyKey) as { result_json: string | null } | undefined;
-    return row?.result_json
-      ? (JSON.parse(row.result_json) as JsonValue)
-      : null;
-  }
-}
-```
-
-Export `OutboxStore` and `OperationStore` from `packages/storage/src/index.ts`.
-
-- [ ] **Step 4: Add the app package and dispatcher**
 
 ```json
 // packages/app/package.json
@@ -2643,1090 +2634,787 @@ Export `OutboxStore` and `OperationStore` from `packages/storage/src/index.ts`.
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@oren/capabilities": "*",
     "@oren/cognition": "*",
+    "@oren/extensions": "*",
     "@oren/kernel": "*",
-    "@oren/storage": "*"
+    "@oren/pi-cognition": "*",
+    "@oren/storage": "*",
+    "@oren/test-counter": "*"
   }
 }
 ```
 
 ```ts
-// packages/app/src/effect-dispatcher.ts
-import type { CapabilityRuntime } from "@oren/capabilities";
-import type { EventEnvelope } from "@oren/kernel";
-import type {
-  InboxStore,
-  OperationStore,
-  OutboxStore,
-  SqliteDatabase,
-} from "@oren/storage";
-
-export class EffectDispatcher {
-  constructor(
-    private readonly database: SqliteDatabase,
-    private readonly outbox: OutboxStore,
-    private readonly operations: OperationStore,
-    private readonly inbox: InboxStore,
-    private readonly runtime: CapabilityRuntime,
-    private readonly clock: () => string = () => new Date().toISOString(),
-  ) {}
-
-  recoverInterruptedDispatches(): number {
-    return this.outbox.recoverDispatched();
-  }
-
-  async dispatchNext(orenId: string): Promise<boolean> {
-    const effect = this.outbox.nextPending(orenId);
-    if (!effect) return false;
-
-    const existing = this.operations.completedReceipt(
-      effect.idempotencyKey,
-    );
-    if (existing !== null) {
-      const now = this.clock();
-      const event: EventEnvelope = {
-        eventId: `result:${effect.effectId}`,
-        orenId: effect.orenId,
-        schemaVersion: 1,
-        occurredAt: now,
-        recordedAt: now,
-        source: "capability-runtime",
-        causationId: effect.effectId,
-        correlationId: effect.correlationId,
-        payload: {
-          type: "CapabilityCompleted",
-          effectId: effect.effectId,
-          capability: effect.capability,
-          receipt: existing,
-        },
-      };
-      this.database.transaction(() => {
-        this.inbox.enqueue(event);
-        this.outbox.markCompleted(effect.effectId);
-      });
-      return true;
-    }
-
-    const now = this.clock();
-    this.database.transaction(() => {
-      this.operations.begin(effect, now);
-      this.outbox.markDispatched(effect.effectId);
-    });
-    const result = await this.runtime.invoke({
-      invocationId: effect.effectId,
-      orenId: effect.orenId,
-      intentId: effect.intentId,
-      capability: effect.capability,
-      arguments: effect.arguments,
-      grantIds: effect.grantIds,
-      stateVersion: effect.stateVersion,
-      deadline: effect.deadline,
-      idempotencyKey: effect.idempotencyKey,
-      correlationId: effect.correlationId,
-    });
-
-    if (result.type === "Progress") {
-      this.operations.progress(effect, result, now);
-      return true;
-    }
-
-    const event: EventEnvelope =
-      result.type === "Completed"
-        ? {
-            eventId: `result:${effect.effectId}`,
-            orenId: effect.orenId,
-            schemaVersion: 1,
-            occurredAt: now,
-            recordedAt: now,
-            source: "capability-runtime",
-            causationId: effect.effectId,
-            correlationId: effect.correlationId,
-            payload: {
-              type: "CapabilityCompleted",
-              effectId: effect.effectId,
-              capability: effect.capability,
-              receipt: result.receipt,
-            },
-          }
-        : {
-            eventId: `result:${effect.effectId}`,
-            orenId: effect.orenId,
-            schemaVersion: 1,
-            occurredAt: now,
-            recordedAt: now,
-            source: "capability-runtime",
-            causationId: effect.effectId,
-            correlationId: effect.correlationId,
-            payload: {
-              type: "CapabilityFailed",
-              effectId: effect.effectId,
-              capability: effect.capability,
-              category: result.category,
-              message: result.message,
-            },
-          };
-
-    this.database.transaction(() => {
-      if (result.type === "Completed") {
-        this.operations.complete(effect, result.receipt, now);
-      } else {
-        this.operations.fail(effect, result, now);
-      }
-      this.outbox.markCompleted(effect.effectId);
-      this.inbox.enqueue(event);
-    });
-    return true;
-  }
-}
+// packages/app/src/index.ts
+export * from "./effect-dispatcher.js";
 ```
 
-Export `EffectDispatcher` from `packages/app/src/index.ts`.
+Run: `npm test -- packages/app/test/effect-dispatcher.test.ts packages/storage/test/recovery.test.ts && npm run typecheck`
 
-- [ ] **Step 5: Run the task checks**
+Expected: PASS.
 
-Run: `npm install && npm test -- packages/app/test/effect-dispatcher.test.ts packages/storage/test/outbox-store.test.ts && npm run typecheck`
-
-Expected: PASS; the same idempotency key produces one counter increment and one durable result event.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit effect dispatch**
 
 ```bash
-git add package-lock.json packages/storage packages/app
-git commit -m "feat: add durable effect dispatch"
+git add packages/app packages/storage
+git commit -m "feat(app): dispatch durable effects with reconciliation"
 ```
 
 ---
 
-### Task 9: Add Persistent Schedules and Idempotent Wake Delivery
+### Task 9: Coordinate Cognition, Foreground Preemption, and Scheduled Wakes
 
 **Files:**
-- Create: `packages/storage/src/schedule-store.ts`
-- Modify: `packages/storage/src/migrations.ts`
-- Modify: `packages/storage/src/index.ts`
-- Test: `packages/storage/test/schedule-store.test.ts`
+- Create: `packages/app/src/cognition-worker.ts`
+- Create: `packages/app/src/episode-coordinator.ts`
 - Create: `packages/app/src/scheduler.ts`
 - Modify: `packages/app/src/index.ts`
-- Test: `packages/app/test/scheduler.test.ts`
+- Modify: `packages/kernel/src/life-actor.ts`
+- Modify: `packages/storage/src/life-repository.ts`
+- Test: `packages/app/test/episode-coordinator.test.ts`
 
 **Interfaces:**
-- Consumes: accepted `ScheduleWake` proposals
-- Produces: `ScheduleStore.put()`, `ScheduleStore.due()`, `ScheduleStore.markDelivered()`, `Scheduler.poll()`
+- Consumes: `CognitionJob`, `CognitionPort`, durable Inbox and schedules
+- Produces: one active episode per Oren, foreground preemption, trigger priority, idempotent wake delivery
 
-- [ ] **Step 1: Write the failing scheduler restart test**
-
-```ts
-// packages/app/test/scheduler.test.ts
-import { describe, expect, it } from "vitest";
-import {
-  applyMigrations,
-  InboxStore,
-  ScheduleStore,
-  SqliteDatabase,
-} from "@oren/storage";
-import { Scheduler } from "../src/index.js";
-
-describe("Scheduler", () => {
-  it("delivers one stable WakeDue event across repeated polls", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const schedules = new ScheduleStore(database);
-    const inbox = new InboxStore(database);
-    const scheduler = new Scheduler(schedules, inbox);
-    schedules.put({
-      scheduleId: "schedule-1",
-      orenId: "oren-1",
-      dueAt: "2026-07-23T01:00:00.000Z",
-      purpose: "continue thread-1",
-    });
-
-    expect(scheduler.poll("2026-07-23T02:00:00.000Z")).toBe(1);
-    expect(scheduler.poll("2026-07-23T02:00:00.000Z")).toBe(0);
-    expect(inbox.pendingCount("oren-1")).toBe(1);
-  });
-});
-```
+- [ ] **Step 1: Write a failing foreground-preemption test**
 
 ```ts
-// packages/storage/test/schedule-store.test.ts
+// packages/app/test/episode-coordinator.test.ts
 import { describe, expect, it } from "vitest";
-import {
-  applyMigrations,
-  ScheduleStore,
-  SqliteDatabase,
-} from "../src/index.js";
+import { EpisodeCoordinator } from "../src/index.js";
 
-describe("ScheduleStore", () => {
-  it("returns only undelivered schedules at or before now", () => {
-    const database = new SqliteDatabase(":memory:");
-    applyMigrations(database);
-    const schedules = new ScheduleStore(database);
-    schedules.put({
-      scheduleId: "due",
-      orenId: "oren-1",
-      dueAt: "2026-07-23T01:00:00.000Z",
-      purpose: "due",
-    });
-    schedules.put({
-      scheduleId: "future",
-      orenId: "oren-1",
-      dueAt: "2026-07-25T01:00:00.000Z",
-      purpose: "future",
+describe("EpisodeCoordinator", () => {
+  it("aborts an idle episode before starting foreground cognition", async () => {
+    const transitions: string[] = [];
+    const coordinator = new EpisodeCoordinator(async (job, signal) => {
+      transitions.push(`start:${job.triggerKind}`);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+        transitions.push(`abort:${job.triggerKind}`);
+        resolve();
+      }, { once: true }));
     });
 
-    expect(schedules.due("2026-07-24T00:00:00.000Z")).toEqual([
-      {
-        scheduleId: "due",
-        orenId: "oren-1",
-        dueAt: "2026-07-23T01:00:00.000Z",
-        purpose: "due",
-      },
+    void coordinator.start({
+      orenId: "oren-1",
+      episodeId: "background",
+      baseStateVersion: 1,
+      triggerKind: "health_check",
+      correlationId: "corr-background",
+    });
+    await coordinator.start({
+      orenId: "oren-1",
+      episodeId: "foreground",
+      baseStateVersion: 2,
+      triggerKind: "foreground_user",
+      correlationId: "corr-foreground",
+    });
+
+    expect(transitions.slice(0, 3)).toEqual([
+      "start:health_check",
+      "abort:health_check",
+      "start:foreground_user",
     ]);
-    schedules.markDelivered("due", "2026-07-24T00:00:00.000Z");
-    expect(schedules.due("2026-07-24T00:00:00.000Z")).toEqual([]);
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+- [ ] **Step 2: Run the test and verify coordination is absent**
 
-Run: `npm test -- packages/app/test/scheduler.test.ts packages/storage/test/schedule-store.test.ts`
+Run: `npm test -- packages/app/test/episode-coordinator.test.ts`
 
-Expected: FAIL because schedule storage and scheduler do not exist.
+Expected: FAIL because `EpisodeCoordinator` does not exist.
 
-- [ ] **Step 3: Add schedule persistence**
-
-Append to `applyMigrations()`:
-
-```sql
-CREATE TABLE IF NOT EXISTS schedules (
-  schedule_id TEXT PRIMARY KEY,
-  oren_id TEXT NOT NULL,
-  due_at TEXT NOT NULL,
-  purpose TEXT NOT NULL,
-  delivered_at TEXT
-);
-CREATE INDEX IF NOT EXISTS schedules_due
-  ON schedules (delivered_at, due_at);
-```
+- [ ] **Step 3: Implement the one-episode coordinator**
 
 ```ts
-// packages/storage/src/schedule-store.ts
-import type { SqliteDatabase } from "./database.js";
+// packages/app/src/episode-coordinator.ts
+import type { CognitionJob } from "@oren/kernel";
 
-export interface StoredSchedule {
-  scheduleId: string;
-  orenId: string;
-  dueAt: string;
-  purpose: string;
+const priority = {
+  foreground_user: 5,
+  effect_result: 4,
+  commitment_due: 3,
+  scheduled_wake: 2,
+  health_check: 1,
+} as const;
+
+interface ActiveEpisode {
+  readonly job: CognitionJob;
+  readonly controller: AbortController;
+  readonly promise: Promise<void>;
 }
 
-export class ScheduleStore {
-  constructor(private readonly database: SqliteDatabase) {}
+export class EpisodeCoordinator {
+  private readonly active = new Map<string, ActiveEpisode>();
 
-  put(schedule: StoredSchedule): void {
-    this.database.raw
-      .prepare(`
-        INSERT INTO schedules
-          (schedule_id, oren_id, due_at, purpose, delivered_at)
-        VALUES (?, ?, ?, ?, NULL)
-        ON CONFLICT(schedule_id) DO NOTHING
-      `)
-      .run(
-        schedule.scheduleId,
-        schedule.orenId,
-        schedule.dueAt,
-        schedule.purpose,
-      );
+  public constructor(
+    private readonly runEpisode: (job: CognitionJob, signal: AbortSignal) => Promise<void>,
+  ) {}
+
+  public async start(job: CognitionJob): Promise<void> {
+    const current = this.active.get(job.orenId);
+    if (current) {
+      if (priority[job.triggerKind] <= priority[current.job.triggerKind]) return;
+      current.controller.abort();
+      await current.promise;
+    }
+    const controller = new AbortController();
+    const promise = this.runEpisode(job, controller.signal)
+      .finally(() => {
+        if (this.active.get(job.orenId)?.job.episodeId === job.episodeId) {
+          this.active.delete(job.orenId);
+        }
+      });
+    this.active.set(job.orenId, { job, controller, promise });
+    await Promise.resolve();
   }
 
-  due(now: string): StoredSchedule[] {
-    const rows = this.database.raw
-      .prepare(`
-        SELECT schedule_id, oren_id, due_at, purpose
-        FROM schedules
-        WHERE delivered_at IS NULL AND due_at <= ?
-        ORDER BY due_at ASC, schedule_id ASC
-      `)
-      .all(now) as unknown as Array<{
-        schedule_id: string;
-        oren_id: string;
-        due_at: string;
-        purpose: string;
-      }>;
-    return rows.map((row) => ({
-      scheduleId: row.schedule_id,
-      orenId: row.oren_id,
-      dueAt: row.due_at,
-      purpose: row.purpose,
-    }));
-  }
-
-  markDelivered(scheduleId: string, deliveredAt: string): void {
-    this.database.raw
-      .prepare(`
-        UPDATE schedules
-        SET delivered_at = ?
-        WHERE schedule_id = ? AND delivered_at IS NULL
-      `)
-      .run(deliveredAt, scheduleId);
+  public waitForIdle(orenId: string): Promise<void> {
+    return this.active.get(orenId)?.promise ?? Promise.resolve();
   }
 }
 ```
 
-- [ ] **Step 4: Add idempotent wake delivery**
+- [ ] **Step 4: Add cognition worker and idempotent scheduler**
+
+```ts
+// packages/app/src/cognition-worker.ts
+import type { CognitionPort, Conductor } from "@oren/cognition";
+import type { CognitionJob, Guard, LifeActor } from "@oren/kernel";
+
+export class CognitionWorker {
+  public constructor(
+    private readonly cognition: CognitionPort,
+    private readonly conductor: Conductor,
+    private readonly actor: LifeActor,
+    private readonly guard: Guard,
+    private readonly loadFrameInput: (job: CognitionJob) => Parameters<Conductor["createFrame"]>[0],
+    private readonly capabilityPort: Parameters<CognitionPort["run"]>[1],
+  ) {}
+
+  public async run(job: CognitionJob, signal: AbortSignal): Promise<void> {
+    const frameInput = this.loadFrameInput(job);
+    const decision = this.guard.evaluateCognition(
+      frameInput.state,
+      job.triggerKind,
+      frameInput.maxSteps,
+    );
+    if (!decision.allowed) return;
+    const frame = this.conductor.createFrame(frameInput);
+    const outcome = await this.cognition.run(frame, this.capabilityPort, signal);
+    if (outcome.kind === "completed") {
+      this.actor.acceptCognition(job, outcome.proposals);
+    } else if (outcome.kind === "failed") {
+      this.actor.recordCognitionExit(job, { kind: "failed", message: outcome.message });
+    } else if (outcome.kind === "aborted") {
+      this.actor.recordCognitionExit(job, { kind: "aborted", reason: "foreground_user" });
+    }
+  }
+}
+```
 
 ```ts
 // packages/app/src/scheduler.ts
-import type { EventEnvelope } from "@oren/kernel";
-import type {
-  InboxStore,
-  ScheduleStore,
-} from "@oren/storage";
+export interface DueSchedule {
+  readonly scheduleId: string;
+  readonly orenId: string;
+  readonly purpose: string;
+}
+
+export interface ScheduleRepository {
+  claimDue(now: string, limit: number): readonly DueSchedule[];
+  deliverWake(schedule: DueSchedule): void;
+}
 
 export class Scheduler {
-  constructor(
-    private readonly schedules: ScheduleStore,
-    private readonly inbox: InboxStore,
-  ) {}
+  public constructor(private readonly repository: ScheduleRepository) {}
 
-  poll(now: string): number {
-    let delivered = 0;
-    for (const schedule of this.schedules.due(now)) {
-      const event: EventEnvelope = {
-        eventId: `wake:${schedule.scheduleId}:${schedule.dueAt}`,
-        orenId: schedule.orenId,
-        schemaVersion: 1,
-        occurredAt: now,
-        recordedAt: now,
-        source: "scheduler",
-        causationId: null,
+  public runOnce(now: string): number {
+    const due = this.repository.claimDue(now, 32);
+    for (const schedule of due) {
+      this.repository.deliverWake(schedule);
+    }
+    return due.length;
+  }
+}
+```
+
+```ts
+// add to packages/storage/src/life-repository.ts
+export interface InboxItem {
+  readonly inboxId: string;
+  readonly orenId: string;
+  readonly correlationId: string;
+  readonly event: CoreEvent;
+}
+
+public claimInbox(worker: string, now = new Date().toISOString()): InboxItem[] {
+  const leaseUntil = new Date(Date.parse(now) + 60_000).toISOString();
+  this.db.exec("BEGIN IMMEDIATE");
+  try {
+    const rows = this.db.prepare(`
+      SELECT inbox_id, oren_id, payload_json
+      FROM inbox
+      WHERE processed_at IS NULL
+        AND available_at <= ?
+        AND (lease_until IS NULL OR lease_until < ?)
+      ORDER BY priority DESC, rowid
+      LIMIT 32
+    `).all(now, now);
+    const lease = this.db.prepare(`
+      UPDATE inbox SET lease_owner = ?, lease_until = ? WHERE inbox_id = ?
+    `);
+    for (const row of rows) lease.run(worker, leaseUntil, String(row.inbox_id));
+    this.db.exec("COMMIT");
+    return rows.map((row) => {
+      const payload = JSON.parse(String(row.payload_json)) as {
+        correlationId: string;
+        event: CoreEvent;
+      };
+      return {
+        inboxId: String(row.inbox_id),
+        orenId: String(row.oren_id),
+        correlationId: payload.correlationId,
+        event: payload.event,
+      };
+    });
+  } catch (error) {
+    this.db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+public commitInbox(
+  inboxId: string,
+  orenId: string,
+  events: readonly EventEnvelope[],
+): void {
+  this.db.exec("BEGIN IMMEDIATE");
+  try {
+    const claimed = this.db.prepare(`
+      UPDATE inbox
+      SET processed_at = ?, lease_owner = NULL, lease_until = NULL
+      WHERE inbox_id = ? AND processed_at IS NULL
+    `).run(new Date().toISOString(), inboxId);
+    if (Number(claimed.changes) !== 1) {
+      this.db.exec("ROLLBACK");
+      return;
+    }
+    const insert = this.db.prepare(`
+      INSERT INTO events(event_id, oren_id, recorded_at, envelope_json)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const event of events) {
+      insert.run(event.eventId, orenId, event.recordedAt, JSON.stringify(event));
+    }
+    this.db.exec("COMMIT");
+  } catch (error) {
+    this.db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+public claimDue(now: string, limit: number): Array<{
+  scheduleId: string;
+  orenId: string;
+  purpose: string;
+}> {
+  return this.db.prepare(`
+    SELECT schedule_id, oren_id, purpose
+    FROM schedules
+    WHERE due_at <= ? AND delivered_at IS NULL
+    ORDER BY due_at
+    LIMIT ?
+  `).all(now, limit).map((row) => ({
+    scheduleId: String(row.schedule_id),
+    orenId: String(row.oren_id),
+    purpose: String(row.purpose),
+  }));
+}
+
+public deliverWake(schedule: {
+  readonly scheduleId: string;
+  readonly orenId: string;
+  readonly purpose: string;
+}): void {
+  this.db.exec("BEGIN IMMEDIATE");
+  try {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO inbox(
+        inbox_id, oren_id, priority, available_at, payload_json
+      ) VALUES (?, ?, 2, ?, ?)
+    `).run(
+      `wake:${schedule.scheduleId}`,
+      schedule.orenId,
+      new Date().toISOString(),
+      JSON.stringify({
         correlationId: `schedule:${schedule.scheduleId}`,
-        payload: {
+        event: {
           type: "WakeDue",
           scheduleId: schedule.scheduleId,
           purpose: schedule.purpose,
         },
-      };
-      this.inbox.enqueue(event);
-      this.schedules.markDelivered(schedule.scheduleId, now);
-      delivered += 1;
-    }
-    return delivered;
+      }),
+    );
+    this.db.prepare(`
+      UPDATE schedules SET delivered_at = ? WHERE schedule_id = ?
+    `).run(new Date().toISOString(), schedule.scheduleId);
+    this.db.exec("COMMIT");
+  } catch (error) {
+    this.db.exec("ROLLBACK");
+    throw error;
   }
 }
 ```
 
-Export schedule storage and scheduler symbols from their package indexes.
+```ts
+// add to packages/kernel/src/life-actor.ts
+public handleInbox(input: {
+  readonly inboxId: string;
+  readonly orenId: string;
+  readonly correlationId: string;
+  readonly event: EventEnvelope["payload"];
+}): CognitionJob {
+  const before = this.repository.loadState(input.orenId);
+  const episodeId = this.nextId();
+  const triggerKind = input.event.type === "WakeDue"
+    ? "scheduled_wake"
+    : "effect_result";
+  const accepted = this.envelope(input.orenId, input.correlationId, input.event);
+  const requested = this.envelope(input.orenId, input.correlationId, {
+    type: "CognitionRequested",
+    episodeId,
+    baseStateVersion: before.version + 2,
+    triggerKind,
+  });
+  this.repository.commitInbox(input.inboxId, input.orenId, [accepted, requested]);
+  return {
+    orenId: input.orenId,
+    episodeId,
+    baseStateVersion: before.version + 2,
+    triggerKind,
+    correlationId: input.correlationId,
+  };
+}
+```
 
-- [ ] **Step 5: Run the task checks**
+```ts
+// packages/app/src/index.ts
+export * from "./effect-dispatcher.js";
+export * from "./cognition-worker.js";
+export * from "./episode-coordinator.js";
+export * from "./scheduler.js";
+```
 
-Run: `npm test -- packages/app/test/scheduler.test.ts packages/storage/test/schedule-store.test.ts && npm run typecheck`
+Run: `npm test -- packages/app/test/episode-coordinator.test.ts && npm run typecheck`
 
-Expected: PASS; repeated polls enqueue one stable wake event.
+Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit coordination and scheduling**
 
 ```bash
-git add packages/storage packages/app
-git commit -m "feat: add persistent life scheduler"
+git add packages/app packages/storage
+git commit -m "feat(app): coordinate episodes and durable wakes"
 ```
 
 ---
 
-### Task 10: Compile Proposals and Run the End-to-End Life Slice
+### Task 10: Compose and Verify the Restartable End-to-End Life Slice
 
 **Files:**
-- Create: `packages/app/src/decision-compiler.ts`
 - Create: `packages/app/src/life-runtime.ts`
 - Create: `packages/app/src/demo.ts`
 - Modify: `packages/app/src/index.ts`
-- Modify: `packages/app/package.json`
-- Modify: `package-lock.json`
 - Test: `packages/app/test/life-runtime.test.ts`
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: all Phase 1 interfaces
-- Produces: `DecisionCompiler.compile()`, `LifeRuntime.step()`, `npm run demo`
+- Consumes: all Phase 1 packages
+- Produces: `LifeRuntime`, deterministic demo, Pi-backed fake-stream integration test
 
-- [ ] **Step 1: Write the failing vertical-slice test**
-
-The test must exercise this complete path:
-
-```text
-WakeDue inbox event
-  → LifeActor appends and reduces it
-  → Conductor returns FormIntent + RequestCapability + ScheduleWake
-  → Guard accepts them under autonomy_budget
-  → DecisionCompiler appends decision events and durable effect
-  → EffectDispatcher invokes test.increment
-  → CapabilityCompleted enters inbox
-  → LifeActor consumes the result
-  → Scheduler later emits the next WakeDue exactly once
-  → fresh rehydration equals the in-memory LifeState
-```
+- [ ] **Step 1: Write the failing end-to-end restart test**
 
 ```ts
 // packages/app/test/life-runtime.test.ts
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ScriptedCognitionAdapter } from "@oren/cognition";
-import { CounterExtension } from "@oren/test-counter";
-import { createInitialLifeState } from "@oren/kernel";
-import { createTestRuntime } from "../src/life-runtime.js";
+import { PiCognitionAdapter } from "@oren/pi-cognition";
+import {
+  createMockModel,
+  createSequenceStream,
+} from "../../pi-cognition/test/fixtures.js";
+import { LifeRuntime } from "../src/index.js";
 
 describe("LifeRuntime", () => {
-  it("runs one autonomous wake through capability receipt and next wake", async () => {
-    const runtime = createTestRuntime({
-      orenId: "oren-1",
-      personId: "person-1",
-      initialState: {
-        ...createInitialLifeState("oren-1", "person-1"),
-        budgets: {
-          autonomyRemaining: 3,
-          interactionMaxSteps: 8,
-          commitmentRemaining: {},
+  it("runs immediate cognition, suspends for an effect, resumes, and replays after restart", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oren-runtime-"));
+    const databasePath = join(directory, "life.db");
+    const first = await LifeRuntime.createDeterministic(databasePath);
+
+    await first.initialize("oren-1", "person-1");
+    await first.receiveUserMessage("oren-1", "person-1", "Think about the counter");
+    await first.drain();
+    const beforeRestart = first.inspect("oren-1");
+    await first.close();
+
+    const second = await LifeRuntime.createDeterministic(databasePath);
+    await second.drain();
+    const afterRestart = second.inspect("oren-1");
+
+    expect(afterRestart).toEqual(beforeRestart);
+    expect(afterRestart.pendingEffectIds).toEqual([]);
+    expect(afterRestart.attention.currentFocus).toContain("counter");
+    await second.close();
+  });
+
+  it("runs the same durable slice through PiCognitionAdapter", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oren-pi-runtime-"));
+    const databasePath = join(directory, "life.db");
+    const streamFn = createSequenceStream([
+      [{ type: "toolCall", id: "read-1", name: "test.read", arguments: {} }],
+      [{
+        type: "toolCall",
+        id: "increment-1",
+        name: "test.increment",
+        arguments: { by: 1 },
+      }],
+      [{
+        type: "toolCall",
+        id: "commit-1",
+        name: "oren_commit",
+        arguments: {
+          proposals: [
+            {
+              type: "AdvanceThread",
+              threadId: "counter",
+              summary: "Pi completed the counter lifecycle",
+            },
+            {
+              type: "ScheduleWake",
+              scheduleId: "counter-follow-up",
+              at: "2099-01-02T00:00:00.000Z",
+              purpose: "Revisit the counter",
+            },
+          ],
         },
-      },
-      adapter: new ScriptedCognitionAdapter([
-        {
-          type: "FormIntent",
-          intentId: "intent-1",
-          reason: "advance my own thread",
-          proposedAction: "increment the test counter",
-          expiresAt: "2099-07-23T00:00:00.000Z",
-        },
-        {
-          type: "RequestCapability",
-          intentId: "intent-1",
-          capability: "test.increment",
-          arguments: { amount: 2 },
-          riskTraits: ["reversible"],
-          commitmentId: null,
-        },
-        {
-          type: "ScheduleWake",
-          scheduleId: "schedule-2",
-          dueAt: "2026-07-24T00:00:00.000Z",
-          purpose: "continue my thread",
-        },
-      ]),
-      extensions: [new CounterExtension()],
-      now: () => "2026-07-23T00:00:00.000Z",
+      }],
+    ]);
+    const runtime = await LifeRuntime.create(
+      databasePath,
+      new PiCognitionAdapter({ model: createMockModel(), streamFn }),
+    );
+
+    await runtime.initialize("oren-1", "person-1");
+    await runtime.receiveUserMessage("oren-1", "person-1", "Inspect and increment the counter");
+    await runtime.drain();
+
+    expect(runtime.inspect("oren-1")).toMatchObject({
+      pendingEffectIds: [],
+      attention: { currentFocus: "Pi completed the counter lifecycle" },
+      schedules: ["counter-follow-up"],
     });
-
-    runtime.enqueueWake("schedule-1", "advance my thread");
-    await runtime.step();
-    await runtime.dispatchEffects();
-    await runtime.step();
-
-    expect(runtime.state().pendingOperationIds).toEqual([]);
-    expect(runtime.state().intentions.map((item) => item.intentId))
-      .toContain("intent-1");
-    expect(runtime.state().schedules.map((item) => item.scheduleId))
-      .toContain("schedule-2");
-    expect(runtime.state().budgets.autonomyRemaining).toBe(2);
-    expect(runtime.rehydrate()).toEqual(runtime.state());
-    expect(runtime.pollSchedules("2026-07-24T00:00:00.000Z")).toBe(1);
-    expect(runtime.pollSchedules("2026-07-24T00:00:00.000Z")).toBe(0);
+    await runtime.close();
   });
 });
 ```
 
-- [ ] **Step 2: Run the test and verify failure**
+- [ ] **Step 2: Run the end-to-end test and verify the composition root is missing**
 
 Run: `npm test -- packages/app/test/life-runtime.test.ts`
 
-Expected: FAIL because `createTestRuntime`, `DecisionCompiler`, and `LifeRuntime` do not exist.
+Expected: FAIL because `LifeRuntime` does not exist.
 
-- [ ] **Step 3: Implement Proposal-to-decision compilation**
-
-```ts
-// packages/app/src/decision-compiler.ts
-import type {
-  CoreEvent,
-  DecisionBatch,
-  Effect,
-  EventEnvelope,
-  GrantId,
-  LifeState,
-  Proposal,
-  ScheduledWake,
-} from "@oren/kernel";
-
-export interface CompiledDecision {
-  events: EventEnvelope[];
-  effects: Effect[];
-  schedules: ScheduledWake[];
-}
-
-export interface CompileInput {
-  state: LifeState;
-  trigger: EventEnvelope;
-  proposal: Proposal;
-  proposalIndex: number;
-  grantIds: GrantId[];
-  triggerKind: "autonomy" | "interaction" | "commitment";
-  now: string;
-}
-
-function addSeconds(iso: string, seconds: number): string {
-  return new Date(Date.parse(iso) + seconds * 1000).toISOString();
-}
-
-export class DecisionCompiler {
-  compile(input: CompileInput): CompiledDecision {
-    const {
-      state,
-      trigger,
-      proposal,
-      proposalIndex,
-      grantIds,
-      triggerKind,
-      now,
-    } = input;
-    const base = `decision:${trigger.correlationId}:${proposalIndex}`;
-    const events: EventEnvelope[] = [];
-    const effects: Effect[] = [];
-    const schedules: ScheduledWake[] = [];
-    const append = (suffix: string, payload: CoreEvent): void => {
-      events.push({
-        eventId: `${base}:${suffix}`,
-        orenId: state.orenId,
-        schemaVersion: 1,
-        occurredAt: now,
-        recordedAt: now,
-        source: "conductor",
-        causationId: trigger.eventId,
-        correlationId: trigger.correlationId,
-        payload,
-      });
-    };
-
-    switch (proposal.type) {
-      case "NoAction":
-        break;
-      case "AdvanceThread":
-        append("thread", {
-          type: "ThreadAdvanced",
-          threadId: proposal.threadId,
-          summary: proposal.summary,
-        });
-        break;
-      case "CreateOrUpdateCommitment": {
-        const existing = state.commitments.find(
-          (item) => item.commitmentId === proposal.commitmentId,
-        );
-        if (existing) {
-          append("commitment", {
-            type: "CommitmentAdvanced",
-            commitmentId: proposal.commitmentId,
-            nextStep: proposal.nextStep,
-          });
-        } else {
-          append("commitment", {
-            type: "CommitmentCreated",
-            commitmentId: proposal.commitmentId,
-            summary: proposal.summary,
-            nextStep: proposal.nextStep,
-            budgetRemaining: 0,
-          });
-        }
-        break;
-      }
-      case "FormIntent":
-        append("intent", {
-          type: "IntentFormed",
-          intentId: proposal.intentId,
-          reason: proposal.reason,
-          proposedAction: proposal.proposedAction,
-          expiresAt: proposal.expiresAt,
-        });
-        break;
-      case "ScheduleWake":
-        append("schedule", {
-          type: "WakeScheduled",
-          scheduleId: proposal.scheduleId,
-          dueAt: proposal.dueAt,
-          purpose: proposal.purpose,
-        });
-        schedules.push({
-          scheduleId: proposal.scheduleId,
-          orenId: state.orenId,
-          dueAt: proposal.dueAt,
-          purpose: proposal.purpose,
-        });
-        break;
-      case "RequestCapability": {
-        const effectId = `effect:${trigger.correlationId}:${proposalIndex}`;
-        if (triggerKind === "autonomy") {
-          append("budget", {
-            type: "BudgetConsumed",
-            budget: "autonomy",
-            amount: 1,
-            commitmentId: null,
-          });
-        } else if (
-          triggerKind === "commitment" &&
-          proposal.commitmentId !== null
-        ) {
-          append("budget", {
-            type: "BudgetConsumed",
-            budget: "commitment",
-            amount: 1,
-            commitmentId: proposal.commitmentId,
-          });
-        }
-        append("effect", {
-          type: "EffectRequested",
-          effectId,
-          capability: proposal.capability,
-          intentId: proposal.intentId,
-        });
-        effects.push({
-          effectId,
-          orenId: state.orenId,
-          intentId: proposal.intentId,
-          capability: proposal.capability,
-          arguments: structuredClone(proposal.arguments),
-          grantIds: [...grantIds],
-          stateVersion: state.version,
-          deadline: addSeconds(now, 60),
-          idempotencyKey: effectId,
-          correlationId: trigger.correlationId,
-        });
-        break;
-      }
-    }
-
-    return { events, effects, schedules };
-  }
-
-  merge(decisions: CompiledDecision[]): DecisionBatch {
-    return {
-      events: decisions.flatMap((item) => item.events),
-      effects: decisions.flatMap((item) => item.effects),
-      schedules: decisions.flatMap((item) => item.schedules),
-    };
-  }
-}
-```
-
-Stable IDs derive from the trigger correlation and Proposal index. A `RequestCapability` consumes one Phase 1 budget unit when triggered by autonomy or a commitment; foreground interaction emits no budget-consumption event.
-
-- [ ] **Step 4: Implement `LifeRuntime` as the composition root**
+- [ ] **Step 3: Implement one composition root without leaking Pi**
 
 ```ts
 // packages/app/src/life-runtime.ts
-import {
-  CapabilityRuntime,
-  ExtensionRegistry,
-  type Extension,
-} from "@oren/capabilities";
+import { randomUUID } from "node:crypto";
 import {
   Conductor,
-  type CognitionAdapter,
+  ScriptedCognitionAdapter,
+  type CognitionPort,
 } from "@oren/cognition";
 import {
-  evaluateProposal,
+  createInitialLifeState,
+  Guard,
   LifeActor,
-  reduceLifeState,
-  type DecisionBatch,
-  type EventEnvelope,
   type LifeState,
 } from "@oren/kernel";
-import {
-  applyMigrations,
-  ChronicleStore,
-  GrantStore,
-  InboxStore,
-  OperationStore,
-  OutboxStore,
-  rehydrateLifeState,
-  ScheduleStore,
-  SnapshotStore,
-  SqliteDatabase,
-} from "@oren/storage";
-import { DecisionCompiler } from "./decision-compiler.js";
+import { CapabilityBroker, ExtensionRegistry } from "@oren/extensions";
+import { openDatabase, SqliteLifeRepository } from "@oren/storage";
+import testCounter from "../../../extensions/test-counter/src/index.js";
+import { CognitionWorker } from "./cognition-worker.js";
 import { EffectDispatcher } from "./effect-dispatcher.js";
-import { Scheduler } from "./scheduler.js";
-
-export interface TestRuntimeOptions {
-  orenId: string;
-  personId: string;
-  initialState: LifeState;
-  adapter: CognitionAdapter;
-  extensions: Extension[];
-  now(): string;
-}
-
-interface RuntimePorts {
-  actor: LifeActor;
-  conductor: Conductor;
-  compiler: DecisionCompiler;
-  grants: GrantStore;
-  registry: ExtensionRegistry;
-  dispatcher: EffectDispatcher;
-  scheduler: Scheduler;
-  inbox: InboxStore;
-  chronicle: ChronicleStore;
-  snapshots: SnapshotStore;
-  stateRef(): LifeState;
-  now(): string;
-  personId: string;
-}
+import { EpisodeCoordinator } from "./episode-coordinator.js";
 
 export class LifeRuntime {
-  private stepping = false;
-
-  constructor(
-    private readonly orenId: string,
-    private readonly ports: RuntimePorts,
+  private constructor(
+    private readonly repository: SqliteLifeRepository,
+    private readonly actor: LifeActor,
+    private readonly coordinator: EpisodeCoordinator,
+    private readonly dispatcher: EffectDispatcher,
   ) {}
 
-  enqueueWake(scheduleId: string, purpose: string): void {
-    const now = this.ports.now();
-    this.ports.inbox.enqueue({
-      eventId: `wake:${scheduleId}:${now}`,
-      orenId: this.orenId,
-      schemaVersion: 1,
-      occurredAt: now,
-      recordedAt: now,
-      source: "test",
-      causationId: null,
-      correlationId: `schedule:${scheduleId}`,
-      payload: { type: "WakeDue", scheduleId, purpose },
+  public static async createDeterministic(databasePath: string): Promise<LifeRuntime> {
+    const cognition = new ScriptedCognitionAdapter(async (frame, capabilityPort) => {
+      if (frame.trigger.kind === "foreground_user") {
+        const read = frame.capabilities.find((capability) => capability.name === "test.read");
+        const increment = frame.capabilities.find((capability) => capability.name === "test.increment");
+        if (!read || !increment) {
+          return { kind: "failed", message: "Test capabilities missing", usage: { totalTokens: 0 } };
+        }
+        await capabilityPort.invoke({
+          orenId: frame.orenId,
+          descriptor: read,
+          arguments: {},
+          stateVersion: frame.stateVersion,
+          correlationId: frame.correlationId,
+        });
+        const pending = await capabilityPort.invoke({
+          orenId: frame.orenId,
+          descriptor: increment,
+          arguments: { by: 1 },
+          stateVersion: frame.stateVersion,
+          correlationId: frame.correlationId,
+        });
+        return pending.kind === "waiting_for_effect"
+          ? { ...pending, usage: { totalTokens: 0 } }
+          : { kind: "failed", message: "Expected durable effect", usage: { totalTokens: 0 } };
+      }
+      return {
+        kind: "completed",
+        proposals: [
+          {
+            type: "AdvanceThread",
+            threadId: "counter",
+            summary: "Understand the counter lifecycle",
+          },
+          {
+            type: "ScheduleWake",
+            scheduleId: "counter-follow-up",
+            at: "2099-01-02T00:00:00.000Z",
+            purpose: "Revisit the counter",
+          },
+        ],
+        usage: { totalTokens: 0 },
+      };
+    });
+    return LifeRuntime.create(databasePath, cognition);
+  }
+
+  public static async create(
+    databasePath: string,
+    cognition: CognitionPort,
+  ): Promise<LifeRuntime> {
+    const repository = new SqliteLifeRepository(openDatabase(databasePath));
+    const registry = new ExtensionRegistry();
+    registry.register(testCounter);
+    await testCounter.activate({
+      extensionId: "test-counter",
+      reportProgress() {},
+      emitObservation() {},
+    });
+    const actor = new LifeActor(repository, randomUUID, () => new Date().toISOString());
+    const guard = new Guard();
+    const broker = new CapabilityBroker(
+      registry,
+      (effect) => actor.requestEffect(
+        effect.orenId,
+        effect.correlationId,
+        effect,
+      ).accepted,
+      (input) => guard.evaluateCapability({
+        capability: input.capability,
+        grants: repository.loadGrants(input.orenId).filter(
+          (grant) => input.grantIds.includes(grant.grantId),
+        ),
+        now: new Date().toISOString(),
+      }).allowed,
+    );
+    const conductor = new Conductor();
+    const worker = new CognitionWorker(
+      cognition,
+      conductor,
+      actor,
+      guard,
+      (job) => ({
+        state: repository.loadState(job.orenId),
+        correlationId: job.correlationId,
+        trigger: { kind: job.triggerKind, summary: job.correlationId },
+        capabilities: registry.listCapabilities(),
+        maxSteps: 8,
+      }),
+      {
+        invoke: ({ orenId, descriptor, arguments: arguments_, stateVersion, correlationId }) =>
+          broker.invoke({
+            orenId,
+            correlationId,
+            capability: descriptor.name,
+            arguments: arguments_,
+            grantIds: ["grant-1"],
+            stateVersion,
+            effectId: randomUUID(),
+          }),
+      },
+    );
+    const coordinator = new EpisodeCoordinator((job, signal) => worker.run(job, signal));
+    const dispatcher = new EffectDispatcher(repository, registry, randomUUID());
+    return new LifeRuntime(repository, actor, coordinator, dispatcher);
+  }
+
+  public async initialize(orenId: string, personId: string): Promise<void> {
+    this.repository.initialize(createInitialLifeState(orenId, personId));
+    this.repository.putGrant(orenId, {
+      grantId: "grant-1",
+      capabilityPattern: "test.*",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      revoked: false,
     });
   }
 
-  async step(): Promise<boolean> {
-    if (this.stepping) throw new Error("LifeRuntime step already running");
-    this.stepping = true;
-    try {
-      const accepted = await this.ports.actor.processOne();
-      if (!accepted) return false;
+  public async receiveUserMessage(orenId: string, personId: string, text: string): Promise<void> {
+    await this.coordinator.start(this.actor.handleUserMessage(orenId, personId, text));
+    await this.coordinator.waitForIdle(orenId);
+  }
 
-      const trigger = accepted.event.payload.type;
-      if (trigger !== "WakeDue" && trigger !== "UserMessageReceived") {
-        return true;
-      }
-
-      const triggerKind =
-        trigger === "UserMessageReceived" ? "interaction" : "autonomy";
-      const definitions = this.ports.registry.listDefinitions();
-      const { proposals } = await this.ports.conductor.deliberate(
-        accepted.state,
-        accepted.event,
-        definitions.map((definition) => ({
-          name: definition.name,
-          riskTraits: [...definition.riskTraits],
-          constraints: null,
-        })),
-      );
-      const now = this.ports.now();
-      const grants = this.ports.grants.active(this.orenId, now);
-      const compiled = proposals.flatMap((proposal, proposalIndex) => {
-        const decision = evaluateProposal(accepted.state, proposal, {
-          now,
-          triggerKind,
-          episodeStep: proposalIndex + 1,
-          grants,
-        });
-        if (!decision.accepted) return [];
-        return [
-          this.ports.compiler.compile({
-            state: accepted.state,
-            trigger: accepted.event,
-            proposal,
-            proposalIndex,
-            grantIds: decision.grantIds,
-            triggerKind,
-            now,
-          }),
-        ];
+  public async drain(): Promise<void> {
+    await this.dispatcher.runOnce();
+    for (const inbox of this.repository.claimInbox("life-runtime")) {
+      const job = this.actor.handleInbox({
+        inboxId: inbox.inboxId,
+        orenId: inbox.orenId,
+        correlationId: inbox.correlationId,
+        event: inbox.event,
       });
-      this.ports.actor.commitDecisions(
-        this.ports.compiler.merge(compiled),
-      );
-      return true;
-    } finally {
-      this.stepping = false;
+      await this.coordinator.start(job);
+      await this.coordinator.waitForIdle(inbox.orenId);
     }
   }
 
-  async dispatchEffects(): Promise<void> {
-    while (await this.ports.dispatcher.dispatchNext(this.orenId)) {
-      // The dispatcher stops when no pending outbox item remains.
-    }
+  public inspect(orenId: string): LifeState {
+    return this.repository.loadState(orenId);
   }
 
-  pollSchedules(now: string): number {
-    return this.ports.scheduler.poll(now);
-  }
-
-  state(): LifeState {
-    return structuredClone(this.ports.stateRef());
-  }
-
-  rehydrate(): LifeState {
-    return rehydrateLifeState(
-      this.orenId,
-      this.ports.personId,
-      this.ports.chronicle,
-      this.ports.snapshots,
-      reduceLifeState,
-    );
-  }
-}
-
-export function createTestRuntime(
-  options: TestRuntimeOptions,
-): LifeRuntime {
-  const database = new SqliteDatabase(":memory:");
-  applyMigrations(database);
-  const chronicle = new ChronicleStore(database);
-  const snapshots = new SnapshotStore(database);
-  const inbox = new InboxStore(database);
-  const outbox = new OutboxStore(database);
-  const operations = new OperationStore(database);
-  const schedules = new ScheduleStore(database);
-  const grants = new GrantStore(database);
-  let state = structuredClone(options.initialState);
-  snapshots.save(options.orenId, state.chronicleCursor, state);
-
-  const actor = new LifeActor({
-    loadState: () => state,
-    takeNext: () => inbox.nextPending(options.orenId),
-    commitInboxEvent: (event) => {
-      const sequence = inbox.completeAsEvent(event, chronicle);
-      state = reduceLifeState(state, sequence, event);
-      snapshots.save(options.orenId, sequence, state);
-      return { sequence, event };
-    },
-    commitDecisionBatch: (batch: DecisionBatch) => {
-      const committed = database.transaction(() => {
-        const items = batch.events.map((event) => ({
-          sequence: chronicle.append(event),
-          event,
-        }));
-        for (const effect of batch.effects) outbox.enqueue(effect);
-        for (const schedule of batch.schedules) schedules.put(schedule);
-        return items;
-      });
-      for (const item of committed
-        .filter((candidate) => candidate.sequence > state.chronicleCursor)
-        .sort((left, right) => left.sequence - right.sequence)) {
-        state = reduceLifeState(state, item.sequence, item.event);
-      }
-      snapshots.save(options.orenId, state.chronicleCursor, state);
-      return committed;
-    },
-  });
-
-  const registry = new ExtensionRegistry();
-  for (const extension of options.extensions) {
-    registry.register(extension);
-  }
-  const capabilityRuntime = new CapabilityRuntime(
-    registry,
-    options.now,
-  );
-  const dispatcher = new EffectDispatcher(
-    database,
-    outbox,
-    operations,
-    inbox,
-    capabilityRuntime,
-    options.now,
-  );
-  dispatcher.recoverInterruptedDispatches();
-  const scheduler = new Scheduler(schedules, inbox);
-  const runtime = new LifeRuntime(options.orenId, {
-    actor,
-    conductor: new Conductor(options.adapter),
-    compiler: new DecisionCompiler(),
-    grants,
-    registry,
-    dispatcher,
-    scheduler,
-    inbox,
-    chronicle,
-    snapshots,
-    stateRef: () => state,
-    now: options.now,
-    personId: options.personId,
-  });
-  return runtime;
-}
-```
-
-Export `DecisionCompiler`, `LifeRuntime`, and `createTestRuntime` from `packages/app/src/index.ts`. Phase 1 integrates capability-result events into state but does not ask the scripted adapter to deliberate again on a result; the real-model adapter plan adds resumable multi-step episodes.
-
-- [ ] **Step 5: Add a deterministic demo command**
-
-```json
-{
-  "name": "@oren/app",
-  "private": true,
-  "type": "module",
-  "exports": "./src/index.ts",
-  "dependencies": {
-    "@oren/capabilities": "*",
-    "@oren/cognition": "*",
-    "@oren/kernel": "*",
-    "@oren/storage": "*",
-    "@oren/test-counter": "*"
-  },
-  "scripts": {
-    "demo": "node --experimental-strip-types src/demo.ts"
+  public async close(): Promise<void> {
+    this.repository.close();
   }
 }
 ```
+
+Add these repository adapter methods in the same step:
+
+```ts
+public loadState(orenId: string): LifeState {
+  return this.rehydrate(orenId);
+}
+
+public commit(orenId: string, events: readonly EventEnvelope[]): void {
+  const effects = events.flatMap((event) =>
+    event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
+  this.appendAndEnqueueEffects(orenId, events, effects);
+}
+```
+
+- [ ] **Step 4: Run the deterministic and Pi-backed slices through every gate**
 
 ```ts
 // packages/app/src/demo.ts
-import { ScriptedCognitionAdapter } from "@oren/cognition";
-import { CounterExtension } from "@oren/test-counter";
-import { createInitialLifeState } from "@oren/kernel";
-import { createTestRuntime } from "./life-runtime.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { LifeRuntime } from "./life-runtime.js";
 
-const initial = createInitialLifeState("oren-demo", "person-demo");
-initial.budgets.autonomyRemaining = 3;
-const runtime = createTestRuntime({
-  orenId: "oren-demo",
-  personId: "person-demo",
-  initialState: initial,
-  adapter: new ScriptedCognitionAdapter([
-    {
-      type: "FormIntent",
-      intentId: "intent-demo",
-      reason: "verify the life-kernel slice",
-      proposedAction: "increment the test counter",
-      expiresAt: "2099-07-23T00:00:00.000Z",
-    },
-    {
-      type: "RequestCapability",
-      intentId: "intent-demo",
-      capability: "test.increment",
-      arguments: { amount: 1 },
-      riskTraits: ["reversible"],
-      commitmentId: null,
-    },
-    {
-      type: "ScheduleWake",
-      scheduleId: "schedule-next",
-      dueAt: "2026-07-24T00:00:00.000Z",
-      purpose: "continue the demo thread",
-    },
-  ]),
-  extensions: [new CounterExtension()],
-  now: () => "2026-07-23T00:00:00.000Z",
-});
+const directory = mkdtempSync(join(tmpdir(), "oren-demo-"));
+const databasePath = join(directory, "life.db");
+const first = await LifeRuntime.createDeterministic(databasePath);
+await first.initialize("oren-demo", "person-demo");
+await first.receiveUserMessage("oren-demo", "person-demo", "Think about the counter");
+await first.drain();
+const before = first.inspect("oren-demo");
+await first.close();
 
-runtime.enqueueWake("schedule-first", "start the demo");
-await runtime.step();
-await runtime.dispatchEffects();
-await runtime.step();
+const second = await LifeRuntime.createDeterministic(databasePath);
+const after = second.inspect("oren-demo");
+await second.close();
 
-const state = runtime.state();
-const rehydrated = runtime.rehydrate();
-process.stdout.write(
-  `${JSON.stringify({
-    orenId: state.orenId,
-    chronicleCursor: state.chronicleCursor,
-    pendingOperations: state.pendingOperationIds.length,
-    nextWake: state.schedules[0]?.dueAt ?? null,
-    rehydrationMatches:
-      JSON.stringify(rehydrated) === JSON.stringify(state),
-  })}\n`,
-);
-```
-
-Run: `npm install`
-
-Expected: PASS and update the workspace lockfile for the demo dependency.
-
-The demo prints one JSON object containing:
-
-```json
-{
-  "orenId": "oren-demo",
-  "chronicleCursor": 6,
-  "pendingOperations": 0,
-  "nextWake": "2026-07-24T00:00:00.000Z",
-  "rehydrationMatches": true
+if (JSON.stringify(before) !== JSON.stringify(after)) {
+  throw new Error("Replay mismatch");
 }
+console.log("Oren demo completed; replay matched");
 ```
 
-The cursor is calculated from `runtime.state()`; this scripted slice produces six accepted events.
+```ts
+// append to packages/app/src/index.ts
+export * from "./life-runtime.js";
+```
 
-- [ ] **Step 6: Document Phase 1 commands**
-
-Add this section to `README.md`:
-
-````markdown
-## Life kernel development
-
-Requirements: Node.js 24.15 or newer and npm 11.12 or newer.
+Document these commands in `README.md`:
 
 ```bash
 npm install
 npm test
 npm run typecheck
 npm run build
-npm --workspace @oren/app run demo
+node --enable-source-maps dist/packages/app/src/demo.js
 ```
 
-The demo uses a scripted cognition adapter and deterministic test extension.
-It performs no network calls and does not represent the production Oren
-experience; it verifies event replay, proposal guarding, extension dispatch,
-receipts, and scheduled wake recovery.
-````
-
-- [ ] **Step 7: Run the vertical-slice checks**
-
-Run: `npm test -- packages/app/test/life-runtime.test.ts`
-
-Expected: PASS; the life slice completes with no pending operation and exact rehydration.
-
-Run: `npm --workspace @oren/app run demo`
-
-Expected: PASS and print JSON with `"rehydrationMatches": true`.
-
-- [ ] **Step 8: Run the complete Phase 1 verification**
-
-Run: `npm test`
-
-Expected: PASS with all workspace tests passing and zero failed tests.
-
-Run: `npm run typecheck`
-
-Expected: PASS with no TypeScript diagnostics.
-
-Run: `npm run build`
-
-Expected: PASS and emit JavaScript and declarations under `dist/`.
-
-- [ ] **Step 9: Commit**
+Run:
 
 ```bash
-git add package-lock.json packages/app README.md
-git commit -m "feat: complete runnable Oren life-kernel slice"
+npm test
+npm run typecheck
+npm run build
+node --enable-source-maps dist/packages/app/src/demo.js
+```
+
+Expected:
+
+```text
+Test Files  all passed
+TypeScript  no errors
+Build       exit 0
+Oren demo   completed; replay matched
+```
+
+Then verify dependency boundaries:
+
+```bash
+rg -n '@earendil-works/pi|from "typebox' packages --glob '*.ts'
+```
+
+Expected: every match is under `packages/pi-cognition`.
+
+- [ ] **Step 5: Commit the complete Phase 1 slice**
+
+```bash
+git add packages/app packages/storage README.md
+git commit -m "feat: complete restartable Oren life slice"
 ```
 
 ---
 
 ## Phase 1 Completion Checklist
 
-- [ ] One Oren’s state is rebuilt from snapshot plus ordered events.
-- [ ] Duplicate inbox events and extension receipts do not apply twice.
-- [ ] Only `LifeActor` commits accepted state-changing events.
-- [ ] The scripted cognition adapter receives a bounded `LifeFrame`.
-- [ ] Autonomous budget exhaustion does not affect foreground interaction.
-- [ ] Accepted autonomous capability use emits a replayable budget-consumption event.
-- [ ] Commitment budgets and Grants remain independent.
-- [ ] Extensions receive only typed invocations and cannot mutate `LifeState`.
-- [ ] Durable outbox recovery prevents duplicate effects.
-- [ ] The scheduler emits one stable wake across repeated polling.
-- [ ] End-to-end rehydration equals the current in-memory state.
-- [ ] All tests, type checks, build, and demo commands pass.
+- [ ] `LifeActor` is the only state writer.
+- [ ] Model and extension calls occur outside actor transactions.
+- [ ] Every cognition result includes and validates `baseStateVersion`.
+- [ ] Foreground input preempts idle cognition.
+- [ ] Foreground interaction does not consume `autonomyBudget`.
+- [ ] Immediate tools satisfy all five eligibility conditions.
+- [ ] Persistent tools create an Effect and end the Pi episode.
+- [ ] Effect completion triggers a new episode through Inbox correlation.
+- [ ] No Pi internal transcript or active stream is required for recovery.
+- [ ] `effectId` is the extension idempotency key.
+- [ ] Expired dispatch leases reconcile or become `uncertain`; they are not blindly resent.
+- [ ] Duplicate receipts do not apply twice.
+- [ ] Oren extensions cannot write `LifeState`, access SQLite, or access model credentials.
+- [ ] Only `packages/pi-cognition` imports Pi or TypeBox.
+- [ ] Pi dependencies are pinned exactly to `0.75.5`.
+- [ ] Fake streams cover Pi adapter behavior without network access.
+- [ ] Empty-database startup, effect suspension, result resumption, shutdown, restart, and replay pass end to end.
+- [ ] `npm test` passes.
+- [ ] `npm run typecheck` passes.
+- [ ] `npm run build` passes.
