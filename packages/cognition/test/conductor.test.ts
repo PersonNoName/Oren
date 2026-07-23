@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createInitialLifeState } from "@oren/kernel";
+import {
+  createInitialLifeState,
+  type CapabilityDescriptor,
+  type CapabilityTrait,
+  type JsonObject,
+} from "@oren/kernel";
 import {
   Conductor,
   ScriptedCognitionAdapter,
@@ -94,6 +99,82 @@ describe("Conductor", () => {
       relationship: { primaryPersonId: "person-1", contextRef: "context-1" },
     });
     expect(frame).not.toHaveProperty("state");
+  });
+
+  it("snapshots capability descriptors independently from their mutable source", () => {
+    const descriptor = {
+      extensionId: "test",
+      name: "test.read",
+      description: "Read a deterministic value",
+      inputSchema: {
+        type: "object",
+        properties: {
+          request: { enum: ["original", { nested: [true, null] }] },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          result: { items: [{ type: "number" }] },
+        },
+      },
+      permissionRequirements: ["permission.original"],
+      traits: ["read_only"] as CapabilityTrait[],
+      cancellable: true,
+      timeoutMs: 1000,
+    } as unknown as CapabilityDescriptor;
+    const mutableDescriptor = descriptor as {
+      extensionId: string;
+      name: string;
+      description: string;
+      inputSchema: JsonObject & { properties: { request: { enum: unknown[] } } };
+      outputSchema: JsonObject & { properties: { result: { items: Array<{ type: string }> } } };
+      permissionRequirements: string[];
+      traits: CapabilityTrait[];
+      cancellable: boolean;
+      timeoutMs: number;
+    };
+    const frame = new Conductor().createFrame({
+      state: createInitialLifeState("oren-1", "person-1"),
+      correlationId: "corr-1",
+      trigger: { kind: "foreground_user", summary: "hello" },
+      capabilities: [descriptor],
+      maxSteps: 8,
+    });
+
+    mutableDescriptor.extensionId = "changed-extension";
+    mutableDescriptor.name = "changed.name";
+    mutableDescriptor.description = "Changed description";
+    mutableDescriptor.inputSchema.properties.request.enum[1] = "changed";
+    mutableDescriptor.outputSchema.properties.result.items[0]!.type = "string";
+    mutableDescriptor.permissionRequirements[0] = "permission.changed";
+    mutableDescriptor.traits[0] = "destructive";
+    mutableDescriptor.cancellable = false;
+    mutableDescriptor.timeoutMs = 1;
+
+    expect(frame.capabilities).toEqual([
+      {
+        extensionId: "test",
+        name: "test.read",
+        description: "Read a deterministic value",
+        inputSchema: {
+          type: "object",
+          properties: {
+            request: { enum: ["original", { nested: [true, null] }] },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            result: { items: [{ type: "number" }] },
+          },
+        },
+        permissionRequirements: ["permission.original"],
+        traits: ["read_only"],
+        cancellable: true,
+        timeoutMs: 1000,
+      },
+    ]);
   });
 
   it("returns an aborted outcome without calling a pre-aborted script", async () => {

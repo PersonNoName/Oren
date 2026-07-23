@@ -1,4 +1,10 @@
-import type { CapabilityDescriptor, LifeState, TriggerKind } from "@oren/kernel";
+import type {
+  CapabilityDescriptor,
+  JsonObject,
+  JsonValue,
+  LifeState,
+  TriggerKind,
+} from "@oren/kernel";
 import type { LifeFrame } from "./types.js";
 
 export interface CreateFrameInput {
@@ -30,7 +36,42 @@ export function createLifeFrame(input: CreateFrameInput): LifeFrame {
       kind: input.trigger.kind,
       summary: input.trigger.summary,
     },
-    capabilities: input.capabilities.slice(),
+    capabilities: input.capabilities.map(snapshotCapabilityDescriptor),
     maxSteps: input.maxSteps,
   };
+}
+
+function snapshotCapabilityDescriptor(
+  descriptor: CapabilityDescriptor,
+): CapabilityDescriptor {
+  return {
+    extensionId: descriptor.extensionId,
+    name: descriptor.name,
+    description: descriptor.description,
+    inputSchema: snapshotJsonObject(descriptor.inputSchema),
+    outputSchema: snapshotJsonObject(descriptor.outputSchema),
+    permissionRequirements: [...descriptor.permissionRequirements],
+    traits: [...descriptor.traits],
+    cancellable: descriptor.cancellable,
+    timeoutMs: descriptor.timeoutMs,
+  };
+}
+
+function snapshotJsonObject(value: JsonObject): JsonObject {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nestedValue]) => [
+      key,
+      snapshotJsonValue(nestedValue),
+    ]),
+  );
+}
+
+function snapshotJsonValue(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) {
+    return value.map(snapshotJsonValue);
+  }
+
+  return value !== null && typeof value === "object"
+    ? snapshotJsonObject(value)
+    : value;
 }
