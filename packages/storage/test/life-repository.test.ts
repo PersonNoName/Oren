@@ -9,6 +9,35 @@ import {
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
 describe("SqliteLifeRepository", () => {
+  it("consumes an autonomy event once with a durable state-version compare-and-swap", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize({
+      ...createInitialLifeState("oren-1", "person-1"),
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    const consumed = event("event-1", "oren-1", {
+      type: "AutonomyConsumed",
+      episodeId: "episode-1",
+      baseStateVersion: 0,
+      amount: 3,
+    });
+
+    expect(repo.commitIfVersion("oren-1", 0, [consumed])).toBe(true);
+    expect(repo.commitIfVersion("oren-1", 0, [{
+      ...consumed,
+      eventId: "event-2",
+    }])).toBe(false);
+    expect(repo.rehydrate("oren-1")).toMatchObject({
+      version: 1,
+      budgets: { autonomyRemaining: 2 },
+    });
+  });
+
   it("commits an event and outbox effect atomically", () => {
     const db = openDatabase(":memory:");
     const repo = new SqliteLifeRepository(db);

@@ -6,6 +6,14 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
   const base = { ...state, version: nextVersion, chronicleCursor: state.chronicleCursor + 1 };
 
   switch (event.payload.type) {
+    case "AutonomyConsumed":
+      return {
+        ...base,
+        budgets: {
+          ...state.budgets,
+          autonomyRemaining: state.budgets.autonomyRemaining - event.payload.amount,
+        },
+      };
     case "ThreadAdvanced": {
       const activeThreadIds = state.attention.activeThreadIds.includes(event.payload.threadId)
         ? state.attention.activeThreadIds

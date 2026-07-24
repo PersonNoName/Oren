@@ -8,12 +8,95 @@ import {
 } from "../src/index.js";
 
 describe("LifeActor", () => {
+  it.each([
+    {
+      event: { type: "WakeDue", scheduleId: "schedule-1", purpose: "reflect" } as const,
+      triggerKind: "scheduled_wake" as const,
+    },
+    {
+      event: {
+        type: "EffectCompleted",
+        effectId: "effect-1",
+        receipt: { transactionId: "tx-1" },
+      } as const,
+      triggerKind: "effect_result" as const,
+    },
+  ])("maps $event.type inbox work to $triggerKind cognition", ({ event, triggerKind }) => {
+    const events: EventEnvelope[] = [];
+    const repository: LifeRepositoryPort = {
+      loadState: () => createInitialLifeState("oren-1", "person-1"),
+      commit: () => undefined,
+      commitIfVersion: () => true,
+      commitInbox: (_inboxId, _orenId, _owner, _token, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
+    };
+    let id = 0;
+    const actor = new LifeActor(
+      repository,
+      () => `id-${++id}`,
+      () => "2026-07-24T00:00:00.000Z",
+    );
+
+    const result = actor.handleInbox({
+      inboxId: "inbox-1",
+      orenId: "oren-1",
+      correlationId: "corr-1",
+      event,
+      leaseOwner: "worker-1",
+      leaseToken: "lease-1",
+    });
+
+    expect(result).toEqual({
+      orenId: "oren-1",
+      episodeId: "id-1",
+      baseStateVersion: 2,
+      triggerKind,
+      correlationId: "corr-1",
+    });
+    expect(events.map((accepted) => accepted.payload.type)).toEqual([
+      event.type,
+      "CognitionRequested",
+    ]);
+  });
+
+  it("does not return a CognitionJob when the inbox lease commit loses", () => {
+    const repository: LifeRepositoryPort = {
+      loadState: () => createInitialLifeState("oren-1", "person-1"),
+      commit: () => undefined,
+      commitIfVersion: () => true,
+      commitInbox: () => false,
+    };
+    const actor = new LifeActor(
+      repository,
+      () => "id",
+      () => "2026-07-24T00:00:00.000Z",
+    );
+
+    expect(actor.handleInbox({
+      inboxId: "inbox-1",
+      orenId: "oren-1",
+      correlationId: "corr-1",
+      event: { type: "WakeDue", scheduleId: "schedule-1", purpose: "reflect" },
+      leaseOwner: "worker-1",
+      leaseToken: "stale",
+    })).toBeUndefined();
+  });
+
   it("persists CognitionRequested and returns a job immediately", () => {
     const events: EventEnvelope[] = [];
     const repository: LifeRepositoryPort = {
       loadState: () => createInitialLifeState("oren-1", "person-1"),
       commit: (_orenId, accepted) => events.push(...accepted),
-      commitInbox: (_inboxId, _orenId, accepted) => events.push(...accepted),
+      commitIfVersion: (_orenId, _expectedVersion, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
+      commitInbox: (_inboxId, _orenId, _leaseOwner, _leaseToken, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
     };
     let id = 0;
     const actor = new LifeActor(
@@ -46,7 +129,14 @@ describe("LifeActor", () => {
     const repository: LifeRepositoryPort = {
       loadState: () => state,
       commit: (_orenId, accepted) => events.push(...accepted),
-      commitInbox: (_inboxId, _orenId, accepted) => events.push(...accepted),
+      commitIfVersion: (_orenId, _expectedVersion, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
+      commitInbox: (_inboxId, _orenId, _leaseOwner, _leaseToken, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
     };
     let id = 0;
     const actor = new LifeActor(repository, () => `event-${++id}`, () => "2026-07-23T00:00:00.000Z");
@@ -83,6 +173,7 @@ describe("LifeActor", () => {
     const repository: LifeRepositoryPort = {
       loadState: () => state,
       commit: () => { throw new Error("stale result must not commit"); },
+      commitIfVersion: () => { throw new Error("stale result must not commit"); },
       commitInbox: () => { throw new Error("stale result must not commit"); },
     };
     const actor = new LifeActor(repository, () => "id", () => "2026-07-23T00:00:00.000Z");
@@ -103,6 +194,7 @@ describe("LifeActor", () => {
     const repository: LifeRepositoryPort = {
       loadState: () => ({ ...createInitialLifeState("oren-1", "person-1"), version: 3 }),
       commit: () => { throw new Error("stale effect must not commit"); },
+      commitIfVersion: () => { throw new Error("stale effect must not commit"); },
       commitInbox: () => { throw new Error("stale effect must not commit"); },
     };
     const actor = new LifeActor(repository, () => "id", () => "2026-07-23T00:00:00.000Z");
@@ -126,7 +218,14 @@ describe("LifeActor", () => {
     const repository: LifeRepositoryPort = {
       loadState: () => ({ ...createInitialLifeState("oren-1", "person-1"), version: 2 }),
       commit: (_orenId, accepted) => events.push(...accepted),
-      commitInbox: (_inboxId, _orenId, accepted) => events.push(...accepted),
+      commitIfVersion: (_orenId, _expectedVersion, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
+      commitInbox: (_inboxId, _orenId, _leaseOwner, _leaseToken, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
     };
     const actor = new LifeActor(repository, () => "event-1", () => "2026-07-23T00:00:00.000Z");
 
@@ -147,7 +246,14 @@ describe("LifeActor", () => {
     const repository: LifeRepositoryPort = {
       loadState: () => createInitialLifeState("oren-1", "person-1"),
       commit: (_orenId, accepted) => events.push(...accepted),
-      commitInbox: (_inboxId, _orenId, accepted) => events.push(...accepted),
+      commitIfVersion: (_orenId, _expectedVersion, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
+      commitInbox: (_inboxId, _orenId, _leaseOwner, _leaseToken, accepted) => {
+        events.push(...accepted);
+        return true;
+      },
     };
     let id = 0;
     const actor = new LifeActor(repository, () => `event-${++id}`, () => "2026-07-23T00:00:00.000Z");

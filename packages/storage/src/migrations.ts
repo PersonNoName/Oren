@@ -205,8 +205,15 @@ function createNonEffectTables(db: DatabaseSync): void {
       available_at TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       lease_owner TEXT,
+      lease_token TEXT,
       lease_until TEXT,
       processed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS inbox_quarantine (
+      inbox_id TEXT PRIMARY KEY REFERENCES inbox(inbox_id),
+      reason TEXT NOT NULL,
+      quarantined_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS grants (
@@ -224,6 +231,12 @@ function createNonEffectTables(db: DatabaseSync): void {
       delivered_at TEXT
     );
   `);
+  const inboxColumns = new Set(
+    db.prepare("PRAGMA table_info(inbox)").all().map((row) => String(row.name)),
+  );
+  if (!inboxColumns.has("lease_token")) {
+    db.exec("ALTER TABLE inbox ADD COLUMN lease_token TEXT");
+  }
 }
 
 function createOrEvolveQuarantine(db: DatabaseSync): void {

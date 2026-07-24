@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { randomUUID } from "node:crypto";
 import {
   canonicalizeJson,
   reduceLifeState,
@@ -9,6 +10,7 @@ import {
   type JsonValue,
   type LifeState,
   type CoreEvent,
+  type InboxCoreEvent,
 } from "@oren/kernel";
 
 interface OutboxRow {
@@ -17,6 +19,15 @@ interface OutboxRow {
   readonly capability: string;
   readonly effect: Effect;
   readonly attempts: number;
+}
+
+export interface InboxItem {
+  readonly inboxId: string;
+  readonly orenId: string;
+  readonly correlationId: string;
+  readonly event: InboxCoreEvent;
+  readonly leaseOwner: string;
+  readonly leaseToken: string;
 }
 
 type TerminalEffectEvent =
@@ -124,6 +135,39 @@ function canonicalizeTerminalEffectEvent(value: unknown): TerminalEffectEvent | 
   return undefined;
 }
 
+function canonicalizeInboxEvent(value: unknown): InboxCoreEvent | undefined {
+  const terminal = canonicalizeTerminalEffectEvent(value);
+  if (terminal) return terminal;
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const event = canonical.value;
+  return event.type === "WakeDue"
+    && hasExactKeys(event, ["type", "scheduleId", "purpose"])
+    && typeof event.scheduleId === "string"
+    && typeof event.purpose === "string"
+    ? event as unknown as InboxCoreEvent
+    : undefined;
+}
+
+function canonicalizeInboxPayload(value: unknown): {
+  readonly correlationId: string;
+  readonly event: InboxCoreEvent;
+} | undefined {
+  const canonical = canonicalizeJson(value);
+  if (
+    !canonical.ok
+    || !isRecord(canonical.value)
+    || !hasExactKeys(canonical.value, ["correlationId", "event"])
+    || typeof canonical.value.correlationId !== "string"
+  ) {
+    return undefined;
+  }
+  const event = canonicalizeInboxEvent(canonical.value.event);
+  return event
+    ? { correlationId: canonical.value.correlationId, event }
+    : undefined;
+}
+
 function semanticJsonEqual(left: JsonValue, right: JsonValue): boolean {
   if (left === right) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
@@ -150,6 +194,7 @@ export class SqliteLifeRepository {
   public constructor(
     private readonly db: DatabaseSync,
     private readonly now: () => string = () => new Date().toISOString(),
+    private readonly nextLeaseToken: () => string = randomUUID,
   ) {}
 
   public close(): void {
@@ -215,6 +260,39 @@ export class SqliteLifeRepository {
     );
   }
 
+  public loadState(orenId: string): LifeState {
+    return this.rehydrate(orenId);
+  }
+
+  public commit(orenId: string, events: readonly EventEnvelope[]): void {
+    const effects = events.flatMap((event) =>
+      event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
+    this.appendAndEnqueueEffects(orenId, events, effects);
+  }
+
+  public commitIfVersion(
+    orenId: string,
+    expectedVersion: number,
+    events: readonly EventEnvelope[],
+  ): boolean {
+    const effects = events.flatMap((event) =>
+      event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
+    this.validateOrenIdentities(orenId, events, effects);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (this.rehydrate(orenId).version !== expectedVersion) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.insertEventsAndSideTables(orenId, events, effects);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   public appendAndEnqueueEffects(
     orenId: string,
     events: readonly EventEnvelope[],
@@ -223,40 +301,213 @@ export class SqliteLifeRepository {
     this.validateOrenIdentities(orenId, events, effects);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const insertEvent = this.db.prepare(`
-        INSERT INTO events(event_id, oren_id, recorded_at, envelope_json) VALUES (?, ?, ?, ?)
-      `);
-      for (const event of events) {
-        insertEvent.run(event.eventId, orenId, event.recordedAt, JSON.stringify(event));
-        if (event.payload.type === "WakeScheduled") {
-          this.db.prepare(`
-            INSERT INTO schedules(schedule_id, oren_id, due_at, purpose)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(schedule_id) DO UPDATE SET
-              due_at = excluded.due_at,
-              purpose = excluded.purpose,
-              delivered_at = NULL
-          `).run(
-            event.payload.scheduleId,
-            orenId,
-            event.payload.at,
-            event.payload.purpose,
+      this.insertEventsAndSideTables(orenId, events, effects);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private insertEventsAndSideTables(
+    orenId: string,
+    events: readonly EventEnvelope[],
+    effects: readonly Effect[],
+  ): void {
+    const insertEvent = this.db.prepare(`
+      INSERT INTO events(event_id, oren_id, recorded_at, envelope_json) VALUES (?, ?, ?, ?)
+    `);
+    for (const event of events) {
+      insertEvent.run(event.eventId, orenId, event.recordedAt, JSON.stringify(event));
+      if (event.payload.type === "WakeScheduled") {
+        const existing = this.db.prepare(`
+          SELECT oren_id FROM schedules WHERE schedule_id = ?
+        `).get(event.payload.scheduleId);
+        if (existing && String(existing.oren_id) !== orenId) {
+          throw new Error(
+            `Schedule ${event.payload.scheduleId} already belongs to ${String(existing.oren_id)}`,
           );
         }
+        const scheduled = this.db.prepare(`
+          INSERT INTO schedules(schedule_id, oren_id, due_at, purpose)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(schedule_id) DO UPDATE SET
+            due_at = excluded.due_at,
+            purpose = excluded.purpose,
+            delivered_at = NULL
+          WHERE schedules.oren_id = excluded.oren_id
+        `).run(
+          event.payload.scheduleId,
+          orenId,
+          event.payload.at,
+          event.payload.purpose,
+        );
+        if (Number(scheduled.changes) !== 1) {
+          throw new Error(`Schedule ${event.payload.scheduleId} did not transition`);
+        }
       }
-      const insertEffect = this.db.prepare(`
-        INSERT INTO outbox(effect_id, oren_id, capability, effect_json, status)
-        VALUES (?, ?, ?, ?, 'pending')
+    }
+    const insertEffect = this.db.prepare(`
+      INSERT INTO outbox(effect_id, oren_id, capability, effect_json, status)
+      VALUES (?, ?, ?, ?, 'pending')
+    `);
+    const insertOperation = this.db.prepare(`
+      INSERT INTO operations(effect_id, oren_id, capability, status)
+      VALUES (?, ?, ?, 'pending')
+    `);
+    for (const effect of effects) {
+      insertEffect.run(effect.effectId, orenId, effect.capability, JSON.stringify(effect));
+      insertOperation.run(effect.effectId, orenId, effect.capability);
+    }
+  }
+
+  public claimInbox(
+    worker: string,
+    now = this.now(),
+    limit = 32,
+  ): InboxItem[] {
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+      throw new Error("Inbox claim limit must be a nonnegative safe integer");
+    }
+    if (limit === 0) return [];
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs)) throw new Error("Inbox claim time must be a valid timestamp");
+    const leaseUntil = new Date(nowMs + 60_000).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare(`
+        SELECT inbox_id, oren_id, payload_json
+        FROM inbox
+        WHERE processed_at IS NULL
+          AND available_at <= ?
+          AND (lease_until IS NULL OR lease_until <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM inbox_quarantine
+            WHERE inbox_quarantine.inbox_id = inbox.inbox_id
+          )
+        ORDER BY priority DESC, rowid
+      `).all(now, now);
+      const quarantine = this.db.prepare(`
+        INSERT OR IGNORE INTO inbox_quarantine(inbox_id, reason, quarantined_at)
+        VALUES (?, ?, ?)
       `);
-      const insertOperation = this.db.prepare(`
-        INSERT INTO operations(effect_id, oren_id, capability, status)
-        VALUES (?, ?, ?, 'pending')
+      const lease = this.db.prepare(`
+        UPDATE inbox
+        SET lease_owner = ?, lease_token = ?, lease_until = ?
+        WHERE inbox_id = ? AND processed_at IS NULL
+          AND (lease_until IS NULL OR lease_until <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM inbox_quarantine
+            WHERE inbox_quarantine.inbox_id = inbox.inbox_id
+          )
       `);
-      for (const effect of effects) {
-        insertEffect.run(effect.effectId, orenId, effect.capability, JSON.stringify(effect));
-        insertOperation.run(effect.effectId, orenId, effect.capability);
+      const claimed: InboxItem[] = [];
+      for (const row of rows) {
+        if (claimed.length >= limit) break;
+        const inboxId = String(row.inbox_id);
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(String(row.payload_json));
+        } catch {
+          quarantine.run(inboxId, "inbox payload_json is not valid JSON", now);
+          continue;
+        }
+        const payload = canonicalizeInboxPayload(parsed);
+        if (!payload) {
+          quarantine.run(inboxId, "inbox payload_json is not a supported payload", now);
+          continue;
+        }
+        const leaseToken = this.nextLeaseToken();
+        const leased = lease.run(worker, leaseToken, leaseUntil, inboxId, now);
+        if (Number(leased.changes) !== 1) continue;
+        claimed.push({
+          inboxId,
+          orenId: String(row.oren_id),
+          correlationId: payload.correlationId,
+          event: payload.event,
+          leaseOwner: worker,
+          leaseToken,
+        });
       }
       this.db.exec("COMMIT");
+      return claimed;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public commitInbox(
+    inboxId: string,
+    orenId: string,
+    leaseOwner: string,
+    leaseToken: string,
+    events: readonly EventEnvelope[],
+    now = this.now(),
+  ): boolean {
+    this.validateOrenIdentities(orenId, events, []);
+    if (events.length === 0) throw new Error("Inbox commit requires at least one event");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`
+        SELECT oren_id, payload_json
+        FROM inbox WHERE inbox_id = ?
+      `).get(inboxId);
+      if (!row) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (String(row.oren_id) !== orenId) {
+        throw new Error(`Inbox ${inboxId} belongs to another Oren`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(row.payload_json));
+      } catch {
+        throw new Error(`Inbox ${inboxId} payload is corrupt`);
+      }
+      const payload = canonicalizeInboxPayload(parsed);
+      const accepted = events[0]!;
+      const canonicalAccepted = canonicalizeJson(accepted.payload);
+      const canonicalDurableEvent = payload
+        ? canonicalizeJson(payload.event)
+        : { ok: false as const, reason: "missing payload" };
+      if (
+        !payload
+        || accepted.correlationId !== payload.correlationId
+        || !canonicalAccepted.ok
+        || !canonicalDurableEvent.ok
+        || !semanticJsonEqual(canonicalAccepted.value, canonicalDurableEvent.value)
+      ) {
+        throw new Error(`Inbox ${inboxId} event identity does not match its durable payload`);
+      }
+      const requestedIndex = events.findIndex(
+        (event) => event.payload.type === "CognitionRequested",
+      );
+      const requested = requestedIndex >= 0 ? events[requestedIndex] : undefined;
+      if (
+        requested?.payload.type === "CognitionRequested"
+        && requested.payload.baseStateVersion
+          !== this.rehydrate(orenId).version + requestedIndex + 1
+      ) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const committed = this.db.prepare(`
+        UPDATE inbox
+        SET processed_at = ?, lease_owner = NULL, lease_token = NULL, lease_until = NULL
+        WHERE inbox_id = ? AND oren_id = ? AND processed_at IS NULL
+          AND lease_owner = ? AND lease_token = ? AND lease_until > ?
+      `).run(now, inboxId, orenId, leaseOwner, leaseToken, now);
+      if (Number(committed.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const effects = events.flatMap((event) =>
+        event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
+      this.insertEventsAndSideTables(orenId, events, effects);
+      this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -269,6 +520,21 @@ export class SqliteLifeRepository {
     effects: readonly Effect[],
   ): void {
     for (const event of events) {
+      if (
+        typeof event.eventId !== "string"
+        || typeof event.orenId !== "string"
+        || event.schemaVersion !== 1
+        || typeof event.occurredAt !== "string"
+        || typeof event.recordedAt !== "string"
+        || typeof event.source !== "string"
+        || (event.causationId !== null && typeof event.causationId !== "string")
+        || typeof event.correlationId !== "string"
+        || typeof event.payload !== "object"
+        || event.payload === null
+        || typeof event.payload.type !== "string"
+      ) {
+        throw new Error("Invalid event envelope identity");
+      }
       if (event.orenId !== orenId) {
         throw new Error(`Event ${event.eventId} orenId does not match ${orenId}`);
       }
@@ -299,6 +565,80 @@ export class SqliteLifeRepository {
       stateVersion: 0,
     };
     this.appendAndEnqueueEffects(orenId, [], [effect]);
+  }
+
+  public claimDue(now: string, limit: number): Array<{
+    readonly scheduleId: string;
+    readonly orenId: string;
+    readonly purpose: string;
+  }> {
+    if (!Number.isSafeInteger(limit) || limit < 0) {
+      throw new Error("Schedule claim limit must be a nonnegative safe integer");
+    }
+    if (limit === 0) return [];
+    return this.db.prepare(`
+      SELECT schedule_id, oren_id, purpose
+      FROM schedules
+      WHERE due_at <= ? AND delivered_at IS NULL
+      ORDER BY due_at, schedule_id
+      LIMIT ?
+    `).all(now, limit).map((row) => ({
+      scheduleId: String(row.schedule_id),
+      orenId: String(row.oren_id),
+      purpose: String(row.purpose),
+    }));
+  }
+
+  public deliverWake(
+    schedule: string | { readonly scheduleId: string },
+    now = this.now(),
+  ): boolean {
+    const scheduleId = typeof schedule === "string" ? schedule : schedule.scheduleId;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`
+        SELECT oren_id, due_at, purpose, delivered_at
+        FROM schedules WHERE schedule_id = ?
+      `).get(scheduleId);
+      if (
+        !row
+        || row.delivered_at !== null
+        || String(row.due_at) > now
+      ) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const orenId = String(row.oren_id);
+      const dueAt = String(row.due_at);
+      const purpose = String(row.purpose);
+      const delivered = this.db.prepare(`
+        UPDATE schedules
+        SET delivered_at = ?
+        WHERE schedule_id = ? AND oren_id = ? AND due_at = ? AND purpose = ?
+          AND delivered_at IS NULL AND due_at <= ?
+      `).run(now, scheduleId, orenId, dueAt, purpose, now);
+      if (Number(delivered.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db.prepare(`
+        INSERT INTO inbox(inbox_id, oren_id, priority, available_at, payload_json)
+        VALUES (?, ?, 2, ?, ?)
+      `).run(
+        `wake:${scheduleId}`,
+        orenId,
+        now,
+        JSON.stringify({
+          correlationId: `schedule:${scheduleId}`,
+          event: { type: "WakeDue", scheduleId, purpose },
+        }),
+      );
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   public claimOutbox(worker: string, limit: number, now = new Date().toISOString()): OutboxRow[] {
