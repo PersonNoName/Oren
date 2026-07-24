@@ -10,7 +10,10 @@ const OUTBOX_COLUMNS = `
   oren_id TEXT NOT NULL,
   capability TEXT NOT NULL,
   effect_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+  status TEXT NOT NULL CHECK(
+    quarantined = 1
+    OR status IN ('pending','dispatched','completed','failed','uncertain','cancelled')
+  ),
   lease_owner TEXT,
   lease_until TEXT,
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -37,7 +40,10 @@ const OPERATIONS_COLUMNS = `
   effect_id TEXT PRIMARY KEY,
   oren_id TEXT NOT NULL,
   capability TEXT NOT NULL,
-  status TEXT NOT NULL CHECK(status IN ('pending','dispatched','completed','failed','uncertain','cancelled')),
+  status TEXT NOT NULL CHECK(
+    quarantined = 1
+    OR status IN ('pending','dispatched','completed','failed','uncertain','cancelled')
+  ),
   attempts INTEGER NOT NULL DEFAULT 0,
   receipt_json TEXT,
   quarantined INTEGER NOT NULL DEFAULT 0 CHECK(
@@ -119,6 +125,25 @@ const CONSISTENT_PAIR = `
 interface SchemaObject {
   readonly sql: string;
 }
+
+const LEGACY_OUTBOX_TEXT_COLUMNS = [
+  "effect_id",
+  "oren_id",
+  "capability",
+  "effect_json",
+  "status",
+  "lease_owner",
+  "lease_until",
+  "receipt_json",
+] as const;
+
+const LEGACY_OPERATION_TEXT_COLUMNS = [
+  "effect_id",
+  "oren_id",
+  "capability",
+  "status",
+  "receipt_json",
+] as const;
 
 export function migrate(db: DatabaseSync): void {
   const rebuildEffects = effectTablesNeedRebuild(db);
@@ -390,8 +415,32 @@ function classifyAndQuarantineInvalidLegacyRows(db: DatabaseSync): void {
       reason TEXT NOT NULL,
       PRIMARY KEY(source_table, source_rowid)
     ) WITHOUT ROWID;
+  `);
+  classifyInvalidUtf8LegacyText(db);
+  db.exec(`
+    INSERT OR IGNORE INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    SELECT
+      'operations',
+      p.rowid,
+      'legacy operation is paired with an outbox row containing invalid UTF-8'
+    FROM operations AS p
+    JOIN outbox AS o ON o.effect_id = p.effect_id
+    JOIN __task8_invalid_effect_rows AS invalid
+      ON invalid.source_table = 'outbox'
+      AND invalid.source_rowid = o.rowid;
 
-    INSERT INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    INSERT OR IGNORE INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    SELECT
+      'outbox',
+      o.rowid,
+      'legacy outbox is paired with an operation row containing invalid UTF-8'
+    FROM outbox AS o
+    JOIN operations AS p ON p.effect_id = o.effect_id
+    JOIN __task8_invalid_effect_rows AS invalid
+      ON invalid.source_table = 'operations'
+      AND invalid.source_rowid = p.rowid;
+
+    INSERT OR IGNORE INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
     SELECT
       'outbox',
       o.rowid,
@@ -418,7 +467,7 @@ function classifyAndQuarantineInvalidLegacyRows(db: DatabaseSync): void {
       OR NOT (${VALID_OPERATION_STATE})
       OR NOT (${CONSISTENT_PAIR});
 
-    INSERT INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    INSERT OR IGNORE INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
     SELECT
       'operations',
       p.rowid,
@@ -508,6 +557,57 @@ function classifyAndQuarantineInvalidLegacyRows(db: DatabaseSync): void {
     JOIN operations AS p ON invalid.source_table = 'operations'
       AND invalid.source_rowid = p.rowid;
   `);
+}
+
+function classifyInvalidUtf8LegacyText(db: DatabaseSync): void {
+  classifyInvalidUtf8TableRows(db, "outbox", LEGACY_OUTBOX_TEXT_COLUMNS);
+  classifyInvalidUtf8TableRows(db, "operations", LEGACY_OPERATION_TEXT_COLUMNS);
+}
+
+function classifyInvalidUtf8TableRows(
+  db: DatabaseSync,
+  table: "outbox" | "operations",
+  columns: readonly string[],
+): void {
+  const projections = columns.flatMap((column) => [
+    `typeof(${column}) AS ${column}_type`,
+    `CASE WHEN typeof(${column}) = 'text' THEN CAST(${column} AS BLOB) END AS ${column}_bytes`,
+  ]);
+  const statement = db.prepare(`
+    SELECT rowid, ${projections.join(", ")}
+    FROM ${table}
+    ORDER BY rowid
+  `);
+  statement.setReadBigInts(true);
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO __task8_invalid_effect_rows(source_table, source_rowid, reason)
+    VALUES (?, ?, ?)
+  `);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  for (const row of statement.iterate()) {
+    if (typeof row.rowid !== "bigint") {
+      throw new Error(`Could not inspect legacy ${table} rowid`);
+    }
+    const invalidColumns = columns.filter((column) => {
+      if (row[`${column}_type`] !== "text") return false;
+      const bytes = row[`${column}_bytes`];
+      if (!(bytes instanceof Uint8Array)) {
+        throw new Error(`Could not inspect raw legacy ${table}.${column} bytes`);
+      }
+      try {
+        decoder.decode(bytes);
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (invalidColumns.length === 0) continue;
+    insert.run(
+      table,
+      row.rowid,
+      `legacy ${table} has invalid UTF-8 in ${invalidColumns.join(", ")}`,
+    );
+  }
 }
 
 function legacyRowEvidenceSql(alias: string, columns: readonly string[]): string {
@@ -600,7 +700,7 @@ function tableSql(db: DatabaseSync, table: string): string | undefined {
 function hasRequiredEffectConstraints(sql: string): boolean {
   const normalized = sql.replaceAll(/\s+/g, " ").toLowerCase();
   return normalized.includes(
-    "status text not null check(status in ('pending','dispatched','completed','failed','uncertain','cancelled'))",
+    "status text not null check( quarantined = 1 or status in ('pending','dispatched','completed','failed','uncertain','cancelled') )",
   )
     && normalized.includes("quarantined integer not null default 0")
     && normalized.includes("quarantined in (0, 1)")

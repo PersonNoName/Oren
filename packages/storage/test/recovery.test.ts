@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import type { CoreEvent } from "@oren/kernel";
+import { EffectDispatcher } from "../../app/src/index.js";
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 import { migrate } from "../src/migrations.js";
 
@@ -757,6 +758,354 @@ describe("repository recovery", () => {
       FROM effect_quarantine
       ORDER BY quarantine_id
     `).all()).toEqual(beforeReopen);
+    expect(reopened.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    reopened.close();
+  });
+
+  it("quarantines every invalid UTF-8 legacy text field before dispatching later valid work", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "oren-storage-invalid-utf8-"));
+    const path = join(directory, "life.db");
+    const legacy = new DatabaseSync(path);
+    createPreTask8Schema(legacy);
+    legacy.exec(`
+      CREATE TABLE outbox_children (
+        child_id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL REFERENCES outbox(effect_id)
+      );
+      CREATE TABLE operation_children (
+        child_id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL REFERENCES operations(effect_id)
+      );
+      PRAGMA ignore_check_constraints = ON;
+    `);
+
+    const loneContinuation = "80";
+    const truncatedMultibyte = "E282";
+    const overlongEncoding = "C0AF";
+    const surrogateEncoding = "EDA080";
+    const invalidEffectId = textHexWithInvalid("effect-", loneContinuation, "-identity");
+    const invalidOrenId = textHexWithInvalid("oren-", truncatedMultibyte, "-identity");
+    const invalidCapability = textHexWithInvalid("test.", overlongEncoding, "increment");
+    const invalidArgumentJson = legacyEffectJsonHex({
+      effectIdHex: textHex("effect-invalid-json"),
+      orenIdHex: textHex("oren-1"),
+      capabilityHex: textHex("test.increment"),
+      argumentsHex: textHexWithInvalid('{"note":"before-', surrogateEncoding, '-after"}'),
+    });
+    const invalidIdentityJson = legacyEffectJsonHex({
+      effectIdHex: invalidEffectId,
+      orenIdHex: textHex("oren-1"),
+      capabilityHex: textHex("test.increment"),
+    });
+    const invalidOrenJson = legacyEffectJsonHex({
+      effectIdHex: textHex("effect-invalid-oren"),
+      orenIdHex: invalidOrenId,
+      capabilityHex: textHex("test.increment"),
+    });
+    const invalidCapabilityJson = legacyEffectJsonHex({
+      effectIdHex: textHex("effect-invalid-capability"),
+      orenIdHex: textHex("oren-1"),
+      capabilityHex: invalidCapability,
+    });
+    const invalidLeaseOwner = textHexWithInvalid("worker-", truncatedMultibyte, "-owner");
+    const invalidLeaseUntil = textHexWithInvalid(
+      "2026-07-23T00:00:00.000",
+      loneContinuation,
+      "Z",
+    );
+    const invalidReceipt = textHexWithInvalid('{"provider":"before-', overlongEncoding, '-after"}');
+    const invalidStatus = textHexWithInvalid("pending", surrogateEncoding);
+    legacy.exec(`
+      INSERT INTO outbox(
+        rowid, effect_id, oren_id, capability, effect_json, status,
+        lease_owner, lease_until, attempts, receipt_json
+      ) VALUES
+        (
+          1,
+          'effect-invalid-json',
+          'oren-1',
+          'test.increment',
+          CAST(X'${invalidArgumentJson}' AS TEXT),
+          'pending',
+          NULL,
+          NULL,
+          0,
+          NULL
+        ),
+        (
+          2,
+          CAST(X'${invalidEffectId}' AS TEXT),
+          'oren-1',
+          'test.increment',
+          CAST(X'${invalidIdentityJson}' AS TEXT),
+          'pending',
+          NULL,
+          NULL,
+          0,
+          NULL
+        ),
+        (
+          3,
+          'effect-invalid-oren',
+          CAST(X'${invalidOrenId}' AS TEXT),
+          'test.increment',
+          CAST(X'${invalidOrenJson}' AS TEXT),
+          'pending',
+          NULL,
+          NULL,
+          0,
+          NULL
+        ),
+        (
+          4,
+          'effect-invalid-capability',
+          'oren-1',
+          CAST(X'${invalidCapability}' AS TEXT),
+          CAST(X'${invalidCapabilityJson}' AS TEXT),
+          'pending',
+          NULL,
+          NULL,
+          0,
+          NULL
+        ),
+        (
+          5,
+          'effect-invalid-lease',
+          'oren-1',
+          'test.increment',
+          '${legacyEffectJson("effect-invalid-lease")}',
+          'pending',
+          CAST(X'${invalidLeaseOwner}' AS TEXT),
+          CAST(X'${invalidLeaseUntil}' AS TEXT),
+          0,
+          NULL
+        ),
+        (
+          6,
+          'effect-invalid-receipt',
+          'oren-1',
+          'test.increment',
+          '${legacyEffectJson("effect-invalid-receipt")}',
+          'pending',
+          NULL,
+          NULL,
+          0,
+          CAST(X'${invalidReceipt}' AS TEXT)
+        ),
+        (
+          7,
+          'effect-invalid-status',
+          'oren-1',
+          'test.increment',
+          '${legacyEffectJson("effect-invalid-status")}',
+          CAST(X'${invalidStatus}' AS TEXT),
+          NULL,
+          NULL,
+          0,
+          NULL
+        );
+
+      INSERT INTO operations(
+        rowid, effect_id, oren_id, capability, status, attempts, receipt_json
+      ) VALUES
+        (1, 'effect-invalid-json', 'oren-1', 'test.increment', 'pending', 0, NULL),
+        (
+          2,
+          CAST(X'${invalidEffectId}' AS TEXT),
+          'oren-1',
+          'test.increment',
+          'pending',
+          0,
+          NULL
+        ),
+        (
+          3,
+          'effect-invalid-oren',
+          CAST(X'${invalidOrenId}' AS TEXT),
+          'test.increment',
+          'pending',
+          0,
+          NULL
+        ),
+        (
+          4,
+          'effect-invalid-capability',
+          'oren-1',
+          CAST(X'${invalidCapability}' AS TEXT),
+          'pending',
+          0,
+          NULL
+        ),
+        (5, 'effect-invalid-lease', 'oren-1', 'test.increment', 'pending', 0, NULL),
+        (
+          6,
+          'effect-invalid-receipt',
+          'oren-1',
+          'test.increment',
+          'pending',
+          0,
+          CAST(X'${invalidReceipt}' AS TEXT)
+        ),
+        (
+          7,
+          'effect-invalid-status',
+          'oren-1',
+          'test.increment',
+          CAST(X'${invalidStatus}' AS TEXT),
+          0,
+          NULL
+        );
+
+      INSERT INTO outbox_children
+      SELECT 'outbox-invalid-identity', effect_id FROM outbox WHERE rowid = 2;
+      INSERT INTO operation_children
+      SELECT 'operation-invalid-identity', effect_id FROM operations WHERE rowid = 2;
+    `);
+    insertLegacyPair(legacy, "effect-valid-later", "pending", 0);
+    legacy.close();
+
+    const upgraded = openDatabase(path);
+    const repo = new SqliteLifeRepository(upgraded);
+    const invocations: unknown[] = [];
+    const dispatcher = new EffectDispatcher(
+      repo,
+      {
+        resolve: () => ({
+          descriptor: { timeoutMs: 1_000 },
+          extension: {
+            invoke: async (invocation) => {
+              invocations.push(invocation);
+              return {
+                status: "completed" as const,
+                output: { value: 3 },
+                receipt: { providerId: "valid-later" },
+              };
+            },
+          },
+        }),
+      },
+      "worker-invalid-utf8",
+      {
+        now: () => Date.parse("2026-07-24T00:00:00.000Z"),
+        claimLimit: 20,
+      },
+    );
+
+    await expect(dispatcher.runOnce()).resolves.toEqual([
+      { effectId: "effect-valid-later", status: "completed" },
+    ]);
+    expect(invocations).toEqual([
+      expect.objectContaining({
+        effectId: "effect-valid-later",
+        orenId: "oren-1",
+        capability: "test.increment",
+        arguments: { by: 1 },
+      }),
+    ]);
+    expect(upgraded.prepare(`
+      SELECT rowid, quarantined FROM outbox ORDER BY rowid
+    `).all()).toEqual([
+      { rowid: 1, quarantined: 1 },
+      { rowid: 2, quarantined: 1 },
+      { rowid: 3, quarantined: 1 },
+      { rowid: 4, quarantined: 1 },
+      { rowid: 5, quarantined: 1 },
+      { rowid: 6, quarantined: 1 },
+      { rowid: 7, quarantined: 1 },
+      { rowid: 8, quarantined: 0 },
+    ]);
+    expect(upgraded.prepare(`
+      SELECT rowid, quarantined FROM operations ORDER BY rowid
+    `).all()).toEqual([
+      { rowid: 1, quarantined: 1 },
+      { rowid: 2, quarantined: 1 },
+      { rowid: 3, quarantined: 1 },
+      { rowid: 4, quarantined: 1 },
+      { rowid: 5, quarantined: 1 },
+      { rowid: 6, quarantined: 1 },
+      { rowid: 7, quarantined: 1 },
+      { rowid: 8, quarantined: 0 },
+    ]);
+
+    const evidenceRows = upgraded.prepare(`
+      SELECT
+        source_table,
+        source_rowid,
+        legacy_reason,
+        legacy_outbox_json,
+        legacy_operation_json
+      FROM effect_quarantine
+      WHERE source_table IS NOT NULL
+      ORDER BY source_table, source_rowid
+    `).all();
+    expect(evidenceRows).toHaveLength(14);
+    expect(evidenceRows.every((row) => (
+      typeof row.legacy_reason === "string"
+      && /invalid UTF-8/i.test(row.legacy_reason)
+    ))).toBe(true);
+    const evidenceBySource = new Map(evidenceRows.map((row) => [
+      `${String(row.source_table)}:${String(row.source_rowid)}`,
+      JSON.parse(String(row.legacy_outbox_json ?? row.legacy_operation_json)) as Record<
+        string,
+        unknown
+      >,
+    ]));
+    const expectExactTextEvidence = (
+      source: string,
+      column: string,
+      expectedHex: string,
+    ) => {
+      expect(evidenceBySource.get(source)).toMatchObject({
+        [`${column}_type`]: "text",
+        [`${column}_hex`]: expectedHex,
+        [`${column}_length`]: expectedHex.length / 2,
+      });
+    };
+    expectExactTextEvidence("outbox:1", "effect_json", invalidArgumentJson);
+    expectExactTextEvidence("outbox:2", "effect_id", invalidEffectId);
+    expectExactTextEvidence("operations:2", "effect_id", invalidEffectId);
+    expectExactTextEvidence("outbox:3", "oren_id", invalidOrenId);
+    expectExactTextEvidence("operations:3", "oren_id", invalidOrenId);
+    expectExactTextEvidence("outbox:4", "capability", invalidCapability);
+    expectExactTextEvidence("operations:4", "capability", invalidCapability);
+    expectExactTextEvidence("outbox:5", "lease_owner", invalidLeaseOwner);
+    expectExactTextEvidence("outbox:5", "lease_until", invalidLeaseUntil);
+    expectExactTextEvidence("outbox:6", "receipt_json", invalidReceipt);
+    expectExactTextEvidence("operations:6", "receipt_json", invalidReceipt);
+    expectExactTextEvidence("outbox:7", "status", invalidStatus);
+    expectExactTextEvidence("operations:7", "status", invalidStatus);
+    expect(upgraded.prepare(`
+      SELECT hex(CAST(effect_id AS BLOB)) AS effect_id_hex FROM outbox_children
+    `).get()).toEqual({ effect_id_hex: invalidEffectId });
+    expect(upgraded.prepare(`
+      SELECT hex(CAST(effect_id AS BLOB)) AS effect_id_hex FROM operation_children
+    `).get()).toEqual({ effect_id_hex: invalidEffectId });
+    expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(upgraded.prepare(`
+      SELECT status, attempts, quarantined FROM outbox WHERE effect_id = 'effect-valid-later'
+    `).get()).toEqual({ status: "completed", attempts: 1, quarantined: 0 });
+    expect(upgraded.prepare(`
+      SELECT status, attempts, quarantined FROM operations WHERE effect_id = 'effect-valid-later'
+    `).get()).toEqual({ status: "completed", attempts: 1, quarantined: 0 });
+    expect(upgraded.prepare("SELECT COUNT(*) AS count FROM inbox").get()).toEqual({ count: 1 });
+
+    const beforeReopen = {
+      outbox: migratedEffectStorageSnapshot(upgraded, "outbox"),
+      operations: migratedEffectStorageSnapshot(upgraded, "operations"),
+      quarantine: upgraded.prepare(`
+        SELECT * FROM effect_quarantine ORDER BY quarantine_id
+      `).all(),
+    };
+    repo.close();
+
+    const reopened = openDatabase(path);
+    expect({
+      outbox: migratedEffectStorageSnapshot(reopened, "outbox"),
+      operations: migratedEffectStorageSnapshot(reopened, "operations"),
+      quarantine: reopened.prepare(`
+        SELECT * FROM effect_quarantine ORDER BY quarantine_id
+      `).all(),
+    }).toEqual(beforeReopen);
     expect(reopened.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     reopened.close();
   });
@@ -1525,6 +1874,58 @@ function legacyEffectJson(effectId: string, capability = "test.increment"): stri
     grantIds: [],
     stateVersion: 0,
   });
+}
+
+function textHex(value: string): string {
+  return Buffer.from(value, "utf8").toString("hex").toUpperCase();
+}
+
+function textHexWithInvalid(prefix: string, invalidHex: string, suffix = ""): string {
+  return `${textHex(prefix)}${invalidHex}${textHex(suffix)}`;
+}
+
+function legacyEffectJsonHex({
+  effectIdHex,
+  orenIdHex,
+  capabilityHex,
+  argumentsHex = textHex('{"by":1}'),
+}: {
+  readonly effectIdHex: string;
+  readonly orenIdHex: string;
+  readonly capabilityHex: string;
+  readonly argumentsHex?: string;
+}): string {
+  return [
+    textHex('{"effectId":"'),
+    effectIdHex,
+    textHex('","orenId":"'),
+    orenIdHex,
+    textHex('","correlationId":"'),
+    effectIdHex,
+    textHex('","capability":"'),
+    capabilityHex,
+    textHex('","arguments":'),
+    argumentsHex,
+    textHex(',"grantIds":[],"stateVersion":0}'),
+  ].join("");
+}
+
+function migratedEffectStorageSnapshot(
+  db: DatabaseSync,
+  table: "outbox" | "operations",
+): unknown[] {
+  return db.prepare(`
+    SELECT
+      rowid,
+      hex(CAST(effect_id AS BLOB)) AS effect_id_hex,
+      hex(CAST(oren_id AS BLOB)) AS oren_id_hex,
+      hex(CAST(capability AS BLOB)) AS capability_hex,
+      hex(CAST(status AS BLOB)) AS status_hex,
+      attempts,
+      quarantined
+    FROM ${table}
+    ORDER BY rowid
+  `).all();
 }
 
 function insertLegacyPair(
