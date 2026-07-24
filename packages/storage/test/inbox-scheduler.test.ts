@@ -4,6 +4,62 @@ import { Scheduler } from "@oren/app";
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
 describe("durable inbox leases", () => {
+  it.each([
+    "not-an-instant",
+    "2026-02-30T00:00:00.000Z",
+  ])("rejects invalid claim time %s with the strict instant parser", (now) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+
+    expect(() => repo.claimInbox("worker-1", now, 1)).toThrow(/time|timestamp|instant/i);
+  });
+
+  it("compares offset availability by instant and normalizes the durable value", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db, undefined, () => "lease-1");
+    insertInbox(db, "future", "oren-1", 9, {
+      correlationId: "corr-future",
+      event: { type: "WakeDue", scheduleId: "future", purpose: "later" },
+    }, "2026-07-24T01:00:00.000Z");
+    insertInbox(db, "due", "oren-1", 1, {
+      correlationId: "corr-due",
+      event: { type: "WakeDue", scheduleId: "due", purpose: "now" },
+    }, "2026-07-24T08:00:00+08:00");
+
+    const claimed = repo.claimInbox("worker-1", "2026-07-24T08:00:00+08:00", 2);
+
+    expect(claimed.map((item) => item.inboxId)).toEqual(["due"]);
+    expect(db.prepare(`
+      SELECT inbox_id, available_at FROM inbox ORDER BY inbox_id
+    `).all()).toEqual([
+      { inbox_id: "due", available_at: "2026-07-24T00:00:00.000Z" },
+      { inbox_id: "future", available_at: "2026-07-24T01:00:00.000Z" },
+    ]);
+  });
+
+  it("does not let an offset-equivalent now steal a newly written lease", () => {
+    const db = openDatabase(":memory:");
+    let token = 0;
+    const repo = new SqliteLifeRepository(db, undefined, () => `lease-${++token}`);
+    insertInbox(db, "wake:1", "oren-1", 2, {
+      correlationId: "schedule:schedule-1",
+      event: { type: "WakeDue", scheduleId: "schedule-1", purpose: "reflect" },
+    });
+
+    const first = repo.claimInbox("worker-1", "2026-07-24T00:00:00.000Z", 1);
+    const stolen = repo.claimInbox("worker-2", "2026-07-24T08:00:00+08:00", 1);
+
+    expect(first).toHaveLength(1);
+    expect(stolen).toEqual([]);
+    expect(db.prepare(`
+      SELECT lease_owner, lease_token, lease_until FROM inbox WHERE inbox_id = ?
+    `).get("wake:1")).toEqual({
+      lease_owner: "worker-1",
+      lease_token: "lease-1",
+      lease_until: "2026-07-24T00:01:00.000Z",
+    });
+  });
+
   it("reclaims at the exact expiry boundary and rejects the stale lease token", () => {
     const db = openDatabase(":memory:");
     let token = 0;
@@ -41,6 +97,38 @@ describe("durable inbox leases", () => {
     )).toBe(true);
   });
 
+  it("compares live and expired offset leases by epoch instant", () => {
+    const db = openDatabase(":memory:");
+    let token = 0;
+    const repo = new SqliteLifeRepository(db, undefined, () => `lease-${++token}`);
+    insertInbox(db, "live", "oren-1", 9, {
+      correlationId: "corr-live",
+      event: { type: "WakeDue", scheduleId: "live", purpose: "wait" },
+    });
+    insertInbox(db, "expired", "oren-1", 1, {
+      correlationId: "corr-expired",
+      event: { type: "WakeDue", scheduleId: "expired", purpose: "run" },
+    });
+    db.prepare(`
+      UPDATE inbox SET lease_owner = ?, lease_token = ?, lease_until = ?
+      WHERE inbox_id = ?
+    `).run("old-worker", "old-live", "2026-07-24T08:01:00+08:00", "live");
+    db.prepare(`
+      UPDATE inbox SET lease_owner = ?, lease_token = ?, lease_until = ?
+      WHERE inbox_id = ?
+    `).run("old-worker", "old-expired", "2026-07-24T07:59:59+08:00", "expired");
+
+    const claimed = repo.claimInbox("worker-1", "2026-07-24T00:00:00.000Z", 2);
+
+    expect(claimed.map((item) => item.inboxId)).toEqual(["expired"]);
+    expect(db.prepare(`
+      SELECT inbox_id, lease_until FROM inbox ORDER BY inbox_id
+    `).all()).toEqual([
+      { inbox_id: "expired", lease_until: "2026-07-24T00:01:00.000Z" },
+      { inbox_id: "live", lease_until: "2026-07-24T00:01:00.000Z" },
+    ]);
+  });
+
   it("quarantines corrupt and unsupported rows before leasing a valid later row", () => {
     const db = openDatabase(":memory:");
     let token = 0;
@@ -75,6 +163,37 @@ describe("durable inbox leases", () => {
     expect(db.prepare(`
       SELECT inbox_id FROM inbox_quarantine ORDER BY inbox_id
     `).all().map((row) => row.inbox_id)).toEqual(["corrupt", "unsupported"]);
+  });
+
+  it("quarantines invalid durable availability and lease times without starvation", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db, undefined, () => "lease-1");
+    insertInbox(db, "invalid-available", "oren-1", 9, {
+      correlationId: "corr-invalid-available",
+      event: { type: "WakeDue", scheduleId: "bad-available", purpose: "bad" },
+    }, "2026-02-30T00:00:00.000Z");
+    insertInbox(db, "invalid-lease", "oren-1", 8, {
+      correlationId: "corr-invalid-lease",
+      event: { type: "WakeDue", scheduleId: "bad-lease", purpose: "bad" },
+    });
+    db.prepare(`
+      UPDATE inbox SET lease_owner = ?, lease_token = ?, lease_until = ?
+      WHERE inbox_id = ?
+    `).run("old-worker", "old-token", "junk", "invalid-lease");
+    insertInbox(db, "valid", "oren-1", 1, {
+      correlationId: "corr-valid",
+      event: { type: "WakeDue", scheduleId: "valid", purpose: "good" },
+    });
+
+    const claimed = repo.claimInbox("worker-1", "2026-07-24T00:00:00.000Z", 1);
+
+    expect(claimed.map((item) => item.inboxId)).toEqual(["valid"]);
+    expect(db.prepare(`
+      SELECT inbox_id FROM inbox_quarantine ORDER BY inbox_id
+    `).all()).toEqual([
+      { inbox_id: "invalid-available" },
+      { inbox_id: "invalid-lease" },
+    ]);
   });
 
   it("validates durable Oren and event identities before committing any event", () => {
@@ -465,6 +584,7 @@ function insertInbox(
   orenId: string,
   priority: number,
   payload: unknown,
+  availableAt = "2026-07-24T00:00:00.000Z",
 ) {
   db.prepare(`
     INSERT INTO inbox(inbox_id, oren_id, priority, available_at, payload_json)
@@ -473,7 +593,7 @@ function insertInbox(
     inboxId,
     orenId,
     priority,
-    "2026-07-24T00:00:00.000Z",
+    availableAt,
     typeof payload === "string" ? payload : JSON.stringify(payload),
   );
 }

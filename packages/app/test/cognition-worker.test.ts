@@ -174,6 +174,74 @@ describe("CognitionWorker", () => {
     ]);
   });
 
+  it("resumes the original durable job after replaying its exact reservation", async () => {
+    const initial = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    };
+    const beforeCrash = actorHarness(initial);
+    const durableJob = job("scheduled_wake");
+    const reserved = beforeCrash.actor.consumeAutonomy(durableJob, 3);
+    if (!reserved.accepted) throw new Error("test reservation failed");
+    const replayed = beforeCrash.events.reduce(reduceLifeState, initial);
+    const afterRestart = actorHarness(replayed);
+    let modelCalls = 0;
+    const worker = workerFor(afterRestart, async () => {
+      modelCalls += 1;
+      return { kind: "completed", proposals: [], usage: { totalTokens: 1 } };
+    }, 3);
+
+    await worker.run(durableJob, new AbortController().signal);
+
+    expect(modelCalls).toBe(1);
+    expect(afterRestart.state.budgets.autonomyRemaining).toBe(2);
+    expect(afterRestart.events.map((event) => event.payload)).toEqual([{
+      type: "CognitionCompleted",
+      episodeId: "episode-1",
+      baseStateVersion: 3,
+      proposals: [],
+    }]);
+  });
+
+  it("rejects the original durable job when state advanced after its reservation", async () => {
+    const initial = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    };
+    const beforeCrash = actorHarness(initial);
+    const durableJob = job("scheduled_wake");
+    const reserved = beforeCrash.actor.consumeAutonomy(durableJob, 3);
+    if (!reserved.accepted) throw new Error("test reservation failed");
+    beforeCrash.actor.recordCognitionDenied(reserved.job, "intervening_event");
+    const replayed = beforeCrash.events.reduce(reduceLifeState, initial);
+    const afterRestart = actorHarness(replayed);
+    let modelCalls = 0;
+    const worker = workerFor(afterRestart, async () => {
+      modelCalls += 1;
+      return { kind: "completed", proposals: [], usage: { totalTokens: 1 } };
+    }, 3);
+
+    await worker.run(durableJob, new AbortController().signal);
+
+    expect(modelCalls).toBe(0);
+    expect(afterRestart.state.budgets.autonomyRemaining).toBe(2);
+    expect(afterRestart.events.map((event) => event.payload)).toEqual([{
+      type: "CognitionDenied",
+      episodeId: "episode-1",
+      reason: "stale_state_version",
+    }]);
+  });
+
   it("durably records waiting, failure, thrown, and interrupted outcomes", async () => {
     const outcomes = [
       {

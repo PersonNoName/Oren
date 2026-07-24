@@ -153,21 +153,32 @@ export class CognitionWorker {
         abort();
         return;
       }
+      const existingReservation = initialInput.state.autonomyReservations?.[activeJob.episodeId];
+      const autonomyAlreadyReserved = existingReservation !== undefined
+        && initialInput.state.orenId === activeJob.orenId
+        && existingReservation.correlationId === activeJob.correlationId
+        && existingReservation.amount === initialInput.maxSteps
+        && initialInput.state.version === existingReservation.baseStateVersion + 1
+        && (
+          activeJob.baseStateVersion === existingReservation.baseStateVersion
+          || activeJob.baseStateVersion === initialInput.state.version
+        );
       if (
         initialInput.state.orenId !== activeJob.orenId
-        || initialInput.state.version !== activeJob.baseStateVersion
+        || (
+          initialInput.state.version !== activeJob.baseStateVersion
+          && !autonomyAlreadyReserved
+        )
       ) {
         deny("stale_state_version");
         return;
       }
-      const existingReservation = initialInput.state.autonomyReservations?.[activeJob.episodeId];
-      const autonomyAlreadyReserved = existingReservation !== undefined
-        && existingReservation.correlationId === activeJob.correlationId
-        && existingReservation.amount === initialInput.maxSteps
-        && activeJob.baseStateVersion === existingReservation.baseStateVersion + 1;
       if (existingReservation !== undefined && !autonomyAlreadyReserved) {
         deny("autonomy_already_reserved");
         return;
+      }
+      if (autonomyAlreadyReserved) {
+        activeJob = { ...activeJob, baseStateVersion: initialInput.state.version };
       }
       const rawDecision = this.guard.evaluateCognition(
         initialInput.state,

@@ -412,33 +412,60 @@ export class SqliteLifeRepository {
     if (!Number.isSafeInteger(limit) || limit < 0) {
       throw new Error("Inbox claim limit must be a nonnegative safe integer");
     }
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Inbox claim time must be a valid instant");
     if (limit === 0) return [];
-    const nowMs = Date.parse(now);
-    if (!Number.isFinite(nowMs)) throw new Error("Inbox claim time must be a valid timestamp");
-    const leaseUntil = new Date(nowMs + 60_000).toISOString();
+    const nowMs = Date.parse(canonicalNow);
+    let leaseUntil: string;
+    try {
+      leaseUntil = new Date(nowMs + 60_000).toISOString();
+    } catch {
+      throw new Error("Inbox claim time cannot produce a valid lease instant");
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const rows = this.db.prepare(`
-        SELECT inbox_id, oren_id, payload_json
+        SELECT
+          inbox_id,
+          oren_id,
+          available_at,
+          payload_json,
+          lease_owner,
+          lease_token,
+          lease_until
         FROM inbox
         WHERE processed_at IS NULL
-          AND available_at <= ?
-          AND (lease_until IS NULL OR lease_until <= ?)
           AND NOT EXISTS (
             SELECT 1 FROM inbox_quarantine
             WHERE inbox_quarantine.inbox_id = inbox.inbox_id
           )
         ORDER BY priority DESC, rowid
-      `).all(now, now);
+      `).all();
       const quarantine = this.db.prepare(`
         INSERT OR IGNORE INTO inbox_quarantine(inbox_id, reason, quarantined_at)
         VALUES (?, ?, ?)
       `);
+      const normalizeTimes = this.db.prepare(`
+        UPDATE inbox
+        SET available_at = ?, lease_until = ?
+        WHERE inbox_id = ? AND processed_at IS NULL
+          AND available_at IS ?
+          AND lease_owner IS ?
+          AND lease_token IS ?
+          AND lease_until IS ?
+          AND NOT EXISTS (
+            SELECT 1 FROM inbox_quarantine
+            WHERE inbox_quarantine.inbox_id = inbox.inbox_id
+          )
+      `);
       const lease = this.db.prepare(`
         UPDATE inbox
-        SET lease_owner = ?, lease_token = ?, lease_until = ?
+        SET available_at = ?, lease_owner = ?, lease_token = ?, lease_until = ?
         WHERE inbox_id = ? AND processed_at IS NULL
-          AND (lease_until IS NULL OR lease_until <= ?)
+          AND available_at IS ?
+          AND lease_owner IS ?
+          AND lease_token IS ?
+          AND lease_until IS ?
           AND NOT EXISTS (
             SELECT 1 FROM inbox_quarantine
             WHERE inbox_quarantine.inbox_id = inbox.inbox_id
@@ -448,20 +475,82 @@ export class SqliteLifeRepository {
       for (const row of rows) {
         if (claimed.length >= limit) break;
         const inboxId = String(row.inbox_id);
+        const durableAvailableAt = row.available_at;
+        const durableLeaseOwner = row.lease_owner;
+        const durableLeaseToken = row.lease_token;
+        const durableLeaseValue = row.lease_until;
+        if (
+          durableAvailableAt === undefined
+          || durableLeaseOwner === undefined
+          || durableLeaseToken === undefined
+          || durableLeaseValue === undefined
+        ) {
+          throw new Error("Inbox claim query omitted durable lease state");
+        }
+        const availableAt = canonicalizeInstant(durableAvailableAt);
+        if (!availableAt) {
+          quarantine.run(inboxId, "inbox available_at is not a valid instant", canonicalNow);
+          continue;
+        }
+        let durableLeaseUntil: string | null;
+        if (durableLeaseValue === null) {
+          durableLeaseUntil = null;
+        } else {
+          const canonicalLeaseUntil = canonicalizeInstant(durableLeaseValue);
+          if (!canonicalLeaseUntil) {
+            quarantine.run(inboxId, "inbox lease_until is not a valid instant", canonicalNow);
+            continue;
+          }
+          durableLeaseUntil = canonicalLeaseUntil;
+        }
+        const isAvailable = Date.parse(availableAt) <= nowMs;
+        const isLeaseExpired = durableLeaseUntil === null
+          || Date.parse(durableLeaseUntil) <= nowMs;
+        if (!isAvailable || !isLeaseExpired) {
+          if (
+            availableAt !== durableAvailableAt
+            || durableLeaseUntil !== durableLeaseValue
+          ) {
+            normalizeTimes.run(
+              availableAt,
+              durableLeaseUntil,
+              inboxId,
+              durableAvailableAt,
+              durableLeaseOwner,
+              durableLeaseToken,
+              durableLeaseValue,
+            );
+          }
+          continue;
+        }
         let parsed: unknown;
         try {
           parsed = JSON.parse(String(row.payload_json));
         } catch {
-          quarantine.run(inboxId, "inbox payload_json is not valid JSON", now);
+          quarantine.run(inboxId, "inbox payload_json is not valid JSON", canonicalNow);
           continue;
         }
         const payload = canonicalizeInboxPayload(parsed);
         if (!payload) {
-          quarantine.run(inboxId, "inbox payload_json is not a supported payload", now);
+          quarantine.run(
+            inboxId,
+            "inbox payload_json is not a supported payload",
+            canonicalNow,
+          );
           continue;
         }
         const leaseToken = this.nextLeaseToken();
-        const leased = lease.run(worker, leaseToken, leaseUntil, inboxId, now);
+        const leased = lease.run(
+          availableAt,
+          worker,
+          leaseToken,
+          leaseUntil,
+          inboxId,
+          durableAvailableAt,
+          durableLeaseOwner,
+          durableLeaseToken,
+          durableLeaseValue,
+        );
         if (Number(leased.changes) !== 1) continue;
         claimed.push({
           inboxId,
