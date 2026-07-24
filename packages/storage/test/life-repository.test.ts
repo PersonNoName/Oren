@@ -9,6 +9,18 @@ import {
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
 describe("SqliteLifeRepository", () => {
+  it("rejects an invalid initial state budget before snapshot persistence", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    const initial = createInitialLifeState("oren-1", "person-1");
+
+    expect(() => repo.initialize({
+      ...initial,
+      budgets: { ...initial.budgets, autonomyRemaining: -1 },
+    })).toThrow(/budget/i);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM snapshots").get()).toEqual({ count: 0 });
+  });
+
   it("consumes an autonomy event once with a durable state-version compare-and-swap", () => {
     const db = openDatabase(":memory:");
     const repo = new SqliteLifeRepository(db);
@@ -36,6 +48,113 @@ describe("SqliteLifeRepository", () => {
       version: 1,
       budgets: { autonomyRemaining: 2 },
     });
+  });
+
+  it("rejects a second autonomy charge for the same episode at the current version", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize({
+      ...createInitialLifeState("oren-1", "person-1"),
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    repo.commitIfVersion("oren-1", 0, [event("event-1", "oren-1", {
+      type: "AutonomyConsumed",
+      episodeId: "episode-1",
+      baseStateVersion: 0,
+      amount: 2,
+    })]);
+
+    expect(() => repo.commitIfVersion("oren-1", 1, [event("event-2", "oren-1", {
+      type: "AutonomyConsumed",
+      episodeId: "episode-1",
+      baseStateVersion: 1,
+      amount: 2,
+    })])).toThrow(/already reserved|unique/i);
+    expect(repo.rehydrate("oren-1")).toMatchObject({
+      version: 1,
+      budgets: { autonomyRemaining: 3 },
+    });
+    expect(repo.loadEvents("oren-1")).toHaveLength(1);
+  });
+
+  it.each([-1, 0, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 6])(
+    "atomically rejects hostile autonomy amount %s on public commit paths",
+    (amount) => {
+      const db = openDatabase(":memory:");
+      const repo = new SqliteLifeRepository(db);
+      repo.initialize({
+        ...createInitialLifeState("oren-1", "person-1"),
+        budgets: {
+          autonomyRemaining: 5,
+          interactionMaxSteps: 8,
+          commitmentRemaining: {},
+        },
+      });
+      const hostile = event("hostile", "oren-1", {
+        type: "AutonomyConsumed",
+        episodeId: "episode-hostile",
+        baseStateVersion: 0,
+        amount,
+      });
+
+      expect(() => repo.commit("oren-1", [hostile])).toThrow();
+      expect(repo.loadEvents("oren-1")).toEqual([]);
+      expect(repo.rehydrate("oren-1").budgets.autonomyRemaining).toBe(5);
+    },
+  );
+
+  it.each([
+    { name: "unknown event type", payload: { type: "FutureEvent", value: 1 } },
+    {
+      name: "extra event property",
+      payload: { type: "CognitionDenied", episodeId: "episode-1", reason: "no", extra: true },
+    },
+    {
+      name: "malformed known event",
+      payload: { type: "CognitionCompleted", episodeId: "episode-1", baseStateVersion: 0, proposals: "no" },
+    },
+  ])("atomically rejects an exact-variant violation: $name", ({ payload }) => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+
+    expect(() => repo.commit("oren-1", [
+      event("valid", "oren-1", { type: "OrenInitialized", personId: "person-1" }),
+      event("hostile", "oren-1", payload as unknown as EventEnvelope["payload"]),
+    ])).toThrow(/event|payload/i);
+    expect(repo.loadEvents("oren-1")).toEqual([]);
+  });
+
+  it("normalizes valid offset WakeScheduled instants and rejects invalid timestamps", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+
+    repo.commit("oren-1", [event("schedule", "oren-1", {
+      type: "WakeScheduled",
+      scheduleId: "schedule-1",
+      at: "2026-07-24T08:00:00+08:00",
+      purpose: "reflect",
+    })]);
+    expect(db.prepare("SELECT due_at FROM schedules WHERE schedule_id = ?").get("schedule-1"))
+      .toEqual({ due_at: "2026-07-24T00:00:00.000Z" });
+    expect(() => repo.commit("oren-1", [event("invalid", "oren-1", {
+      type: "WakeScheduled",
+      scheduleId: "schedule-2",
+      at: "zzzz",
+      purpose: "never",
+    })])).toThrow(/timestamp|instant/i);
+    expect(() => repo.commit("oren-1", [event("invalid-calendar", "oren-1", {
+      type: "WakeScheduled",
+      scheduleId: "schedule-3",
+      at: "2026-02-30T00:00:00.000Z",
+      purpose: "never",
+    })])).toThrow(/timestamp|instant/i);
+    expect(repo.loadEvents("oren-1")).toHaveLength(1);
   });
 
   it("commits an event and outbox effect atomically", () => {

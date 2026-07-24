@@ -1,3 +1,5 @@
+import { canonicalizeInstant } from "@oren/kernel";
+
 export interface DueSchedule {
   readonly scheduleId: string;
   readonly orenId: string;
@@ -27,10 +29,16 @@ export class Scheduler {
   }
 
   public runOnce(now = this.now()): number {
-    const due = this.repository.claimDue(now, this.claimLimit);
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Scheduler time must be a valid instant");
+    const due = this.repository.claimDue(canonicalNow, this.claimLimit);
     let delivered = 0;
     for (const schedule of due) {
-      if (this.repository.deliverWake(schedule, now) !== false) delivered += 1;
+      try {
+        if (this.repository.deliverWake(schedule, canonicalNow) !== false) delivered += 1;
+      } catch {
+        // A single corrupt durable row must not starve later due schedules.
+      }
     }
     return delivered;
   }

@@ -9,6 +9,7 @@ import type {
   CognitionJob,
   LifeRepositoryPort,
 } from "./ports.js";
+import { hasValidLifeStateBudgets } from "./runtime-validation.js";
 
 export class LifeActor {
   public constructor(
@@ -91,6 +92,13 @@ export class LifeActor {
     proposals: readonly Proposal[],
   ): { readonly accepted: boolean; readonly reason?: string } {
     const current = this.repository.loadState(job.orenId);
+    if (
+      !Number.isSafeInteger(job.baseStateVersion)
+      || job.baseStateVersion < 0
+      || !hasValidLifeStateBudgets(current)
+    ) {
+      return { accepted: false, reason: "invalid_state_or_job" };
+    }
     if (current.version !== job.baseStateVersion) {
       return { accepted: false, reason: "stale_state_version" };
     }
@@ -145,6 +153,31 @@ export class LifeActor {
       return { accepted: false, reason: "non_autonomous_trigger" };
     }
     const current = this.repository.loadState(job.orenId);
+    if (
+      !Number.isSafeInteger(job.baseStateVersion)
+      || job.baseStateVersion < 0
+      || !hasValidLifeStateBudgets(current)
+    ) {
+      return { accepted: false, reason: "invalid_state_or_job" };
+    }
+    const reservation = current.autonomyReservations?.[job.episodeId];
+    if (reservation !== undefined) {
+      if (
+        reservation.amount === amount
+        && reservation.correlationId === job.correlationId
+        && current.version === reservation.baseStateVersion + 1
+        && (
+          job.baseStateVersion === reservation.baseStateVersion
+          || job.baseStateVersion === current.version
+        )
+      ) {
+        return {
+          accepted: true,
+          job: { ...job, baseStateVersion: current.version },
+        };
+      }
+      return { accepted: false, reason: "autonomy_already_reserved" };
+    }
     if (current.version !== job.baseStateVersion) {
       return { accepted: false, reason: "stale_state_version" };
     }

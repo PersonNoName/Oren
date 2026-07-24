@@ -190,6 +190,18 @@ function createNonEffectTables(db: DatabaseSync): void {
       envelope_json TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS events_by_oren ON events(oren_id, sequence);
+    CREATE UNIQUE INDEX IF NOT EXISTS autonomy_reservation_by_episode
+    ON events(
+      oren_id,
+      json_extract(
+        CASE WHEN json_valid(envelope_json) THEN envelope_json ELSE '{}' END,
+        '$.payload.episodeId'
+      )
+    )
+    WHERE json_extract(
+      CASE WHEN json_valid(envelope_json) THEN envelope_json ELSE '{}' END,
+      '$.payload.type'
+    ) = 'AutonomyConsumed';
 
     CREATE TABLE IF NOT EXISTS snapshots (
       oren_id TEXT PRIMARY KEY,
@@ -215,6 +227,8 @@ function createNonEffectTables(db: DatabaseSync): void {
       reason TEXT NOT NULL,
       quarantined_at TEXT NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS inbox_claim_path
+    ON inbox(processed_at, available_at, lease_until, priority DESC);
 
     CREATE TABLE IF NOT EXISTS grants (
       grant_id TEXT PRIMARY KEY,
@@ -230,6 +244,14 @@ function createNonEffectTables(db: DatabaseSync): void {
       purpose TEXT NOT NULL,
       delivered_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS schedule_quarantine (
+      schedule_id TEXT PRIMARY KEY REFERENCES schedules(schedule_id),
+      reason TEXT NOT NULL,
+      quarantined_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS schedule_claim_path
+    ON schedules(delivered_at, due_at, schedule_id);
   `);
   const inboxColumns = new Set(
     db.prepare("PRAGMA table_info(inbox)").all().map((row) => String(row.name)),

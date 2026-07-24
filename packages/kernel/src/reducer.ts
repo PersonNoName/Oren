@@ -1,19 +1,61 @@
 import type { EventEnvelope } from "./protocol.js";
 import type { LifeState } from "./state.js";
+import {
+  canonicalizeEventEnvelope,
+  hasValidLifeStateBudgets,
+} from "./runtime-validation.js";
 
 export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeState {
+  if (!hasValidLifeStateBudgets(state)) {
+    throw new Error("LifeState contains invalid budgets");
+  }
+  const canonicalEvent = canonicalizeEventEnvelope(event);
+  if (!canonicalEvent) {
+    const label = (
+      typeof event === "object"
+      && event !== null
+      && typeof event.payload === "object"
+      && event.payload !== null
+      && event.payload.type === "AutonomyConsumed"
+    ) ? "autonomy event" : "event";
+    throw new Error(`Invalid ${label} envelope or payload`);
+  }
+  event = canonicalEvent;
   const nextVersion = state.version + 1;
   const base = { ...state, version: nextVersion, chronicleCursor: state.chronicleCursor + 1 };
 
   switch (event.payload.type) {
-    case "AutonomyConsumed":
+    case "AutonomyConsumed": {
+      const reservations = state.autonomyReservations ?? {};
+      if (event.payload.baseStateVersion !== state.version) {
+        throw new Error("AutonomyConsumed base version does not match state");
+      }
+      if (reservations[event.payload.episodeId] !== undefined) {
+        throw new Error(`Episode ${event.payload.episodeId} autonomy is already reserved`);
+      }
+      if (
+        !Number.isSafeInteger(event.payload.amount)
+        || event.payload.amount <= 0
+        || event.payload.amount > state.budgets.autonomyRemaining
+      ) {
+        throw new Error("Invalid autonomy consumption amount");
+      }
       return {
         ...base,
         budgets: {
           ...state.budgets,
           autonomyRemaining: state.budgets.autonomyRemaining - event.payload.amount,
         },
+        autonomyReservations: {
+          ...reservations,
+          [event.payload.episodeId]: {
+            amount: event.payload.amount,
+            baseStateVersion: event.payload.baseStateVersion,
+            correlationId: event.correlationId,
+          },
+        },
       };
+    }
     case "ThreadAdvanced": {
       const activeThreadIds = state.attention.activeThreadIds.includes(event.payload.threadId)
         ? state.attention.activeThreadIds

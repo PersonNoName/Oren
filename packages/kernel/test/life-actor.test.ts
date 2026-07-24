@@ -275,4 +275,99 @@ describe("LifeActor", () => {
       { type: "EpisodeInterrupted", episodeId: "episode-1", reason: "shutdown" },
     ]);
   });
+
+  it("returns the existing reservation when retried with the post-reservation job version", () => {
+    let state = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    };
+    const events: EventEnvelope[] = [];
+    const repository: LifeRepositoryPort = {
+      loadState: () => state,
+      commit: () => undefined,
+      commitIfVersion: (_orenId, expectedVersion, accepted) => {
+        if (state.version !== expectedVersion) return false;
+        events.push(...accepted);
+        state = accepted.reduce((current, event) => {
+          const autonomyReservations = current.autonomyReservations ?? {};
+          if (event.payload.type !== "AutonomyConsumed") {
+            return { ...current, version: current.version + 1 };
+          }
+          return {
+            ...current,
+            version: current.version + 1,
+            budgets: {
+              ...current.budgets,
+              autonomyRemaining: current.budgets.autonomyRemaining - event.payload.amount,
+            },
+            autonomyReservations: {
+              ...autonomyReservations,
+              [event.payload.episodeId]: {
+                amount: event.payload.amount,
+                baseStateVersion: event.payload.baseStateVersion,
+                correlationId: event.correlationId,
+              },
+            },
+          };
+        }, state);
+        return true;
+      },
+      commitInbox: () => false,
+    };
+    let id = 0;
+    const actor = new LifeActor(
+      repository,
+      () => `event-${++id}`,
+      () => "2026-07-24T00:00:00.000Z",
+    );
+    const original: CognitionJob = {
+      orenId: "oren-1",
+      episodeId: "episode-1",
+      baseStateVersion: 2,
+      triggerKind: "scheduled_wake",
+      correlationId: "corr-1",
+    };
+
+    const first = actor.consumeAutonomy(original, 3);
+    expect(first).toMatchObject({ accepted: true, job: { baseStateVersion: 3 } });
+    if (!first.accepted) throw new Error("reservation failed");
+    expect(actor.consumeAutonomy(first.job, 3)).toEqual(first);
+    expect(events).toHaveLength(1);
+    expect(state.budgets.autonomyRemaining).toBe(2);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid autonomy cost %s before persistence",
+    (amount) => {
+      const repository: LifeRepositoryPort = {
+        loadState: () => ({
+          ...createInitialLifeState("oren-1", "person-1"),
+          budgets: {
+            autonomyRemaining: 5,
+            interactionMaxSteps: 8,
+            commitmentRemaining: {},
+          },
+        }),
+        commit: () => undefined,
+        commitIfVersion: () => {
+          throw new Error("invalid amount must not persist");
+        },
+        commitInbox: () => false,
+      };
+      const actor = new LifeActor(repository, () => "event", () => "2026-07-24T00:00:00.000Z");
+
+      expect(actor.consumeAutonomy({
+        orenId: "oren-1",
+        episodeId: "episode-1",
+        baseStateVersion: 0,
+        triggerKind: "health_check",
+        correlationId: "corr-1",
+      }, amount)).toEqual({ accepted: false, reason: "invalid_autonomy_cost" });
+    },
+  );
 });

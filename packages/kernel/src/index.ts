@@ -1,5 +1,6 @@
 export * from "./ids.js";
 export * from "./json.js";
+export * from "./runtime-validation.js";
 export * from "./capability.js";
 export * from "./protocol.js";
 export * from "./state.js";

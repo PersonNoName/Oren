@@ -48,6 +48,32 @@ describe("Guard", () => {
     expect(decision).toEqual({ allowed: false, reason: "episode_step_limit" });
   });
 
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid requestedSteps %s before evaluating a budget",
+    (requestedSteps) => {
+      const decision = new Guard().evaluateCognition(
+        createInitialLifeState("oren-1", "person-1"),
+        "foreground_user",
+        requestedSteps,
+      );
+
+      expect(decision).toEqual({ allowed: false, reason: "invalid_requested_steps" });
+    },
+  );
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects an invalid autonomyRemaining budget %s",
+    (autonomyRemaining) => {
+      const initial = createInitialLifeState("oren-1", "person-1");
+      const decision = new Guard().evaluateCognition({
+        ...initial,
+        budgets: { ...initial.budgets, autonomyRemaining },
+      }, "health_check", 1);
+
+      expect(decision).toEqual({ allowed: false, reason: "invalid_state_budgets" });
+    },
+  );
+
   it("requires a live grant for a persistent capability", () => {
     const decision = new Guard().evaluateCapability({
       capability: "test.increment",

@@ -24,15 +24,23 @@ interface OrenEpisodes {
   active: ActiveEpisode | undefined;
   readonly pending: PendingEpisode[];
   readonly idleWaiters: Array<() => void>;
+  stopped: boolean;
 }
 
 export class EpisodeCoordinator {
   private readonly episodes = new Map<string, OrenEpisodes>();
   private sequence = 0;
+  private readonly closeEpisode: (
+    job: CognitionJob,
+    signal: AbortSignal,
+  ) => Promise<void>;
 
   public constructor(
     private readonly runEpisode: (job: CognitionJob, signal: AbortSignal) => Promise<void>,
-  ) {}
+    closeEpisode?: (job: CognitionJob, signal: AbortSignal) => Promise<void>,
+  ) {
+    this.closeEpisode = closeEpisode ?? runEpisode;
+  }
 
   public start(job: CognitionJob): Promise<void> {
     const state = this.getState(job.orenId);
@@ -71,15 +79,34 @@ export class EpisodeCoordinator {
 
   public interrupt(orenId: string, reason: EpisodeInterruptionReason): Promise<void> {
     const state = this.episodes.get(orenId);
+    if (reason === "shutdown") {
+      const shutdownState = state ?? this.getState(orenId);
+      shutdownState.stopped = true;
+      shutdownState.active?.controller.abort(reason);
+      this.pump(orenId, shutdownState);
+      return this.waitForIdle(orenId);
+    }
     if (!state?.active) return Promise.resolve();
     state.active.controller.abort(reason);
     return state.active.settled;
   }
 
+  public resume(orenId: string): void {
+    const state = this.episodes.get(orenId);
+    if (!state) return;
+    state.stopped = false;
+    this.pump(orenId, state);
+  }
+
   private getState(orenId: string): OrenEpisodes {
     const existing = this.episodes.get(orenId);
     if (existing) return existing;
-    const created: OrenEpisodes = { active: undefined, pending: [], idleWaiters: [] };
+    const created: OrenEpisodes = {
+      active: undefined,
+      pending: [],
+      idleWaiters: [],
+      stopped: false,
+    };
     this.episodes.set(orenId, created);
     return created;
   }
@@ -88,12 +115,13 @@ export class EpisodeCoordinator {
     if (state.active) return;
     const next = state.pending.shift();
     if (!next) {
-      this.episodes.delete(orenId);
+      if (!state.stopped) this.episodes.delete(orenId);
       for (const resolve of state.idleWaiters.splice(0)) resolve();
       return;
     }
 
     const controller = new AbortController();
+    if (state.stopped) controller.abort("shutdown");
     let resolveSettled!: () => void;
     const settled = new Promise<void>((resolve) => {
       resolveSettled = resolve;
@@ -107,7 +135,9 @@ export class EpisodeCoordinator {
 
     let run: Promise<void>;
     try {
-      run = this.runEpisode(next.job, controller.signal);
+      run = state.stopped
+        ? this.closeEpisode(next.job, controller.signal)
+        : this.runEpisode(next.job, controller.signal);
     } catch (error) {
       run = Promise.reject(error);
     }

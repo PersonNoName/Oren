@@ -5,12 +5,16 @@ import type {
   Conductor,
   CreateFrameInput,
 } from "@oren/cognition";
-import type {
-  CognitionJob,
-  EpisodeInterruptionReason,
-  Guard,
-  LifeActor,
+import {
+  canonicalizeJson,
+  canonicalizeProposal,
+  type CognitionJob,
+  type EpisodeInterruptionReason,
+  type Guard,
+  type JsonObject,
+  type LifeActor,
 } from "@oren/kernel";
+import type { CognitionOutcome } from "@oren/cognition";
 
 const INTERRUPTION_REASONS = new Set<unknown>([
   "foreground_user",
@@ -29,6 +33,86 @@ function errorMessage(error: unknown): string {
   return utilTypes.isNativeError(error) ? error.message : "Unknown cognition error";
 }
 
+function isRecord(value: unknown): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function exactKeys(value: JsonObject, keys: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length
+    && actual.every((key, index) => key === expected[index]);
+}
+
+function hasValidUsage(value: unknown): value is { readonly totalTokens: number } {
+  return isRecord(value)
+    && exactKeys(value, ["totalTokens"])
+    && typeof value.totalTokens === "number"
+    && Number.isSafeInteger(value.totalTokens)
+    && value.totalTokens >= 0;
+}
+
+function canonicalizeCognitionOutcome(value: unknown): CognitionOutcome | undefined {
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const outcome = canonical.value;
+  if (!hasValidUsage(outcome.usage)) return undefined;
+  switch (outcome.kind) {
+    case "completed": {
+      if (!exactKeys(outcome, ["kind", "proposals", "usage"]) || !Array.isArray(outcome.proposals)) {
+        return undefined;
+      }
+      const proposals = outcome.proposals.map(canonicalizeProposal);
+      return proposals.every((proposal) => proposal !== undefined)
+        ? {
+            kind: "completed",
+            proposals: proposals as NonNullable<typeof proposals[number]>[],
+            usage: outcome.usage,
+          }
+        : undefined;
+    }
+    case "waiting_for_effect":
+      return exactKeys(outcome, ["kind", "effectId", "usage"])
+        && typeof outcome.effectId === "string"
+        ? { kind: "waiting_for_effect", effectId: outcome.effectId, usage: outcome.usage }
+        : undefined;
+    case "failed":
+      return exactKeys(outcome, ["kind", "message", "usage"])
+        && typeof outcome.message === "string"
+        ? { kind: "failed", message: outcome.message, usage: outcome.usage }
+        : undefined;
+    case "aborted":
+      return exactKeys(outcome, ["kind", "usage"])
+        ? { kind: "aborted", usage: outcome.usage }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function canonicalizeGuardDecision(value: unknown):
+  | { readonly allowed: true; readonly autonomyCost: number }
+  | { readonly allowed: false; readonly reason: string }
+  | undefined {
+  const canonical = canonicalizeJson(value);
+  if (!canonical.ok || !isRecord(canonical.value)) return undefined;
+  const decision = canonical.value;
+  if (
+    decision.allowed === true
+    && exactKeys(decision, ["allowed", "autonomyCost"])
+    && typeof decision.autonomyCost === "number"
+    && Number.isSafeInteger(decision.autonomyCost)
+    && decision.autonomyCost >= 0
+  ) {
+    return { allowed: true, autonomyCost: decision.autonomyCost };
+  }
+  return decision.allowed === false
+    && exactKeys(decision, ["allowed", "reason"])
+    && typeof decision.reason === "string"
+    ? { allowed: false, reason: decision.reason }
+    : undefined;
+}
+
 export class CognitionWorker {
   public constructor(
     private readonly cognition: CognitionPort,
@@ -41,98 +125,143 @@ export class CognitionWorker {
 
   public async run(job: CognitionJob, signal: AbortSignal): Promise<void> {
     let activeJob = job;
-    if (signal.aborted) {
-      this.actor.recordCognitionExit(activeJob, {
-        kind: "aborted",
-        reason: interruptionReason(signal),
-      });
-      return;
-    }
-    const initialInput = this.loadFrameInput(activeJob);
-    if (
-      initialInput.state.orenId !== activeJob.orenId
-      || initialInput.state.version !== activeJob.baseStateVersion
-    ) {
-      this.actor.recordCognitionDenied(activeJob, "stale_state_version");
-      return;
-    }
-    const decision = this.guard.evaluateCognition(
-      initialInput.state,
-      activeJob.triggerKind,
-      initialInput.maxSteps,
-    );
-    if (!decision.allowed) {
-      this.actor.recordCognitionDenied(activeJob, decision.reason);
-      return;
-    }
-
-    let frameInput = initialInput;
-    if (decision.autonomyCost > 0) {
-      const consumed = this.actor.consumeAutonomy(activeJob, decision.autonomyCost);
-      if (!consumed.accepted) {
-        this.actor.recordCognitionDenied(activeJob, consumed.reason);
-        return;
+    const attempt = (write: () => void): void => {
+      try {
+        write();
+      } catch {
+        // The workflow remains total even when durable storage is unavailable.
+        // The attempted write is the strongest guarantee possible at this boundary.
       }
-      activeJob = consumed.job;
-      frameInput = this.loadFrameInput(activeJob);
-      if (
-        frameInput.state.orenId !== activeJob.orenId
-        || frameInput.state.version !== activeJob.baseStateVersion
-      ) {
-        this.actor.recordCognitionDenied(activeJob, "stale_state_version");
-        return;
-      }
-    }
-
+    };
+    const abort = (): void => attempt(() => this.actor.recordCognitionExit(activeJob, {
+      kind: "aborted",
+      reason: interruptionReason(signal),
+    }));
+    const fail = (message: string): void => attempt(() => this.actor.recordCognitionExit(
+      activeJob,
+      { kind: "failed", message },
+    ));
+    const deny = (reason: string): void => attempt(() =>
+      this.actor.recordCognitionDenied(activeJob, reason));
     try {
-      const frame = this.conductor.createFrame(frameInput);
-      const outcome = await this.cognition.run(frame, this.capabilityPort, signal);
       if (signal.aborted) {
-        this.actor.recordCognitionExit(activeJob, {
-          kind: "aborted",
-          reason: interruptionReason(signal),
-        });
+        abort();
+        return;
+      }
+      const initialInput = this.loadFrameInput(activeJob);
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      if (
+        initialInput.state.orenId !== activeJob.orenId
+        || initialInput.state.version !== activeJob.baseStateVersion
+      ) {
+        deny("stale_state_version");
+        return;
+      }
+      const existingReservation = initialInput.state.autonomyReservations?.[activeJob.episodeId];
+      const autonomyAlreadyReserved = existingReservation !== undefined
+        && existingReservation.correlationId === activeJob.correlationId
+        && existingReservation.amount === initialInput.maxSteps
+        && activeJob.baseStateVersion === existingReservation.baseStateVersion + 1;
+      if (existingReservation !== undefined && !autonomyAlreadyReserved) {
+        deny("autonomy_already_reserved");
+        return;
+      }
+      const rawDecision = this.guard.evaluateCognition(
+        initialInput.state,
+        activeJob.triggerKind,
+        initialInput.maxSteps,
+        autonomyAlreadyReserved,
+      );
+      const decision = canonicalizeGuardDecision(rawDecision);
+      if (!decision) {
+        fail("Malformed guard decision");
+        return;
+      }
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      if (!decision.allowed) {
+        deny(decision.reason);
+        return;
+      }
+
+      let frameInput = initialInput;
+      if (decision.autonomyCost > 0) {
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        const consumed = this.actor.consumeAutonomy(activeJob, decision.autonomyCost);
+        if (!consumed.accepted) {
+          deny(consumed.reason);
+          return;
+        }
+        activeJob = consumed.job;
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        frameInput = this.loadFrameInput(activeJob);
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        if (
+          frameInput.state.orenId !== activeJob.orenId
+          || frameInput.state.version !== activeJob.baseStateVersion
+        ) {
+          deny("stale_state_version");
+          return;
+        }
+      }
+
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      const frame = this.conductor.createFrame(frameInput);
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      const rawOutcome = await this.cognition.run(frame, this.capabilityPort, signal);
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      const outcome = canonicalizeCognitionOutcome(rawOutcome);
+      if (!outcome) {
+        fail("Malformed cognition outcome");
         return;
       }
       switch (outcome.kind) {
         case "completed": {
           const accepted = this.actor.acceptCognition(activeJob, outcome.proposals);
           if (!accepted.accepted) {
-            this.actor.recordCognitionExit(activeJob, {
-              kind: "failed",
-              message: `Cognition result rejected: ${accepted.reason ?? "unknown_reason"}`,
-            });
+            fail(`Cognition result rejected: ${accepted.reason ?? "unknown_reason"}`);
           }
           return;
         }
         case "waiting_for_effect":
-          this.actor.recordCognitionWaiting(activeJob, outcome.effectId);
+          attempt(() => this.actor.recordCognitionWaiting(activeJob, outcome.effectId));
           return;
         case "failed":
-          this.actor.recordCognitionExit(activeJob, {
-            kind: "failed",
-            message: outcome.message,
-          });
+          fail(outcome.message);
           return;
         case "aborted":
-          this.actor.recordCognitionExit(activeJob, {
-            kind: "aborted",
-            reason: interruptionReason(signal),
-          });
+          abort();
           return;
       }
     } catch (error) {
       if (signal.aborted) {
-        this.actor.recordCognitionExit(activeJob, {
-          kind: "aborted",
-          reason: interruptionReason(signal),
-        });
+        abort();
         return;
       }
-      this.actor.recordCognitionExit(activeJob, {
-        kind: "failed",
-        message: errorMessage(error),
-      });
+      fail(errorMessage(error));
     }
   }
 }

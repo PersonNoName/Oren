@@ -1,7 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import {
+  canonicalizeCoreEvent,
+  canonicalizeEffect as canonicalizeKernelEffect,
+  canonicalizeEventEnvelope,
+  canonicalizeInstant,
   canonicalizeJson,
+  hasValidLifeStateBudgets,
   reduceLifeState,
   type Effect,
   type EventEnvelope,
@@ -190,6 +195,14 @@ function semanticJsonEqual(left: JsonValue, right: JsonValue): boolean {
     });
 }
 
+function semanticUnknownEqual(left: unknown, right: unknown): boolean {
+  const canonicalLeft = canonicalizeJson(left);
+  const canonicalRight = canonicalizeJson(right);
+  return canonicalLeft.ok
+    && canonicalRight.ok
+    && semanticJsonEqual(canonicalLeft.value, canonicalRight.value);
+}
+
 export class SqliteLifeRepository {
   public constructor(
     private readonly db: DatabaseSync,
@@ -202,6 +215,9 @@ export class SqliteLifeRepository {
   }
 
   public initialize(state: LifeState): void {
+    if (!hasValidLifeStateBudgets(state)) {
+      throw new Error("Initial LifeState contains invalid budgets");
+    }
     this.db.prepare(`
       INSERT OR IGNORE INTO snapshots(oren_id, version, cursor, state_json)
       VALUES (?, ?, ?, ?)
@@ -265,9 +281,10 @@ export class SqliteLifeRepository {
   }
 
   public commit(orenId: string, events: readonly EventEnvelope[]): void {
-    const effects = events.flatMap((event) =>
+    const canonicalEvents = this.canonicalEvents(orenId, events);
+    const effects = canonicalEvents.flatMap((event) =>
       event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
-    this.appendAndEnqueueEffects(orenId, events, effects);
+    this.appendCanonicalEventsAndEffects(orenId, canonicalEvents, effects);
   }
 
   public commitIfVersion(
@@ -275,16 +292,18 @@ export class SqliteLifeRepository {
     expectedVersion: number,
     events: readonly EventEnvelope[],
   ): boolean {
-    const effects = events.flatMap((event) =>
+    const canonicalEvents = this.canonicalEvents(orenId, events);
+    const effects = canonicalEvents.flatMap((event) =>
       event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
-    this.validateOrenIdentities(orenId, events, effects);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      if (this.rehydrate(orenId).version !== expectedVersion) {
+      const current = this.rehydrate(orenId);
+      if (current.version !== expectedVersion) {
         this.db.exec("ROLLBACK");
         return false;
       }
-      this.insertEventsAndSideTables(orenId, events, effects);
+      this.validateStateTransition(current, canonicalEvents);
+      this.insertEventsAndSideTables(orenId, canonicalEvents, effects);
       this.db.exec("COMMIT");
       return true;
     } catch (error) {
@@ -298,9 +317,26 @@ export class SqliteLifeRepository {
     events: readonly EventEnvelope[],
     effects: readonly Effect[],
   ): void {
-    this.validateOrenIdentities(orenId, events, effects);
+    const canonicalEvents = this.canonicalEvents(orenId, events);
+    const canonicalEffects = effects.map((effect) => {
+      const canonical = canonicalizeKernelEffect(effect);
+      if (!canonical) throw new Error("Invalid Effect payload");
+      if (canonical.orenId !== orenId) {
+        throw new Error(`Effect ${canonical.effectId} orenId does not match ${orenId}`);
+      }
+      return canonical;
+    });
+    this.appendCanonicalEventsAndEffects(orenId, canonicalEvents, canonicalEffects);
+  }
+
+  private appendCanonicalEventsAndEffects(
+    orenId: string,
+    events: readonly EventEnvelope[],
+    effects: readonly Effect[],
+  ): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (events.length > 0) this.validateStateTransition(this.rehydrate(orenId), events);
       this.insertEventsAndSideTables(orenId, events, effects);
       this.db.exec("COMMIT");
     } catch (error) {
@@ -321,29 +357,36 @@ export class SqliteLifeRepository {
       insertEvent.run(event.eventId, orenId, event.recordedAt, JSON.stringify(event));
       if (event.payload.type === "WakeScheduled") {
         const existing = this.db.prepare(`
-          SELECT oren_id FROM schedules WHERE schedule_id = ?
+          SELECT oren_id, due_at, purpose, delivered_at
+          FROM schedules WHERE schedule_id = ?
         `).get(event.payload.scheduleId);
-        if (existing && String(existing.oren_id) !== orenId) {
-          throw new Error(
-            `Schedule ${event.payload.scheduleId} already belongs to ${String(existing.oren_id)}`,
+        if (existing) {
+          const existingDueAt = canonicalizeInstant(String(existing.due_at));
+          if (
+            String(existing.oren_id) !== orenId
+            || existingDueAt !== event.payload.at
+            || String(existing.purpose) !== event.payload.purpose
+          ) {
+            throw new Error(`One-shot schedule ${event.payload.scheduleId} conflicts`);
+          }
+          if (existing.delivered_at !== null) {
+            throw new Error(`One-shot schedule ${event.payload.scheduleId} was already delivered`);
+          }
+          if (String(existing.due_at) !== event.payload.at) {
+            this.db.prepare(`
+              UPDATE schedules SET due_at = ? WHERE schedule_id = ?
+            `).run(event.payload.at, event.payload.scheduleId);
+          }
+        } else {
+          this.db.prepare(`
+            INSERT INTO schedules(schedule_id, oren_id, due_at, purpose)
+            VALUES (?, ?, ?, ?)
+          `).run(
+            event.payload.scheduleId,
+            orenId,
+            event.payload.at,
+            event.payload.purpose,
           );
-        }
-        const scheduled = this.db.prepare(`
-          INSERT INTO schedules(schedule_id, oren_id, due_at, purpose)
-          VALUES (?, ?, ?, ?)
-          ON CONFLICT(schedule_id) DO UPDATE SET
-            due_at = excluded.due_at,
-            purpose = excluded.purpose,
-            delivered_at = NULL
-          WHERE schedules.oren_id = excluded.oren_id
-        `).run(
-          event.payload.scheduleId,
-          orenId,
-          event.payload.at,
-          event.payload.purpose,
-        );
-        if (Number(scheduled.changes) !== 1) {
-          throw new Error(`Schedule ${event.payload.scheduleId} did not transition`);
         }
       }
     }
@@ -445,8 +488,17 @@ export class SqliteLifeRepository {
     events: readonly EventEnvelope[],
     now = this.now(),
   ): boolean {
-    this.validateOrenIdentities(orenId, events, []);
-    if (events.length === 0) throw new Error("Inbox commit requires at least one event");
+    const canonicalEvents = this.canonicalEvents(orenId, events);
+    if (canonicalEvents.length !== 2) {
+      throw new Error("Inbox commit requires exactly a two-event transition");
+    }
+    const accepted = canonicalEvents[0]!;
+    const requested = canonicalEvents[1]!;
+    if (requested.payload.type !== "CognitionRequested") {
+      throw new Error("Inbox transition must end with CognitionRequested");
+    }
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Inbox commit time must be a valid instant");
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.prepare(`
@@ -467,45 +519,44 @@ export class SqliteLifeRepository {
         throw new Error(`Inbox ${inboxId} payload is corrupt`);
       }
       const payload = canonicalizeInboxPayload(parsed);
-      const accepted = events[0]!;
-      const canonicalAccepted = canonicalizeJson(accepted.payload);
-      const canonicalDurableEvent = payload
-        ? canonicalizeJson(payload.event)
-        : { ok: false as const, reason: "missing payload" };
+      const durableEvent = payload ? canonicalizeCoreEvent(payload.event) : undefined;
+      const expectedTrigger = durableEvent?.type === "WakeDue"
+        ? "scheduled_wake"
+        : durableEvent?.type === "EffectCompleted"
+          || durableEvent?.type === "EffectFailed"
+          || durableEvent?.type === "EffectUncertain"
+          ? "effect_result"
+          : undefined;
       if (
         !payload
+        || !durableEvent
+        || expectedTrigger === undefined
         || accepted.correlationId !== payload.correlationId
-        || !canonicalAccepted.ok
-        || !canonicalDurableEvent.ok
-        || !semanticJsonEqual(canonicalAccepted.value, canonicalDurableEvent.value)
+        || requested.correlationId !== payload.correlationId
+        || accepted.orenId !== orenId
+        || requested.orenId !== orenId
+        || requested.payload.triggerKind !== expectedTrigger
+        || !semanticUnknownEqual(accepted.payload, durableEvent)
       ) {
         throw new Error(`Inbox ${inboxId} event identity does not match its durable payload`);
       }
-      const requestedIndex = events.findIndex(
-        (event) => event.payload.type === "CognitionRequested",
-      );
-      const requested = requestedIndex >= 0 ? events[requestedIndex] : undefined;
-      if (
-        requested?.payload.type === "CognitionRequested"
-        && requested.payload.baseStateVersion
-          !== this.rehydrate(orenId).version + requestedIndex + 1
-      ) {
+      const current = this.rehydrate(orenId);
+      if (requested.payload.baseStateVersion !== current.version + 2) {
         this.db.exec("ROLLBACK");
         return false;
       }
+      this.validateStateTransition(current, canonicalEvents);
       const committed = this.db.prepare(`
         UPDATE inbox
         SET processed_at = ?, lease_owner = NULL, lease_token = NULL, lease_until = NULL
         WHERE inbox_id = ? AND oren_id = ? AND processed_at IS NULL
           AND lease_owner = ? AND lease_token = ? AND lease_until > ?
-      `).run(now, inboxId, orenId, leaseOwner, leaseToken, now);
+      `).run(canonicalNow, inboxId, orenId, leaseOwner, leaseToken, canonicalNow);
       if (Number(committed.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return false;
       }
-      const effects = events.flatMap((event) =>
-        event.payload.type === "EffectRequested" ? [event.payload.effect] : []);
-      this.insertEventsAndSideTables(orenId, events, effects);
+      this.insertEventsAndSideTables(orenId, canonicalEvents, []);
       this.db.exec("COMMIT");
       return true;
     } catch (error) {
@@ -514,38 +565,62 @@ export class SqliteLifeRepository {
     }
   }
 
-  private validateOrenIdentities(
+  private canonicalEvents(
     orenId: string,
     events: readonly EventEnvelope[],
-    effects: readonly Effect[],
-  ): void {
+  ): EventEnvelope[] {
+    const canonicalEvents: EventEnvelope[] = [];
     for (const event of events) {
       if (
-        typeof event.eventId !== "string"
-        || typeof event.orenId !== "string"
-        || event.schemaVersion !== 1
-        || typeof event.occurredAt !== "string"
-        || typeof event.recordedAt !== "string"
-        || typeof event.source !== "string"
-        || (event.causationId !== null && typeof event.causationId !== "string")
-        || typeof event.correlationId !== "string"
-        || typeof event.payload !== "object"
-        || event.payload === null
-        || typeof event.payload.type !== "string"
+        typeof event === "object"
+        && event !== null
+        && typeof event.payload === "object"
+        && event.payload !== null
+        && event.payload.type === "WakeScheduled"
+        && canonicalizeInstant(event.payload.at) === undefined
       ) {
-        throw new Error("Invalid event envelope identity");
+        throw new Error("WakeScheduled timestamp must be a valid instant");
       }
-      if (event.orenId !== orenId) {
-        throw new Error(`Event ${event.eventId} orenId does not match ${orenId}`);
+      if (
+        typeof event === "object"
+        && event !== null
+        && typeof event.payload === "object"
+        && event.payload !== null
+        && event.payload.type === "EffectRequested"
+        && (
+          typeof event.payload.effect !== "object"
+          || event.payload.effect === null
+          || event.payload.effect.orenId !== orenId
+        )
+      ) {
+        throw new Error(`EffectRequested event ${String(event.eventId)} has a mismatched orenId`);
       }
-      if (event.payload.type === "EffectRequested" && event.payload.effect?.orenId !== orenId) {
-        throw new Error(`EffectRequested event ${event.eventId} has a mismatched orenId`);
+      const canonical = canonicalizeEventEnvelope(event);
+      if (!canonical) {
+        throw new Error("Invalid event envelope identity or exact payload variant");
       }
+      if (canonical.orenId !== orenId) {
+        throw new Error(`Event ${canonical.eventId} orenId does not match ${orenId}`);
+      }
+      if (
+        canonical.payload.type === "EffectRequested"
+        && canonical.payload.effect.orenId !== orenId
+      ) {
+        throw new Error(`EffectRequested event ${canonical.eventId} has a mismatched orenId`);
+      }
+      canonicalEvents.push(canonical);
     }
-    for (const effect of effects) {
-      if (effect.orenId !== orenId) {
-        throw new Error(`Effect ${effect.effectId} orenId does not match ${orenId}`);
-      }
+    return canonicalEvents;
+  }
+
+  private validateStateTransition(
+    state: LifeState,
+    events: readonly EventEnvelope[],
+  ): void {
+    if (!hasValidLifeStateBudgets(state)) throw new Error("Invalid durable LifeState budgets");
+    const next = events.reduce(reduceLifeState, state);
+    if (!hasValidLifeStateBudgets(next)) {
+      throw new Error("Event transition produced invalid LifeState budgets");
     }
   }
 
@@ -576,17 +651,60 @@ export class SqliteLifeRepository {
       throw new Error("Schedule claim limit must be a nonnegative safe integer");
     }
     if (limit === 0) return [];
-    return this.db.prepare(`
-      SELECT schedule_id, oren_id, purpose
-      FROM schedules
-      WHERE due_at <= ? AND delivered_at IS NULL
-      ORDER BY due_at, schedule_id
-      LIMIT ?
-    `).all(now, limit).map((row) => ({
-      scheduleId: String(row.schedule_id),
-      orenId: String(row.oren_id),
-      purpose: String(row.purpose),
-    }));
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Schedule claim time must be a valid instant");
+    const nowMs = Date.parse(canonicalNow);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db.prepare(`
+        SELECT schedule_id, oren_id, due_at, purpose
+        FROM schedules
+        WHERE delivered_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM schedule_quarantine
+            WHERE schedule_quarantine.schedule_id = schedules.schedule_id
+          )
+        ORDER BY rowid
+      `).all();
+      const quarantine = this.db.prepare(`
+        INSERT OR IGNORE INTO schedule_quarantine(schedule_id, reason, quarantined_at)
+        VALUES (?, ?, ?)
+      `);
+      const due: Array<{
+        scheduleId: string;
+        orenId: string;
+        purpose: string;
+        dueMs: number;
+      }> = [];
+      for (const row of rows) {
+        const scheduleId = String(row.schedule_id);
+        const dueAt = canonicalizeInstant(String(row.due_at));
+        if (!dueAt) {
+          quarantine.run(scheduleId, "schedule due_at is not a valid instant", canonicalNow);
+          continue;
+        }
+        const dueMs = Date.parse(dueAt);
+        if (dueMs <= nowMs) {
+          due.push({
+            scheduleId,
+            orenId: String(row.oren_id),
+            purpose: String(row.purpose),
+            dueMs,
+          });
+        }
+      }
+      due.sort((left, right) =>
+        left.dueMs - right.dueMs || left.scheduleId.localeCompare(right.scheduleId));
+      this.db.exec("COMMIT");
+      return due.slice(0, limit).map(({ scheduleId, orenId, purpose }) => ({
+        scheduleId,
+        orenId,
+        purpose,
+      }));
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   public deliverWake(
@@ -594,45 +712,84 @@ export class SqliteLifeRepository {
     now = this.now(),
   ): boolean {
     const scheduleId = typeof schedule === "string" ? schedule : schedule.scheduleId;
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Wake delivery time must be a valid instant");
+    const nowMs = Date.parse(canonicalNow);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db.prepare(`
         SELECT oren_id, due_at, purpose, delivered_at
         FROM schedules WHERE schedule_id = ?
       `).get(scheduleId);
-      if (
-        !row
-        || row.delivered_at !== null
-        || String(row.due_at) > now
-      ) {
+      if (!row || row.delivered_at !== null) {
         this.db.exec("ROLLBACK");
         return false;
       }
       const orenId = String(row.oren_id);
-      const dueAt = String(row.due_at);
+      const dueAt = canonicalizeInstant(String(row.due_at));
       const purpose = String(row.purpose);
+      if (!dueAt) {
+        this.db.prepare(`
+          INSERT OR IGNORE INTO schedule_quarantine(schedule_id, reason, quarantined_at)
+          VALUES (?, ?, ?)
+        `).run(scheduleId, "schedule due_at is not a valid instant", canonicalNow);
+        this.db.exec("COMMIT");
+        return false;
+      }
+      if (Date.parse(dueAt) > nowMs) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      const inboxId = `wake:${scheduleId}`;
+      const expectedPayload = {
+        correlationId: `schedule:${scheduleId}`,
+        event: { type: "WakeDue", scheduleId, purpose },
+      } as const;
+      const existingInbox = this.db.prepare(`
+        SELECT oren_id, priority, payload_json, processed_at
+        FROM inbox WHERE inbox_id = ?
+      `).get(inboxId);
+      if (existingInbox) {
+        let existingPayload: ReturnType<typeof canonicalizeInboxPayload>;
+        try {
+          existingPayload = canonicalizeInboxPayload(
+            JSON.parse(String(existingInbox.payload_json)),
+          );
+        } catch {
+          existingPayload = undefined;
+        }
+        const canonicalExpected = canonicalizeInboxPayload(expectedPayload);
+        const matching = String(existingInbox.oren_id) === orenId
+          && Number(existingInbox.priority) === 2
+          && existingInbox.processed_at === null
+          && existingPayload !== undefined
+          && canonicalExpected !== undefined
+          && semanticUnknownEqual(existingPayload, canonicalExpected);
+        if (!matching) {
+          this.db.prepare(`
+            INSERT OR IGNORE INTO schedule_quarantine(schedule_id, reason, quarantined_at)
+            VALUES (?, ?, ?)
+          `).run(scheduleId, "wake inbox conflicts with durable schedule", canonicalNow);
+          this.db.exec("COMMIT");
+          return false;
+        }
+      }
       const delivered = this.db.prepare(`
         UPDATE schedules
         SET delivered_at = ?
         WHERE schedule_id = ? AND oren_id = ? AND due_at = ? AND purpose = ?
-          AND delivered_at IS NULL AND due_at <= ?
-      `).run(now, scheduleId, orenId, dueAt, purpose, now);
+          AND delivered_at IS NULL
+      `).run(canonicalNow, scheduleId, orenId, String(row.due_at), purpose);
       if (Number(delivered.changes) !== 1) {
         this.db.exec("ROLLBACK");
         return false;
       }
-      this.db.prepare(`
-        INSERT INTO inbox(inbox_id, oren_id, priority, available_at, payload_json)
-        VALUES (?, ?, 2, ?, ?)
-      `).run(
-        `wake:${scheduleId}`,
-        orenId,
-        now,
-        JSON.stringify({
-          correlationId: `schedule:${scheduleId}`,
-          event: { type: "WakeDue", scheduleId, purpose },
-        }),
-      );
+      if (!existingInbox) {
+        this.db.prepare(`
+          INSERT INTO inbox(inbox_id, oren_id, priority, available_at, payload_json)
+          VALUES (?, ?, 2, ?, ?)
+        `).run(inboxId, orenId, canonicalNow, JSON.stringify(expectedPayload));
+      }
       this.db.exec("COMMIT");
       return true;
     } catch (error) {

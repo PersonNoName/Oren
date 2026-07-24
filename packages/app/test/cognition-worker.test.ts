@@ -146,6 +146,34 @@ describe("CognitionWorker", () => {
     });
   });
 
+  it("resumes a post-reservation job without charging the episode twice", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    const reserved = harness.actor.consumeAutonomy(job("scheduled_wake"), 3);
+    if (!reserved.accepted) throw new Error("test reservation failed");
+    let modelCalls = 0;
+    const worker = workerFor(harness, async () => {
+      modelCalls += 1;
+      return { kind: "completed", proposals: [], usage: { totalTokens: 1 } };
+    }, 3);
+
+    await worker.run(reserved.job, new AbortController().signal);
+
+    expect(modelCalls).toBe(1);
+    expect(harness.state.budgets.autonomyRemaining).toBe(2);
+    expect(harness.events.map((event) => event.payload.type)).toEqual([
+      "AutonomyConsumed",
+      "CognitionCompleted",
+    ]);
+  });
+
   it("durably records waiting, failure, thrown, and interrupted outcomes", async () => {
     const outcomes = [
       {
@@ -280,6 +308,313 @@ describe("CognitionWorker", () => {
       "AutonomyConsumed",
       "CognitionDenied",
     ]);
+  });
+
+  it.each([
+    {
+      name: "initial frame loader",
+      makeWorker: (harness: ReturnType<typeof actorHarness>) => new CognitionWorker(
+        { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+        new Conductor(),
+        harness.actor,
+        new Guard(),
+        () => {
+          throw new Error("loader exploded");
+        },
+        { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+      ),
+      message: "loader exploded",
+    },
+    {
+      name: "guard",
+      makeWorker: (harness: ReturnType<typeof actorHarness>) => new CognitionWorker(
+        { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+        new Conductor(),
+        harness.actor,
+        {
+          evaluateCognition: () => {
+            throw new Error("guard exploded");
+          },
+        } as unknown as Guard,
+        (candidate) => ({
+          state: harness.state,
+          correlationId: candidate.correlationId,
+          trigger: { kind: candidate.triggerKind, summary: "test" },
+          capabilities: [],
+          maxSteps: 1,
+        }),
+        { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+      ),
+      message: "guard exploded",
+    },
+  ])("records a durable failure when the $name throws", async ({ makeWorker, message }) => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+    });
+
+    await expect(makeWorker(harness).run(
+      job("foreground_user"),
+      new AbortController().signal,
+    )).resolves.toBeUndefined();
+    expect(harness.events.at(-1)?.payload).toEqual({
+      type: "CognitionFailed",
+      episodeId: "episode-1",
+      message,
+    });
+  });
+
+  it("records a durable failure when autonomy reservation throws", async () => {
+    const state = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    };
+    const events: EventEnvelope[] = [];
+    const repository: LifeRepositoryPort = {
+      loadState: () => state,
+      commit: (_orenId, accepted) => events.push(...accepted),
+      commitIfVersion: () => {
+        throw new Error("reservation exploded");
+      },
+      commitInbox: () => false,
+    };
+    const actor = new LifeActor(repository, () => `event-${events.length}`, () => "2026-07-24T00:00:00.000Z");
+    const worker = new CognitionWorker(
+      { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+      new Conductor(),
+      actor,
+      new Guard(),
+      (candidate) => ({
+        state,
+        correlationId: candidate.correlationId,
+        trigger: { kind: candidate.triggerKind, summary: "test" },
+        capabilities: [],
+        maxSteps: 2,
+      }),
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await expect(worker.run(job("health_check"), new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(events.at(-1)?.payload).toEqual({
+      type: "CognitionFailed",
+      episodeId: "episode-1",
+      message: "reservation exploded",
+    });
+  });
+
+  it("uses the reserved job when post-reservation loading throws", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    let loads = 0;
+    const worker = new CognitionWorker(
+      { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+      new Conductor(),
+      harness.actor,
+      new Guard(),
+      (candidate) => {
+        loads += 1;
+        if (loads === 2) throw new Error("reload exploded");
+        return {
+          state: harness.state,
+          correlationId: candidate.correlationId,
+          trigger: { kind: candidate.triggerKind, summary: "test" },
+          capabilities: [],
+          maxSteps: 2,
+        };
+      },
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await worker.run(job("health_check"), new AbortController().signal);
+
+    expect(harness.events.map((event) => event.payload)).toEqual([
+      {
+        type: "AutonomyConsumed",
+        episodeId: "episode-1",
+        baseStateVersion: 2,
+        amount: 2,
+      },
+      {
+        type: "CognitionFailed",
+        episodeId: "episode-1",
+        message: "reload exploded",
+      },
+    ]);
+  });
+
+  it("rechecks a re-entrant abort before reserving autonomy", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    const controller = new AbortController();
+    const worker = new CognitionWorker(
+      { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+      new Conductor(),
+      harness.actor,
+      {
+        evaluateCognition: () => {
+          controller.abort("shutdown");
+          return { allowed: true, autonomyCost: 2 };
+        },
+      } as unknown as Guard,
+      (candidate) => ({
+        state: harness.state,
+        correlationId: candidate.correlationId,
+        trigger: { kind: candidate.triggerKind, summary: "test" },
+        capabilities: [],
+        maxSteps: 2,
+      }),
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await worker.run(job("health_check"), controller.signal);
+
+    expect(harness.state.budgets.autonomyRemaining).toBe(5);
+    expect(harness.events.map((event) => event.payload)).toEqual([{
+      type: "EpisodeInterrupted",
+      episodeId: "episode-1",
+      reason: "shutdown",
+    }]);
+  });
+
+  it("does not call cognition when abortion occurs during the post-reservation reload", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+      budgets: {
+        autonomyRemaining: 5,
+        interactionMaxSteps: 8,
+        commitmentRemaining: {},
+      },
+    });
+    const controller = new AbortController();
+    let loads = 0;
+    let modelCalls = 0;
+    const worker = new CognitionWorker(
+      {
+        run: async () => {
+          modelCalls += 1;
+          return { kind: "completed", proposals: [], usage: { totalTokens: 1 } };
+        },
+      },
+      new Conductor(),
+      harness.actor,
+      new Guard(),
+      (candidate) => {
+        loads += 1;
+        if (loads === 2) controller.abort("foreground_user");
+        return {
+          state: harness.state,
+          correlationId: candidate.correlationId,
+          trigger: { kind: candidate.triggerKind, summary: "test" },
+          capabilities: [],
+          maxSteps: 2,
+        };
+      },
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await worker.run(job("health_check"), controller.signal);
+
+    expect(modelCalls).toBe(0);
+    expect(harness.events.map((event) => event.payload.type)).toEqual([
+      "AutonomyConsumed",
+      "EpisodeInterrupted",
+    ]);
+  });
+
+  it("records a malformed hostile cognition outcome as a durable failure", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+    });
+    const worker = workerFor(harness, async () => ({
+      kind: "completed",
+      proposals: "not-an-array",
+      usage: { totalTokens: Number.NaN },
+    } as unknown as Awaited<ReturnType<CognitionPort["run"]>>), 1);
+
+    await worker.run(job("foreground_user"), new AbortController().signal);
+
+    expect(harness.events.at(-1)?.payload).toEqual({
+      type: "CognitionFailed",
+      episodeId: "episode-1",
+      message: "Malformed cognition outcome",
+    });
+  });
+
+  it("records a malformed hostile guard decision as a durable failure", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+    });
+    const worker = new CognitionWorker(
+      { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+      new Conductor(),
+      harness.actor,
+      {
+        evaluateCognition: () => ({ allowed: true, autonomyCost: Number.NaN }),
+      } as unknown as Guard,
+      (candidate) => ({
+        state: harness.state,
+        correlationId: candidate.correlationId,
+        trigger: { kind: candidate.triggerKind, summary: "test" },
+        capabilities: [],
+        maxSteps: 1,
+      }),
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await worker.run(job("foreground_user"), new AbortController().signal);
+
+    expect(harness.events.at(-1)?.payload).toEqual({
+      type: "CognitionFailed",
+      episodeId: "episode-1",
+      message: "Malformed guard decision",
+    });
+  });
+
+  it("contains a durable terminal callback failure after attempting closure", async () => {
+    let attempts = 0;
+    const actor = {
+      recordCognitionExit: () => {
+        attempts += 1;
+        throw new Error("storage unavailable");
+      },
+    } as unknown as LifeActor;
+    const worker = new CognitionWorker(
+      { run: async () => ({ kind: "aborted", usage: { totalTokens: 0 } }) },
+      new Conductor(),
+      actor,
+      new Guard(),
+      () => {
+        throw new Error("loader exploded");
+      },
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+    );
+
+    await expect(worker.run(job("foreground_user"), new AbortController().signal))
+      .resolves.toBeUndefined();
+    expect(attempts).toBe(1);
   });
 });
 

@@ -1,5 +1,6 @@
 import type { TriggerKind } from "./protocol.js";
 import type { LifeState } from "./state.js";
+import { hasValidLifeStateBudgets } from "./runtime-validation.js";
 
 export interface Grant {
   readonly grantId: string;
@@ -23,11 +24,21 @@ export class Guard {
     state: LifeState,
     trigger: TriggerKind,
     requestedSteps: number,
+    autonomyAlreadyReserved = false,
   ): GuardDecision {
+    if (!Number.isSafeInteger(requestedSteps) || requestedSteps <= 0) {
+      return { allowed: false, reason: "invalid_requested_steps" };
+    }
+    if (!hasValidLifeStateBudgets(state)) {
+      return { allowed: false, reason: "invalid_state_budgets" };
+    }
     if (requestedSteps > state.budgets.interactionMaxSteps) {
       return { allowed: false, reason: "episode_step_limit" };
     }
     if (trigger === "foreground_user" || trigger === "effect_result") {
+      return { allowed: true, autonomyCost: 0 };
+    }
+    if (autonomyAlreadyReserved) {
       return { allowed: true, autonomyCost: 0 };
     }
     if (state.budgets.autonomyRemaining < requestedSteps) {

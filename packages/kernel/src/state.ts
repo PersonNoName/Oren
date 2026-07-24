@@ -24,6 +24,15 @@ export interface LifeState {
     readonly interactionMaxSteps: number;
     readonly commitmentRemaining: Readonly<Record<string, number>>;
   };
+  /**
+   * Durable replay index for exactly-once background autonomy reservations.
+   * Optional only so snapshots written before this field existed remain replayable.
+   */
+  readonly autonomyReservations?: Readonly<Record<string, {
+    readonly amount: number;
+    readonly baseStateVersion: number;
+    readonly correlationId: string;
+  }>>;
   readonly chronicleCursor: number;
 }
 
@@ -38,6 +47,7 @@ export function createInitialLifeState(orenId: OrenId, personId: PersonId): Life
     pendingEffectIds: [],
     schedules: [],
     budgets: { autonomyRemaining: 0, interactionMaxSteps: 8, commitmentRemaining: {} },
+    autonomyReservations: {},
     chronicleCursor: 0,
   };
 }

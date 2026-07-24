@@ -155,6 +155,88 @@ describe("EpisodeCoordinator", () => {
     await coordinator.waitForIdle("oren-1");
     expect(maximumActive).toBe(1);
   });
+
+  it("shutdown aborts active work and durably closes pending and new jobs without cognition", async () => {
+    const cognition: string[] = [];
+    const closed: Array<{ episodeId: string; reason: unknown }> = [];
+    const coordinator = new EpisodeCoordinator(
+      async (candidate, signal) => {
+        cognition.push(candidate.episodeId);
+        if (candidate.episodeId === "active") {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        }
+      },
+      async (candidate, signal) => {
+        closed.push({ episodeId: candidate.episodeId, reason: signal.reason });
+      },
+    );
+
+    await coordinator.start(job("active", "health_check"));
+    void coordinator.start(job("pending-a", "health_check"));
+    void coordinator.start(job("pending-b", "scheduled_wake"));
+
+    await expect(coordinator.interrupt("oren-1", "shutdown")).resolves.toBeUndefined();
+    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
+    await expect(coordinator.start(job("after-shutdown", "foreground_user"))).resolves.toBeUndefined();
+    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
+
+    expect(cognition).toEqual(["active"]);
+    expect(closed).toEqual([
+      { episodeId: "pending-b", reason: "shutdown" },
+      { episodeId: "pending-a", reason: "shutdown" },
+      { episodeId: "after-shutdown", reason: "shutdown" },
+    ]);
+  });
+
+  it("requires explicit resume before cognition starts after shutdown", async () => {
+    const cognition: string[] = [];
+    const closed: string[] = [];
+    const coordinator = new EpisodeCoordinator(
+      async (candidate) => {
+        cognition.push(candidate.episodeId);
+      },
+      async (candidate) => {
+        closed.push(candidate.episodeId);
+      },
+    );
+
+    await coordinator.interrupt("oren-1", "shutdown");
+    await coordinator.start(job("closed", "health_check"));
+    coordinator.resume("oren-1");
+    await coordinator.start(job("resumed", "health_check"));
+    await coordinator.waitForIdle("oren-1");
+
+    expect(closed).toEqual(["closed"]);
+    expect(cognition).toEqual(["resumed"]);
+  });
+
+  it("a non-shutdown interruption preserves queued work", async () => {
+    const transitions: string[] = [];
+    const coordinator = new EpisodeCoordinator(async (candidate, signal) => {
+      transitions.push(`start:${candidate.episodeId}`);
+      if (candidate.episodeId === "active") {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            transitions.push(`abort:${String(signal.reason)}`);
+            resolve();
+          }, { once: true });
+        });
+      }
+    });
+
+    await coordinator.start(job("active", "health_check"));
+    void coordinator.start(job("queued", "health_check"));
+    await coordinator.interrupt("oren-1", "cognition_abort");
+    await coordinator.waitForIdle("oren-1");
+
+    expect(transitions).toEqual([
+      "start:active",
+      "abort:cognition_abort",
+      "start:queued",
+    ]);
+  });
 });
 
 function job(
