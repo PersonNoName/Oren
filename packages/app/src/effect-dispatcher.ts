@@ -23,7 +23,7 @@ type TerminalEffectEvent =
   | Extract<CoreEvent, { type: "EffectUncertain" }>;
 
 export interface EffectRepository {
-  claimOutbox(worker: string, limit: number): ClaimedEffect[];
+  claimOutbox(worker: string, limit: number, now: string): ClaimedEffect[];
   finishEffect(
     effectId: string,
     orenId: string,
@@ -148,7 +148,11 @@ export class EffectDispatcher {
   }
 
   public async runOnce(): Promise<EffectDispatchResult[]> {
-    const claimed = this.repository.claimOutbox(this.workerId, this.claimLimit);
+    const claimed = this.repository.claimOutbox(
+      this.workerId,
+      this.claimLimit,
+      new Date(this.now()).toISOString(),
+    );
     const results: EffectDispatchResult[] = [];
     for (const row of claimed) {
       results.push(await this.processClaimedEffect(row));

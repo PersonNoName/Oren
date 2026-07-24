@@ -11,6 +11,7 @@ import {
   type Effect,
   type EventEnvelope,
   type Grant,
+  type CognitionJob,
   type JsonObject,
   type JsonValue,
   type LifeState,
@@ -224,6 +225,33 @@ export class SqliteLifeRepository {
     `).run(state.orenId, state.version, state.chronicleCursor, JSON.stringify(state));
   }
 
+  public listLifeIdentities(): Array<{
+    readonly orenId: string;
+    readonly personId: string;
+  }> {
+    return this.db.prepare(`
+      SELECT oren_id, state_json FROM snapshots ORDER BY oren_id
+    `).all().map((row) => {
+      let state: LifeState;
+      try {
+        state = JSON.parse(String(row.state_json)) as LifeState;
+      } catch {
+        throw new Error(`Initial snapshot for ${String(row.oren_id)} is corrupt`);
+      }
+      if (
+        state.orenId !== String(row.oren_id)
+        || typeof state.relationship?.primaryPersonId !== "string"
+        || !hasValidLifeStateBudgets(state)
+      ) {
+        throw new Error(`Initial snapshot for ${String(row.oren_id)} is invalid`);
+      }
+      return {
+        orenId: state.orenId,
+        personId: state.relationship.primaryPersonId,
+      };
+    });
+  }
+
   public putGrant(orenId: string, grant: Grant): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -254,6 +282,43 @@ export class SqliteLifeRepository {
 
   public loadEvents(orenId: string): EventEnvelope[] {
     return this.loadEventsAfter(orenId, 0);
+  }
+
+  public loadPendingCognitionJobs(): CognitionJob[] {
+    const pending = new Map<string, CognitionJob>();
+    const rows = this.db.prepare(`
+      SELECT envelope_json FROM events ORDER BY sequence
+    `).all();
+    for (const row of rows) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(row.envelope_json));
+      } catch {
+        throw new Error("Durable event log contains invalid JSON");
+      }
+      const event = canonicalizeEventEnvelope(parsed);
+      if (!event) throw new Error("Durable event log contains an invalid event");
+      if (event.payload.type === "CognitionRequested") {
+        pending.set(`${event.orenId}\0${event.payload.episodeId}`, {
+          orenId: event.orenId,
+          episodeId: event.payload.episodeId,
+          baseStateVersion: event.payload.baseStateVersion,
+          triggerKind: event.payload.triggerKind,
+          correlationId: event.correlationId,
+        });
+        continue;
+      }
+      if (
+        event.payload.type === "CognitionCompleted"
+        || event.payload.type === "CognitionDenied"
+        || event.payload.type === "CognitionWaitingForEffect"
+        || event.payload.type === "CognitionFailed"
+        || event.payload.type === "EpisodeInterrupted"
+      ) {
+        pending.delete(`${event.orenId}\0${event.payload.episodeId}`);
+      }
+    }
+    return [...pending.values()];
   }
 
   private loadEventsAfter(orenId: string, cursor: number): EventEnvelope[] {
@@ -654,6 +719,38 @@ export class SqliteLifeRepository {
     }
   }
 
+  public quarantineInbox(
+    inboxId: string,
+    leaseOwner: string,
+    leaseToken: string,
+    reason: string,
+    now = this.now(),
+  ): boolean {
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Inbox quarantine time must be a valid instant");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = this.db.prepare(`
+        SELECT 1 FROM inbox
+        WHERE inbox_id = ? AND processed_at IS NULL
+          AND lease_owner = ? AND lease_token = ?
+      `).get(inboxId, leaseOwner, leaseToken);
+      if (!claimed) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.db.prepare(`
+        INSERT OR IGNORE INTO inbox_quarantine(inbox_id, reason, quarantined_at)
+        VALUES (?, ?, ?)
+      `).run(inboxId, reason, canonicalNow);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private canonicalEvents(
     orenId: string,
     events: readonly EventEnvelope[],
@@ -887,7 +984,7 @@ export class SqliteLifeRepository {
     }
   }
 
-  public claimOutbox(worker: string, limit: number, now = new Date().toISOString()): OutboxRow[] {
+  public claimOutbox(worker: string, limit: number, now = this.now()): OutboxRow[] {
     if (!Number.isSafeInteger(limit) || limit < 0) {
       throw new Error("Outbox claim limit must be a nonnegative safe integer");
     }

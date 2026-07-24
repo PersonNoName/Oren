@@ -7,8 +7,10 @@
     "@oren/cognition": "*",
     "@oren/extensions": "*",
     "@oren/kernel": "*",
-    "@oren/pi-cognition": "*",
     "@oren/storage": "*",
     "@oren/test-counter": "*"
+  },
+  "devDependencies": {
+    "@oren/pi-cognition": "*"
   }
 }
