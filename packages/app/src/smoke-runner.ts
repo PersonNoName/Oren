@@ -18,6 +18,30 @@ export interface EpisodeRecord {
   readonly totalTokens: number;
 }
 
+function assertVerticalSliceEpisodes(
+  episodes: readonly EpisodeRecord[],
+): readonly string[] {
+  const waitingIndex = episodes.findIndex(({ kind }) => kind === "waiting_for_effect");
+  if (waitingIndex === -1) {
+    return ["expected at least one waiting_for_effect episode (durable effect invocation)"];
+  }
+  const completedAfterEffect = episodes
+    .slice(waitingIndex + 1)
+    .find(({ kind }) => kind === "completed");
+  if (!completedAfterEffect) {
+    return ["expected a completed episode after waiting_for_effect"];
+  }
+  const hasScheduleWake = completedAfterEffect.proposals.some(
+    ({ type }) => type === "ScheduleWake",
+  );
+  if (!hasScheduleWake) {
+    return [
+      "expected the post-effect completed episode to include a ScheduleWake proposal",
+    ];
+  }
+  return [];
+}
+
 class RecordingCognition implements CognitionPort {
   public readonly episodes: EpisodeRecord[] = [];
 
@@ -93,6 +117,13 @@ export async function runSmoke(
       log(`total totalTokens=${totalTokens}`);
       if (JSON.stringify(afterRestart) !== JSON.stringify(beforeRestart)) {
         log("FAIL: durable replay did not reproduce the pre-restart LifeState");
+        return 1;
+      }
+      const sliceFailures = assertVerticalSliceEpisodes(recorder.episodes);
+      if (sliceFailures.length > 0) {
+        for (const failure of sliceFailures) {
+          log(`FAIL: ${failure}`);
+        }
         return 1;
       }
       log("Oren smoke completed; restart replay matched");
