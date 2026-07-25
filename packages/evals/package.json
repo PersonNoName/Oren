@@ -1,0 +1,11 @@
+{
+  "name": "@oren/evals",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/cognition": "*",
+    "@oren/kernel": "*",
+    "@oren/pi-cognition": "*"
+  }
+}
