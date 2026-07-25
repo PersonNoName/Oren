@@ -91,8 +91,8 @@ export class SqliteMemoryIndex implements MemoryPort {
       WHERE ${conditions.join(" AND ")}
     `).all(...parameters);
 
-    const queryVector = query.text !== undefined && this.embedder !== undefined
-      ? (await this.embedder.embed([query.text]))[0]
+    const queryVector = query.text !== undefined
+      ? await this.safeEmbed(query.text)
       : undefined;
 
     const scored: ScoredEntry[] = rows.flatMap((row) => {
@@ -235,9 +235,22 @@ export class SqliteMemoryIndex implements MemoryPort {
   }
 
   private async embeddingJson(text: string): Promise<string | null> {
-    if (this.embedder === undefined) return null;
-    const [vector] = await this.embedder.embed([text]);
+    const vector = await this.safeEmbed(text);
     return vector === undefined ? null : JSON.stringify(vector);
+  }
+
+  /**
+   * Projection and recall must survive an unavailable or failing embedder
+   * (network error, timeout, malformed response): treat it as "no vector"
+   * rather than letting the error escape and abort project()/recall().
+   */
+  private async safeEmbed(text: string): Promise<readonly number[] | undefined> {
+    if (this.embedder === undefined) return undefined;
+    try {
+      return (await this.embedder.embed([text]))[0];
+    } catch {
+      return undefined;
+    }
   }
 
   private ensureSchema(): void {

@@ -15,6 +15,8 @@ const PROVIDERS: Readonly<Record<string, ProviderInfo>> = {
   "openai-compatible": { baseUrl: undefined, keyEnvVars: ["OREN_EMBEDDING_API_KEY"] },
 };
 
+const EMBEDDING_REQUEST_TIMEOUT_MS = 10_000;
+
 export type EmbeddingConfigResult =
   | { readonly ok: true; readonly embedder: EmbeddingPort }
   | { readonly ok: false; readonly kind: "unconfigured" | "invalid"; readonly reason: string };
@@ -84,6 +86,7 @@ class HttpEmbedder implements EmbeddingPort {
         authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify({ model: this.model, input: texts }),
+      signal: AbortSignal.timeout(EMBEDDING_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) {
       throw new Error(`Embedding request failed: ${response.status} ${response.statusText}`);

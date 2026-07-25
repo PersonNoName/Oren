@@ -56,7 +56,13 @@ Both commands print setup instructions and exit 0 when unconfigured.
   # export OREN_EMBEDDING_API_KEY=...
   ```
 
-- 「忘记」只降低可召回性，生命史与索引行都不会删除；记忆索引可随时从事件史重建。
+- 「忘记」只降低可召回性，生命史与索引行都不会删除；记忆索引可随时从事件史重建：
+  运维/操作者调用 `LifeRuntime.rebuildMemory()`（清空索引后从完整事件史重新投影，
+  结果与增量投影一致），例如在更换 embedding 配置后为历史条目补齐向量。
+- 自动化测试（`npm test`）永远离线：`LifeRuntime.create` 默认不读取
+  `OREN_EMBEDDING_*` / 相关 API key 环境变量，即便它们在 shell 中已导出。
+  只有显式传入 `embedder`，或显式设置 `useProcessEmbeddingEnv: true`
+  （`npm run smoke` 对真实模型路径会这样做）时才会解析真实 embedding 凭据。
 
 ## Architecture boundaries
 

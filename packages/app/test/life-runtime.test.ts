@@ -11,6 +11,7 @@ import {
   type EventEnvelope,
   type LifeState,
 } from "@oren/kernel";
+import { FakeEmbedder } from "@oren/memory";
 import { PiCognitionAdapter } from "@oren/pi-cognition";
 import { openDatabase, SqliteLifeRepository } from "@oren/storage";
 import { describe, expect, it } from "vitest";
@@ -39,6 +40,10 @@ function options(
   return {
     now: () => TEST_NOW,
     nextId: sequenceIds(),
+    // Belt-and-suspenders offline guarantee alongside LifeRuntime's own
+    // opt-in gate on process.env: these tests never depend on real
+    // embeddings, so they always supply a deterministic fake one.
+    embedder: new FakeEmbedder(),
     ...overrides,
   };
 }

@@ -1,7 +1,22 @@
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import type { CoreEvent, EventEnvelope } from "@oren/kernel";
-import { cosine, FakeEmbedder, SqliteMemoryIndex, type EventRecord } from "@oren/memory";
+import {
+  cosine,
+  FakeEmbedder,
+  SqliteMemoryIndex,
+  type EmbeddingPort,
+  type EventRecord,
+} from "@oren/memory";
+
+class ThrowingEmbedder implements EmbeddingPort {
+  public callCount = 0;
+
+  public async embed(): Promise<ReadonlyArray<readonly number[]>> {
+    this.callCount += 1;
+    throw new Error("embedding backend unreachable");
+  }
+}
 
 let counter = 0;
 function userMessage(sequence: number, text: string): EventRecord {
@@ -57,6 +72,22 @@ describe("vector recall", () => {
       userMessage(1, "今天的天气很好"),
       userMessage(2, "演讲的事有进展"),
     ]);
+    const results = await index.recall({ orenId: "oren-1", text: "演讲", limit: 2 });
+    expect(results[0]!.text).toBe("演讲的事有进展");
+  });
+
+  it("contains a throwing embedder: project and keyword recall still succeed", async () => {
+    const embedder = new ThrowingEmbedder();
+    const index = new SqliteMemoryIndex(new DatabaseSync(":memory:"), {
+      embedder,
+      now: () => Date.parse("2026-07-26T00:00:00.000Z"),
+    });
+    await expect(index.project([
+      userMessage(1, "今天的天气很好"),
+      userMessage(2, "演讲的事有进展"),
+    ])).resolves.toBeUndefined();
+    expect(embedder.callCount).toBeGreaterThan(0);
+
     const results = await index.recall({ orenId: "oren-1", text: "演讲", limit: 2 });
     expect(results[0]!.text).toBe("演讲的事有进展");
   });

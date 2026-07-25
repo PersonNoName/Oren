@@ -49,6 +49,14 @@ export interface LifeRuntimeOptions {
   readonly maxDrainCycles?: number;
   readonly shutdownGraceMs?: number;
   readonly embedder?: EmbeddingPort;
+  /**
+   * Opt-in only: when true and no explicit `embedder` is given, resolve one
+   * from `process.env` (OREN_EMBEDDING_* + provider API key). Defaults to
+   * false so `npm test` stays fully offline even if those variables are
+   * exported in the shell; manual/smoke real-embedding runs set this
+   * explicitly (see `runSmoke`).
+   */
+  readonly useProcessEmbeddingEnv?: boolean;
 }
 
 export class LifeRuntime {
@@ -180,7 +188,7 @@ export class LifeRuntime {
 
     const db = openDatabase(databasePath);
     const repository = new SqliteLifeRepository(db, now, nextId);
-    const resolvedEmbedding = options.embedder === undefined
+    const resolvedEmbedding = options.embedder === undefined && options.useProcessEmbeddingEnv === true
       ? resolveEmbeddingConfig(process.env)
       : undefined;
     const embedder = options.embedder
@@ -236,12 +244,7 @@ export class LifeRuntime {
           const state = repository.loadState(job.orenId);
           const newRecords = repository.loadEventRecordsAfter(memory.cursor());
           if (newRecords.length > 0) await memory.project(newRecords);
-          const focus = state.attention.currentFocus;
-          const pins = await memory.recall({
-            orenId: job.orenId,
-            ...(focus !== null ? { text: focus } : {}),
-            limit: 5,
-          });
+          const pins = await recallPinsWithFallback(memory, job.orenId, state.attention.currentFocus);
           return {
             state,
             correlationId: job.correlationId,
@@ -393,6 +396,18 @@ export class LifeRuntime {
     return this.memory.recall({ ...query, orenId });
   }
 
+  /**
+   * Operator entry point to rebuild the memory index from the full event
+   * history (e.g. after changing embedding configuration, or to recover from
+   * index corruption). Equivalent to replaying every event from scratch;
+   * result matches incremental projection.
+   */
+  public async rebuildMemory(): Promise<void> {
+    this.assertOpen();
+    const records = this.repository.loadEventRecordsAfter(0);
+    await this.memory.rebuild(() => records);
+  }
+
   public close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
@@ -533,3 +548,27 @@ export class LifeRuntime {
 }
 
 const FUTURE_WAKE = "2099-01-02T00:00:00.000Z";
+
+/**
+ * Recall memory pins for a frame's `currentFocus`. Substring/keyword recall
+ * (no embedder configured) against the focus text alone tends to return only
+ * the self-referential ThreadAdvanced entry that produced that focus, or
+ * nothing at all — not useful context. When the focused recall comes back
+ * empty, fall back to a recency-only recall (no `text` filter) so pins still
+ * carry useful context. This lives at the pins call site (not inside
+ * `MemoryPort.recall`) so an explicit `memory.recall` capability call with a
+ * `text` filter keeps its strict, unambiguous semantics.
+ */
+export async function recallPinsWithFallback(
+  memory: MemoryPort,
+  orenId: string,
+  focus: string | null,
+): Promise<readonly MemoryEntry[]> {
+  const primary = await memory.recall({
+    orenId,
+    ...(focus !== null ? { text: focus } : {}),
+    limit: 5,
+  });
+  if (primary.length > 0 || focus === null) return primary;
+  return memory.recall({ orenId, limit: 5 });
+}

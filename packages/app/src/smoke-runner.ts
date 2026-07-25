@@ -87,7 +87,13 @@ export async function runSmoke(
   const databasePath = env.OREN_SMOKE_DB
     ?? join(mkdtempSync(join(tmpdir(), "oren-smoke-")), "life.db");
 
-  const first = await LifeRuntime.create(databasePath, recorder);
+  // Smoke against a real (uninjected) model is the credential-gated manual
+  // path: real embeddings are allowed there when OREN_EMBEDDING_* + a
+  // provider API key are intentionally exported. Automated tests always
+  // inject `cognitionOverride`, so they never consult process.env for
+  // embeddings and stay offline even if those variables happen to be set.
+  const runtimeOptions = { useProcessEmbeddingEnv: cognitionOverride === undefined };
+  const first = await LifeRuntime.create(databasePath, recorder, runtimeOptions);
   try {
     await first.initialize("oren-smoke", "person-smoke");
     await first.receiveUserMessage(
@@ -99,7 +105,7 @@ export async function runSmoke(
     const beforeRestart = first.inspect("oren-smoke");
     await first.close();
 
-    const second = await LifeRuntime.create(databasePath, recorder);
+    const second = await LifeRuntime.create(databasePath, recorder, runtimeOptions);
     try {
       await second.drain();
       const afterRestart = second.inspect("oren-smoke");
