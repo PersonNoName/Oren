@@ -74,8 +74,3 @@ export async function runEvals(
   log("behavioral evals passed");
   return 0;
 }
-
-if (import.meta.url === `file://${process.argv[1]}`) {
-  const exitCode = await runEvals(process.env, (line) => console.log(line));
-  process.exitCode = exitCode;
-}
