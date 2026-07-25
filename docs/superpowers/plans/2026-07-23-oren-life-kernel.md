@@ -3398,23 +3398,23 @@ git commit -m "feat: complete restartable Oren life slice"
 
 ## Phase 1 Completion Checklist
 
-- [ ] `LifeActor` is the only state writer.
-- [ ] Model and extension calls occur outside actor transactions.
-- [ ] Every cognition result includes and validates `baseStateVersion`.
-- [ ] Foreground input preempts idle cognition.
-- [ ] Foreground interaction does not consume `autonomyBudget`.
-- [ ] Immediate tools satisfy all five eligibility conditions.
-- [ ] Persistent tools create an Effect and end the Pi episode.
-- [ ] Effect completion triggers a new episode through Inbox correlation.
-- [ ] No Pi internal transcript or active stream is required for recovery.
-- [ ] `effectId` is the extension idempotency key.
-- [ ] Expired dispatch leases reconcile or become `uncertain`; they are not blindly resent.
-- [ ] Duplicate receipts do not apply twice.
-- [ ] Oren extensions cannot write `LifeState`, access SQLite, or access model credentials.
-- [ ] Only `packages/pi-cognition` imports Pi or TypeBox.
-- [ ] Pi dependencies are pinned exactly to `0.75.5`.
-- [ ] Fake streams cover Pi adapter behavior without network access.
-- [ ] Empty-database startup, effect suspension, result resumption, shutdown, restart, and replay pass end to end.
-- [ ] `npm test` passes.
-- [ ] `npm run typecheck` passes.
-- [ ] `npm run build` passes.
+- [x] `LifeActor` is the only state writer.
+- [x] Model and extension calls occur outside actor transactions.
+- [x] Every cognition result includes and validates `baseStateVersion`.
+- [x] Foreground input preempts idle cognition.
+- [x] Foreground interaction does not consume `autonomyBudget`.
+- [x] Immediate tools satisfy all five eligibility conditions.
+- [x] Persistent tools create an Effect and end the Pi episode.
+- [x] Effect completion triggers a new episode through Inbox correlation.
+- [x] No Pi internal transcript or active stream is required for recovery.
+- [x] `effectId` is the extension idempotency key.
+- [x] Expired dispatch leases reconcile or become `uncertain`; they are not blindly resent.
+- [x] Duplicate receipts do not apply twice.
+- [x] Oren extensions cannot write `LifeState`, access SQLite, or access model credentials.
+- [x] Only `packages/pi-cognition` imports Pi or TypeBox.
+- [x] Pi dependencies are pinned exactly to `0.75.5`.
+- [x] Fake streams cover Pi adapter behavior without network access.
+- [x] Empty-database startup, effect suspension, result resumption, shutdown, restart, and replay pass end to end.
+- [x] `npm test` passes.
+- [x] `npm run typecheck` passes.
+- [x] `npm run build` passes.
