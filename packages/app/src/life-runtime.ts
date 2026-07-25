@@ -235,7 +235,10 @@ export class LifeRuntime {
         repository,
         registry,
         `life-runtime:${nextId()}`,
-        { now: () => Date.parse(now()) },
+        {
+          now: () => Date.parse(now()),
+          acceptingWork: () => !runtimeGate.closed,
+        },
       );
       return new LifeRuntime(
         repository,
