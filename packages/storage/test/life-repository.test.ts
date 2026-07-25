@@ -9,6 +9,125 @@ import {
 import { openDatabase, SqliteLifeRepository } from "../src/index.js";
 
 describe("SqliteLifeRepository", () => {
+  it("initializes identity and its required grant atomically and idempotently", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    const initial = createInitialLifeState("oren-1", "person-1");
+    const grant: Grant = {
+      grantId: "runtime:oren-1:test-counter",
+      capabilityPattern: "test.*",
+      expiresAt: "9999-12-31T23:59:59.999Z",
+      revoked: false,
+    };
+
+    repo.initializeWithGrant(initial, grant);
+    repo.initializeWithGrant(initial, grant);
+
+    expect(repo.listLifeIdentities()).toEqual([
+      { orenId: "oren-1", personId: "person-1" },
+    ]);
+    expect(repo.loadGrants("oren-1")).toEqual([grant]);
+  });
+
+  it("rolls back identity initialization when the required grant conflicts", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    const grant: Grant = {
+      grantId: "runtime:oren-1:test-counter",
+      capabilityPattern: "other.*",
+      expiresAt: "9999-12-31T23:59:59.999Z",
+      revoked: false,
+    };
+    repo.putGrant("oren-1", grant);
+
+    expect(() => repo.initializeWithGrant(
+      createInitialLifeState("oren-1", "person-1"),
+      { ...grant, capabilityPattern: "test.*" },
+    )).toThrow(/grant|conflict/i);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM snapshots").get()).toEqual({ count: 0 });
+  });
+
+  it("reconstructs pending cognition by exact correlation and base version identity", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+    repo.commit("oren-1", [
+      event("request-a", "oren-1", {
+        type: "CognitionRequested",
+        episodeId: "shared-episode",
+        baseStateVersion: 1,
+        triggerKind: "foreground_user",
+      }, "corr-a"),
+      event("request-b", "oren-1", {
+        type: "CognitionRequested",
+        episodeId: "shared-episode",
+        baseStateVersion: 2,
+        triggerKind: "foreground_user",
+      }, "corr-b"),
+      event("terminal-b", "oren-1", {
+        type: "CognitionDenied",
+        episodeId: "shared-episode",
+        reason: "test terminal",
+      }, "corr-b"),
+    ]);
+
+    expect(repo.loadPendingCognitionJobs()).toEqual([{
+      orenId: "oren-1",
+      episodeId: "shared-episode",
+      baseStateVersion: 1,
+      triggerKind: "foreground_user",
+      correlationId: "corr-a",
+    }]);
+  });
+
+  it("does not let a mismatched completed base version close a pending request", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+    repo.commit("oren-1", [
+      event("request", "oren-1", {
+        type: "CognitionRequested",
+        episodeId: "episode-1",
+        baseStateVersion: 1,
+        triggerKind: "foreground_user",
+      }, "corr-1"),
+      event("wrong-terminal", "oren-1", {
+        type: "CognitionCompleted",
+        episodeId: "episode-1",
+        baseStateVersion: 99,
+        proposals: [],
+      }, "corr-1"),
+    ]);
+
+    expect(repo.loadPendingCognitionJobs()).toHaveLength(1);
+  });
+
+  it("continues exact pending reconstruction past malformed legacy history", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+    repo.commit("oren-1", [
+      event("request", "oren-1", {
+        type: "CognitionRequested",
+        episodeId: "episode-1",
+        baseStateVersion: 1,
+        triggerKind: "foreground_user",
+      }),
+    ]);
+    db.prepare(`
+      INSERT INTO events(event_id, oren_id, recorded_at, envelope_json)
+      VALUES (?, ?, ?, ?)
+    `).run("malformed", "oren-1", "2026-07-23T00:00:00.000Z", "{not-json");
+
+    expect(repo.loadPendingCognitionJobs()).toEqual([{
+      orenId: "oren-1",
+      episodeId: "episode-1",
+      baseStateVersion: 1,
+      triggerKind: "foreground_user",
+      correlationId: "corr-1",
+    }]);
+  });
+
   it("rejects an invalid initial state budget before snapshot persistence", () => {
     const db = openDatabase(":memory:");
     const repo = new SqliteLifeRepository(db);
@@ -343,7 +462,12 @@ describe("SqliteLifeRepository", () => {
   });
 });
 
-function event(eventId: string, orenId: string, payload: EventEnvelope["payload"]): EventEnvelope {
+function event(
+  eventId: string,
+  orenId: string,
+  payload: EventEnvelope["payload"],
+  correlationId = "corr-1",
+): EventEnvelope {
   return {
     eventId,
     orenId,
@@ -352,7 +476,7 @@ function event(eventId: string, orenId: string, payload: EventEnvelope["payload"
     recordedAt: "2026-07-23T00:00:00.000Z",
     source: "life-actor",
     causationId: null,
-    correlationId: "corr-1",
+    correlationId,
     payload,
   };
 }

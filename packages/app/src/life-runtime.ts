@@ -25,6 +25,7 @@ import { EpisodeCoordinator } from "./episode-coordinator.js";
 import { Scheduler } from "./scheduler.js";
 
 const DEFAULT_MAX_DRAIN_CYCLES = 64;
+const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const GRANT_EXPIRY = "9999-12-31T23:59:59.999Z";
 
 interface RuntimeIdentity {
@@ -37,6 +38,7 @@ export interface LifeRuntimeOptions {
   readonly nextId?: () => string;
   readonly extensionFactory?: () => OrenExtension;
   readonly maxDrainCycles?: number;
+  readonly shutdownGraceMs?: number;
 }
 
 export class LifeRuntime {
@@ -44,6 +46,7 @@ export class LifeRuntime {
   private readonly knownOrenIds = new Set<string>();
   private closePromise: Promise<void> | undefined;
   private activeDrain: Promise<void> | undefined;
+  private readonly workflowTails = new Map<string, Promise<void>>();
   private closing = false;
   private closed = false;
 
@@ -56,6 +59,8 @@ export class LifeRuntime {
     private readonly extension: OrenExtension,
     private readonly now: () => string,
     private readonly maxDrainCycles: number,
+    private readonly shutdownGraceMs: number,
+    private readonly runtimeGate: { closed: boolean },
   ) {
     const identities = repository.listLifeIdentities();
     if (identities.length > 1) {
@@ -150,27 +155,35 @@ export class LifeRuntime {
       if (!canonical) throw new Error("LifeRuntime clock must return a valid instant");
       return canonical;
     };
-    const nextId = options.nextId ?? randomUUID;
+    const localNextId = options.nextId ?? randomUUID;
+    const bootNonce = randomUUID();
+    const nextId = (): string => `${bootNonce}:${localNextId()}`;
     const maxDrainCycles = options.maxDrainCycles ?? DEFAULT_MAX_DRAIN_CYCLES;
     if (!Number.isSafeInteger(maxDrainCycles) || maxDrainCycles <= 0) {
       throw new Error("maxDrainCycles must be a positive safe integer");
     }
+    const shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+    if (!Number.isSafeInteger(shutdownGraceMs) || shutdownGraceMs < 0) {
+      throw new Error("shutdownGraceMs must be a nonnegative safe integer");
+    }
 
     const repository = new SqliteLifeRepository(openDatabase(databasePath), now, nextId);
-    const extension = (options.extensionFactory ?? createTestCounterExtension)();
-    let activated = false;
+    let extension: OrenExtension | undefined;
+    let activationAttempted = false;
     try {
+      extension = (options.extensionFactory ?? createTestCounterExtension)();
       const registry = new ExtensionRegistry();
       registry.register(extension);
+      activationAttempted = true;
       await extension.activate({
         extensionId: extension.manifest.id,
         reportProgress() {},
         emitObservation() {},
       });
-      activated = true;
 
       const actor = new LifeActor(repository, nextId, now);
       const guard = new Guard();
+      const runtimeGate = { closed: false };
       const broker = new CapabilityBroker(
         registry,
         (effect) => actor.requestEffect(
@@ -202,15 +215,17 @@ export class LifeRuntime {
         {
           invoke: (
             { orenId, descriptor, arguments: arguments_, stateVersion, correlationId },
-          ) => broker.invoke({
-            orenId,
-            correlationId,
-            capability: descriptor.name,
-            arguments: arguments_,
-            grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
-            stateVersion,
-            effectId: nextId(),
-          }),
+          ) => runtimeGate.closed
+            ? Promise.resolve({ kind: "rejected", reason: "runtime_closed" })
+            : broker.invoke({
+                orenId,
+                correlationId,
+                capability: descriptor.name,
+                arguments: arguments_,
+                grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
+                stateVersion,
+                effectId: nextId(),
+              }),
         },
       );
       const coordinator = new EpisodeCoordinator(
@@ -231,11 +246,31 @@ export class LifeRuntime {
         extension,
         now,
         maxDrainCycles,
+        shutdownGraceMs,
+        runtimeGate,
       );
-    } catch (error) {
-      if (activated) await extension.deactivate().catch(() => undefined);
-      repository.close();
-      throw error;
+    } catch (primaryError) {
+      const cleanupErrors: unknown[] = [];
+      if (extension && activationAttempted) {
+        try {
+          await extension.deactivate();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
+      }
+      try {
+        repository.close();
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(
+          [primaryError, ...cleanupErrors],
+          "LifeRuntime initialization and cleanup both failed",
+          { cause: primaryError },
+        );
+      }
+      throw primaryError;
     }
   }
 
@@ -251,12 +286,7 @@ export class LifeRuntime {
         `LifeRuntime identity conflict: expected ${existing.orenId}/${existing.personId}`,
       );
     }
-    this.repository.initialize(createInitialLifeState(orenId, personId));
-    const stored = this.repository.loadState(orenId);
-    if (stored.relationship.primaryPersonId !== personId) {
-      throw new Error("LifeRuntime identity conflict with durable state");
-    }
-    this.repository.putGrant(orenId, {
+    this.repository.initializeWithGrant(createInitialLifeState(orenId, personId), {
       grantId: `runtime:${orenId}:test-counter`,
       capabilityPattern: "test.*",
       expiresAt: GRANT_EXPIRY,
@@ -273,8 +303,10 @@ export class LifeRuntime {
   ): Promise<void> {
     this.assertOpen();
     this.assertIdentity(orenId, personId);
-    const job = this.actor.handleUserMessage(orenId, personId, text);
-    await this.runJobs([job]);
+    await this.withOrenWorkflow(orenId, async () => {
+      const job = this.actor.handleUserMessage(orenId, personId, text);
+      await this.runJob(job);
+    });
   }
 
   public async drain(): Promise<void> {
@@ -302,6 +334,7 @@ export class LifeRuntime {
   public close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
+    this.runtimeGate.closed = true;
     this.closePromise = this.closeOwnedResources();
     return this.closePromise;
   }
@@ -312,8 +345,13 @@ export class LifeRuntime {
       let activity = 0;
       const recovered = this.repository.loadPendingCognitionJobs();
       if (recovered.length > 0) {
-        await this.runJobs(recovered);
-        activity += recovered.length;
+        const recoveredRuns = await Promise.all(recovered.map((job) =>
+          this.withOrenWorkflow(job.orenId, async () => {
+            if (!this.repository.isPendingCognitionJob(job)) return false;
+            await this.runJob(job);
+            return true;
+          })));
+        activity += recoveredRuns.filter(Boolean).length;
       }
 
       activity += this.scheduler.runOnce(this.now());
@@ -325,32 +363,34 @@ export class LifeRuntime {
         32,
       );
       activity += claimed.length;
-      const jobs: CognitionJob[] = [];
-      for (const inbox of claimed) {
-        this.knownOrenIds.add(inbox.orenId);
-        try {
-          const job = this.actor.handleInbox(inbox);
-          if (job) jobs.push(job);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "Unknown Inbox failure";
+      await Promise.all(claimed.map((inbox) => this.withOrenWorkflow(
+        inbox.orenId,
+        async () => {
           try {
-            this.repository.quarantineInbox(
-              inbox.inboxId,
-              inbox.leaseOwner,
-              inbox.leaseToken,
-              `LifeActor rejected Inbox row: ${message}`,
-              this.now(),
-            );
-          } catch {
-            // A failed quarantine remains protected by its current durable lease.
+            this.knownOrenIds.add(inbox.orenId);
+            const job = this.actor.handleInbox(inbox);
+            if (job) await this.runJob(job);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Unknown Inbox failure";
+            try {
+              this.repository.quarantineInbox(
+                inbox.inboxId,
+                inbox.leaseOwner,
+                inbox.leaseToken,
+                `LifeActor rejected Inbox row: ${message}`,
+                this.now(),
+              );
+            } catch {
+              // A failed quarantine remains protected by its current durable lease.
+            }
           }
-        }
-      }
-      await this.runJobs(jobs);
+        },
+      )));
 
       if (activity === 0) return;
       productiveCycles += 1;
       if (productiveCycles >= this.maxDrainCycles) {
+        if (!this.repository.hasImmediateWork(this.now())) return;
         throw new Error(
           `LifeRuntime did not quiesce within ${this.maxDrainCycles} productive cycles`,
         );
@@ -358,36 +398,57 @@ export class LifeRuntime {
     }
   }
 
-  private async runJobs(jobs: readonly CognitionJob[]): Promise<void> {
-    const orenIds = new Set<string>();
-    for (const job of jobs) {
-      this.knownOrenIds.add(job.orenId);
-      orenIds.add(job.orenId);
-      await this.coordinator.start(job);
+  private async runJob(job: CognitionJob): Promise<void> {
+    this.knownOrenIds.add(job.orenId);
+    await this.coordinator.start(job);
+    await this.coordinator.waitForIdle(job.orenId);
+  }
+
+  private async withOrenWorkflow<T>(
+    orenId: string,
+    workflow: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.workflowTails.get(orenId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => {
+      this.assertOpen();
+      return workflow();
+    });
+    const tail = current.then(() => undefined, () => undefined);
+    this.workflowTails.set(orenId, tail);
+    try {
+      return await current;
+    } finally {
+      if (this.workflowTails.get(orenId) === tail) {
+        this.workflowTails.delete(orenId);
+      }
     }
-    await Promise.all([...orenIds].map((orenId) => this.coordinator.waitForIdle(orenId)));
   }
 
   private async closeOwnedResources(): Promise<void> {
     try {
-      await Promise.all(
-        [...this.knownOrenIds].map((orenId) =>
+      const pending = [
+        ...[...this.knownOrenIds].map((orenId) =>
           this.coordinator.interrupt(orenId, "shutdown")),
-      );
-      if (this.activeDrain) {
-        try {
-          await this.activeDrain;
-        } catch {
-          // Closing still owns resource cleanup after a failed drain.
-        }
-      }
-      await Promise.all(
-        [...this.knownOrenIds].map((orenId) => this.coordinator.waitForIdle(orenId)),
-      );
+        ...(this.activeDrain ? [this.activeDrain] : []),
+      ];
+      const observed = Promise.allSettled(pending);
+      await this.waitForShutdownGrace(observed);
       await this.extension.deactivate();
     } finally {
       this.repository.close();
       this.closed = true;
+    }
+  }
+
+  private async waitForShutdownGrace(settled: Promise<unknown>): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const graceElapsed = new Promise<void>((resolve) => {
+      timeout = setTimeout(resolve, this.shutdownGraceMs);
+    });
+    try {
+      await Promise.race([settled, graceElapsed]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
     }
   }
 

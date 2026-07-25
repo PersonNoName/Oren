@@ -225,6 +225,75 @@ export class SqliteLifeRepository {
     `).run(state.orenId, state.version, state.chronicleCursor, JSON.stringify(state));
   }
 
+  public initializeWithGrant(state: LifeState, grant: Grant): void {
+    if (!hasValidLifeStateBudgets(state)) {
+      throw new Error("Initial LifeState contains invalid budgets");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const snapshot = this.db.prepare(`
+        SELECT state_json FROM snapshots WHERE oren_id = ?
+      `).get(state.orenId);
+      if (snapshot) {
+        let existingState: LifeState;
+        try {
+          existingState = JSON.parse(String(snapshot.state_json)) as LifeState;
+        } catch {
+          throw new Error(`Initial snapshot for ${state.orenId} is corrupt`);
+        }
+        if (
+          !hasValidLifeStateBudgets(existingState)
+          || existingState.orenId !== state.orenId
+          || existingState.relationship.primaryPersonId
+            !== state.relationship.primaryPersonId
+        ) {
+          throw new Error(`Initial snapshot identity for ${state.orenId} conflicts`);
+        }
+      }
+
+      const existingGrant = this.db.prepare(`
+        SELECT oren_id, grant_json, revoked_at FROM grants WHERE grant_id = ?
+      `).get(grant.grantId);
+      if (existingGrant) {
+        let storedGrant: unknown;
+        try {
+          storedGrant = JSON.parse(String(existingGrant.grant_json));
+        } catch {
+          throw new Error(`Grant ${grant.grantId} is corrupt`);
+        }
+        if (
+          String(existingGrant.oren_id) !== state.orenId
+          || existingGrant.revoked_at !== null
+          || !semanticUnknownEqual(storedGrant, grant)
+        ) {
+          throw new Error(`Grant ${grant.grantId} conflicts with runtime identity`);
+        }
+      }
+
+      if (!snapshot) {
+        this.db.prepare(`
+          INSERT INTO snapshots(oren_id, version, cursor, state_json)
+          VALUES (?, ?, ?, ?)
+        `).run(
+          state.orenId,
+          state.version,
+          state.chronicleCursor,
+          JSON.stringify(state),
+        );
+      }
+      if (!existingGrant) {
+        this.db.prepare(`
+          INSERT INTO grants(grant_id, oren_id, grant_json, revoked_at)
+          VALUES (?, ?, ?, NULL)
+        `).run(grant.grantId, state.orenId, JSON.stringify(grant));
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   public listLifeIdentities(): Array<{
     readonly orenId: string;
     readonly personId: string;
@@ -294,31 +363,122 @@ export class SqliteLifeRepository {
       try {
         parsed = JSON.parse(String(row.envelope_json));
       } catch {
-        throw new Error("Durable event log contains invalid JSON");
+        continue;
       }
       const event = canonicalizeEventEnvelope(parsed);
-      if (!event) throw new Error("Durable event log contains an invalid event");
+      if (!event) continue;
       if (event.payload.type === "CognitionRequested") {
-        pending.set(`${event.orenId}\0${event.payload.episodeId}`, {
+        const job: CognitionJob = {
           orenId: event.orenId,
           episodeId: event.payload.episodeId,
           baseStateVersion: event.payload.baseStateVersion,
           triggerKind: event.payload.triggerKind,
           correlationId: event.correlationId,
-        });
+        };
+        pending.set(this.cognitionJobKey(job), job);
+        continue;
+      }
+      if (event.payload.type === "CognitionCompleted") {
+        pending.delete(this.cognitionJobKey({
+          orenId: event.orenId,
+          episodeId: event.payload.episodeId,
+          baseStateVersion: event.payload.baseStateVersion,
+          triggerKind: "foreground_user",
+          correlationId: event.correlationId,
+        }));
         continue;
       }
       if (
-        event.payload.type === "CognitionCompleted"
-        || event.payload.type === "CognitionDenied"
+        event.payload.type === "CognitionDenied"
         || event.payload.type === "CognitionWaitingForEffect"
         || event.payload.type === "CognitionFailed"
         || event.payload.type === "EpisodeInterrupted"
       ) {
-        pending.delete(`${event.orenId}\0${event.payload.episodeId}`);
+        for (const [key, job] of pending) {
+          if (
+            job.orenId === event.orenId
+            && job.episodeId === event.payload.episodeId
+            && job.correlationId === event.correlationId
+          ) {
+            pending.delete(key);
+          }
+        }
       }
     }
     return [...pending.values()];
+  }
+
+  public isPendingCognitionJob(job: CognitionJob): boolean {
+    const key = this.cognitionJobKey(job);
+    return this.loadPendingCognitionJobs().some(
+      (pending) => this.cognitionJobKey(pending) === key,
+    );
+  }
+
+  public hasImmediateWork(now = this.now()): boolean {
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Immediate-work time must be a valid instant");
+    if (this.loadPendingCognitionJobs().length > 0) return true;
+    const nowMs = Date.parse(canonicalNow);
+
+    const schedules = this.db.prepare(`
+      SELECT due_at
+      FROM schedules
+      WHERE delivered_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM schedule_quarantine
+          WHERE schedule_quarantine.schedule_id = schedules.schedule_id
+        )
+    `).all();
+    if (schedules.some((row) => {
+      const dueAt = canonicalizeInstant(row.due_at);
+      return dueAt === undefined || Date.parse(dueAt) <= nowMs;
+    })) {
+      return true;
+    }
+
+    const effects = this.db.prepare(`
+      SELECT 1
+      FROM outbox
+      WHERE quarantined = 0
+        AND status IN ('pending', 'dispatched')
+        AND (lease_until IS NULL OR lease_until <= ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM effect_quarantine
+          WHERE effect_quarantine.effect_id = outbox.effect_id
+        )
+      LIMIT 1
+    `).get(canonicalNow);
+    if (effects) return true;
+
+    const inbox = this.db.prepare(`
+      SELECT available_at, lease_until
+      FROM inbox
+      WHERE processed_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM inbox_quarantine
+          WHERE inbox_quarantine.inbox_id = inbox.inbox_id
+        )
+    `).all();
+    return inbox.some((row) => {
+      const availableAt = canonicalizeInstant(row.available_at);
+      if (availableAt === undefined) return true;
+      const leaseUntil = row.lease_until === null
+        ? null
+        : canonicalizeInstant(row.lease_until);
+      if (leaseUntil === undefined) return true;
+      return Date.parse(availableAt) <= nowMs
+        && (leaseUntil === null || Date.parse(leaseUntil) <= nowMs);
+    });
+  }
+
+  private cognitionJobKey(job: CognitionJob): string {
+    return [
+      job.orenId,
+      job.episodeId,
+      job.correlationId,
+      String(job.baseStateVersion),
+    ].join("\0");
   }
 
   private loadEventsAfter(orenId: string, cursor: number): EventEnvelope[] {

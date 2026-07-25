@@ -415,6 +415,271 @@ describe("LifeRuntime restart slice", () => {
 });
 
 describe("LifeRuntime fixed-point and lifecycle", () => {
+  it("linearizes two held foreground receives so both requests reach cognition", async () => {
+    let calls = 0;
+    let releaseFirst!: () => void;
+    const firstHeld = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let markFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    const cognition = new ScriptedCognitionAdapter(async () => {
+      calls += 1;
+      if (calls === 1) {
+        markFirstStarted();
+        await firstHeld;
+      }
+      return {
+        kind: "completed",
+        proposals: [{ type: "NoAction", reason: `Processed request ${calls}` }],
+        usage: { totalTokens: 0 },
+      };
+    });
+    const path = databasePath("oren-concurrent-receive-");
+    const runtime = await LifeRuntime.create(path, cognition, options());
+    await runtime.initialize("oren-1", "person-1");
+
+    const first = runtime.receiveUserMessage("oren-1", "person-1", "first");
+    await firstStarted;
+    const second = runtime.receiveUserMessage("oren-1", "person-1", "second");
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(calls).toBe(2);
+    const audit = new SqliteLifeRepository(openDatabase(path));
+    expect(audit.loadEvents("oren-1").map(({ payload }) => payload.type)).toEqual([
+      "UserMessageReceived",
+      "CognitionRequested",
+      "CognitionCompleted",
+      "UserMessageReceived",
+      "CognitionRequested",
+      "CognitionCompleted",
+    ]);
+    audit.close();
+    await runtime.close();
+  });
+
+  it("restarts safely with a brand-new deterministic local ID counter", async () => {
+    const path = databasePath("oren-fresh-counter-restart-");
+    const first = await LifeRuntime.createDeterministic(
+      path,
+      options({ nextId: sequenceIds("fresh") }),
+    );
+    await first.initialize("oren-1", "person-1");
+    await first.receiveUserMessage("oren-1", "person-1", "Increment once");
+    await first.close();
+
+    const second = await LifeRuntime.createDeterministic(
+      path,
+      options({ nextId: sequenceIds("fresh") }),
+    );
+    await second.drain();
+    expect(second.inspect("oren-1")).toMatchObject({
+      pendingEffectIds: [],
+      attention: { currentFocus: "Understand the counter lifecycle" },
+    });
+    await second.close();
+
+    const audit = openDatabase(path);
+    expect(audit.prepare("SELECT COUNT(*) AS count FROM inbox_quarantine").get()).toEqual({
+      count: 0,
+    });
+    audit.close();
+  });
+
+  it("returns after the shutdown grace when active cognition never settles", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cognition: CognitionPort = {
+      async run() {
+        markStarted();
+        return new Promise<never>(() => undefined);
+      },
+    };
+    const runtime = await LifeRuntime.create(
+      databasePath("oren-never-settling-receive-"),
+      cognition,
+      options({ shutdownGraceMs: 10 }),
+    );
+    await runtime.initialize("oren-1", "person-1");
+    void runtime.receiveUserMessage("oren-1", "person-1", "hold forever");
+    await started;
+
+    await expect(Promise.race([
+      runtime.close().then(() => "closed"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 250)),
+    ])).resolves.toBe("closed");
+  });
+
+  it("returns after the shutdown grace when recovered cognition in drain never settles", async () => {
+    const path = databasePath("oren-never-settling-drain-");
+    const repository = new SqliteLifeRepository(openDatabase(path), () => TEST_NOW);
+    repository.initialize(stateWithAutonomy());
+    repository.commit("oren-1", [
+      envelope("pending-request", "oren-1", "pending-correlation", {
+        type: "CognitionRequested",
+        episodeId: "pending-episode",
+        baseStateVersion: 1,
+        triggerKind: "scheduled_wake",
+      }),
+    ]);
+    repository.close();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const cognition: CognitionPort = {
+      async run() {
+        markStarted();
+        return new Promise<never>(() => undefined);
+      },
+    };
+    const runtime = await LifeRuntime.create(
+      path,
+      cognition,
+      options({ shutdownGraceMs: 10 }),
+    );
+    void runtime.drain();
+    await started;
+
+    await expect(Promise.race([
+      runtime.close().then(() => "closed"),
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 250)),
+    ])).resolves.toBe("closed");
+  });
+
+  it("blocks a late non-cooperative cognition continuation from invoking extensions", async () => {
+    let extensionInvocations = 0;
+    let deactivations = 0;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const extensionFactory = queryableCounterFactory(new Map(), {
+      activated: 0,
+      get deactivated() {
+        return deactivations;
+      },
+      set deactivated(value: number) {
+        deactivations = value;
+      },
+    });
+    const trackedFactory = (): OrenExtension => {
+      const extension = extensionFactory();
+      return {
+        ...extension,
+        async invoke(invocation, signal) {
+          extensionInvocations += 1;
+          return extension.invoke(invocation, signal);
+        },
+      };
+    };
+    const cognition = new ScriptedCognitionAdapter(async (frame, capabilityPort, signal) => {
+      markStarted();
+      await held;
+      const read = frame.capabilities.find(({ name }) => name === "test.read")!;
+      await capabilityPort.invoke({
+        orenId: frame.orenId,
+        descriptor: read,
+        arguments: {},
+        stateVersion: frame.stateVersion,
+        correlationId: frame.correlationId,
+      }, signal);
+      return {
+        kind: "completed",
+        proposals: [{ type: "NoAction", reason: "late continuation" }],
+        usage: { totalTokens: 0 },
+      };
+    });
+    const runtime = await LifeRuntime.create(
+      databasePath("oren-late-continuation-"),
+      cognition,
+      options({ extensionFactory: trackedFactory, shutdownGraceMs: 10 }),
+    );
+    await runtime.initialize("oren-1", "person-1");
+    const receive = runtime.receiveUserMessage("oren-1", "person-1", "hold");
+    await started;
+    await runtime.close();
+    release();
+    await receive;
+
+    expect(extensionInvocations).toBe(0);
+    expect(deactivations).toBe(1);
+  });
+
+  it("cleans up the database across factory, registration, and partial activation failures", async () => {
+    const reopen = (path: string): void => {
+      const db = openDatabase(path);
+      db.close();
+    };
+
+    const factoryPath = databasePath("oren-factory-failure-");
+    await expect(LifeRuntime.create(factoryPath, {
+      async run() {
+        throw new Error("unused");
+      },
+    }, options({
+      extensionFactory() {
+        throw new Error("factory failed");
+      },
+    }))).rejects.toThrow("factory failed");
+    expect(() => reopen(factoryPath)).not.toThrow();
+
+    const registrationPath = databasePath("oren-registration-failure-");
+    const invalid = {
+      ...queryableCounterFactory(new Map())(),
+      manifest: {
+        ...queryableCounterFactory(new Map())().manifest,
+        protocolVersion: 2,
+      },
+    } as unknown as OrenExtension;
+    await expect(LifeRuntime.create(registrationPath, {
+      async run() {
+        throw new Error("unused");
+      },
+    }, options({ extensionFactory: () => invalid }))).rejects.toThrow(/protocol/i);
+    expect(() => reopen(registrationPath)).not.toThrow();
+
+    const activationPath = databasePath("oren-activation-failure-");
+    let deactivated = 0;
+    const partial = queryableCounterFactory(new Map())();
+    partial.activate = async () => {
+      throw new Error("activation failed after allocation");
+    };
+    partial.deactivate = async () => {
+      deactivated += 1;
+    };
+    await expect(LifeRuntime.create(activationPath, {
+      async run() {
+        throw new Error("unused");
+      },
+    }, options({ extensionFactory: () => partial }))).rejects.toThrow("activation failed");
+    expect(deactivated).toBe(1);
+    expect(() => reopen(activationPath)).not.toThrow();
+  });
+
+  it("settles a normal lifecycle at maxDrainCycles one", async () => {
+    const runtime = await LifeRuntime.createDeterministic(
+      databasePath("oren-cap-one-"),
+      options({ maxDrainCycles: 1 }),
+    );
+    await runtime.initialize("oren-1", "person-1");
+    await runtime.receiveUserMessage("oren-1", "person-1", "Increment once");
+    await expect(runtime.drain()).resolves.toBeUndefined();
+    expect(runtime.inspect("oren-1").pendingEffectIds).toEqual([]);
+    await runtime.close();
+  });
+
   it("initializes an empty database idempotently and rejects identity conflicts", async () => {
     const runtime = await LifeRuntime.createDeterministic(databasePath(), options());
     await runtime.initialize("oren-1", "person-1");

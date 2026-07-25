@@ -80,6 +80,32 @@ afterEach(() => {
 });
 
 describe("EffectDispatcher", () => {
+  it("does not begin another external dispatch after the runtime starts closing", async () => {
+    let acceptingWork = true;
+    const invoked: string[] = [];
+    const { repository } = repositoryFor([
+      claimedEffect("effect-first"),
+      claimedEffect("effect-after-close"),
+    ]);
+    const registry = registryFor({
+      invoke: async (invocation) => {
+        invoked.push(invocation.effectId);
+        acceptingWork = false;
+        return {
+          status: "completed",
+          output: null,
+          receipt: { effectId: invocation.effectId },
+        };
+      },
+    });
+
+    await new EffectDispatcher(repository, registry, "worker-1", {
+      acceptingWork: () => acceptingWork,
+    }).runOnce();
+
+    expect(invoked).toEqual(["effect-first"]);
+  });
+
   it("marks a dispatched non-queryable effect uncertain instead of sending it twice", async () => {
     let invocations = 0;
     const { repository, terminalPayloads } = repositoryFor([claimedEffect("effect-1", 2)]);
