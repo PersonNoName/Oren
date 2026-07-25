@@ -19,6 +19,25 @@ increment effect, dispatches it, resumes cognition from the durable Inbox,
 schedules a wake, closes SQLite, reopens the database, and verifies exact
 state replay.
 
+## Real-model commands (optional, credential-gated)
+
+Automated tests never call a real model. To run the manual paths, set:
+
+```bash
+export OREN_MODEL_PROVIDER=<pi-ai provider id>
+export OREN_MODEL_ID=<model id>
+# plus the provider's standard API key env var (e.g. ANTHROPIC_API_KEY)
+```
+
+- `npm run smoke` — full vertical slice (message → immediate read → durable
+  increment → wait → receipt → new episode → scheduled wake → restart replay)
+  against the configured model.
+- `npm run eval` — behavioral scenario suite; `OREN_EVAL_RUNS` (default 3)
+  runs per scenario, overall and per-scenario pass rate must reach
+  `OREN_EVAL_THRESHOLD` (default 0.9).
+
+Both commands print setup instructions and exit 0 when unconfigured.
+
 ## Architecture boundaries
 
 - `LifeActor` is the only writer of life-state events.
