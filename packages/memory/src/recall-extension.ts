@@ -1,5 +1,5 @@
 import type { OrenExtension } from "@oren/extensions";
-import type { JsonObject, JsonValue, MemoryKind } from "@oren/kernel";
+import type { JsonValue, MemoryKind } from "@oren/kernel";
 import type { MemoryPort, RecallQuery } from "./types.js";
 
 const MEMORY_KIND_VALUES = [
@@ -66,7 +66,9 @@ export function createMemoryRecallExtension(memory: MemoryPort): OrenExtension {
   };
 }
 
-function parseQuery(orenId: string, args: JsonObject): RecallQuery | undefined {
+function parseQuery(orenId: string, args: unknown): RecallQuery | undefined {
+  if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+  const record = args as Record<string, unknown>;
   const allowed = new Set([
     "text",
     "kinds",
@@ -76,8 +78,8 @@ function parseQuery(orenId: string, args: JsonObject): RecallQuery | undefined {
     "limit",
     "includeLowered",
   ]);
-  if (Object.keys(args).some((key) => !allowed.has(key))) return undefined;
-  const { text, kinds, threadId, since, until, limit, includeLowered } = args;
+  if (Object.keys(record).some((key) => !allowed.has(key))) return undefined;
+  const { text, kinds, threadId, since, until, limit, includeLowered } = record;
   if (text !== undefined && typeof text !== "string") return undefined;
   if (kinds !== undefined && (
     !Array.isArray(kinds)

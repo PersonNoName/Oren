@@ -57,4 +57,22 @@ describe("createMemoryRecallExtension", () => {
     }, new AbortController().signal);
     expect(result.status).toBe("failed");
   });
+
+  it.each([
+    ["null", null],
+    ["array", ["user_statement"]],
+    ["string", "text"],
+  ] as const)("rejects non-object arguments (%s) with invalid_arguments", async (_label, argumentsValue) => {
+    const extension = makeExtension([]);
+    const result = await extension.invoke({
+      effectId: "ef1", orenId: "oren-1", capability: "memory.recall",
+      arguments: argumentsValue as never,
+      grantIds: [], stateVersion: 1, deadline: "2026-07-26T00:00:01.000Z",
+    }, new AbortController().signal);
+    expect(result).toEqual({
+      status: "failed",
+      code: "invalid_arguments",
+      message: "memory.recall arguments do not match the input schema",
+    });
+  });
 });
