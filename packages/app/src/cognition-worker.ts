@@ -119,7 +119,9 @@ export class CognitionWorker {
     private readonly conductor: Conductor,
     private readonly actor: LifeActor,
     private readonly guard: Guard,
-    private readonly loadFrameInput: (job: CognitionJob) => CreateFrameInput,
+    private readonly loadFrameInput: (
+      job: CognitionJob,
+    ) => CreateFrameInput | Promise<CreateFrameInput>,
     private readonly capabilityPort: CognitionCapabilityPort,
   ) {}
 
@@ -148,7 +150,7 @@ export class CognitionWorker {
         abort();
         return;
       }
-      const initialInput = this.loadFrameInput(activeJob);
+      const initialInput = await this.loadFrameInput(activeJob);
       if (signal.aborted) {
         abort();
         return;
@@ -216,7 +218,7 @@ export class CognitionWorker {
           abort();
           return;
         }
-        frameInput = this.loadFrameInput(activeJob);
+        frameInput = await this.loadFrameInput(activeJob);
         if (signal.aborted) {
           abort();
           return;

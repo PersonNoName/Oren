@@ -2,9 +2,18 @@ import type {
   CapabilityDescriptor,
   JsonObject,
   JsonValue,
+  MemoryKind,
   Proposal,
   TriggerKind,
 } from "@oren/kernel";
+
+export interface MemoryPin {
+  readonly memoryId: string;
+  readonly kind: MemoryKind;
+  readonly text: string;
+  readonly confidence: number | null;
+  readonly occurredAt: string;
+}
 
 export interface LifeFrame {
   readonly orenId: string;
@@ -26,6 +35,7 @@ export interface LifeFrame {
     readonly kind: TriggerKind;
     readonly summary: string;
   };
+  readonly memoryPins: readonly MemoryPin[];
   readonly capabilities: readonly CapabilityDescriptor[];
   readonly maxSteps: number;
 }

@@ -5,12 +5,13 @@ import type {
   LifeState,
   TriggerKind,
 } from "@oren/kernel";
-import type { LifeFrame } from "./types.js";
+import type { LifeFrame, MemoryPin } from "./types.js";
 
 export interface CreateFrameInput {
   readonly state: LifeState;
   readonly correlationId: string;
   readonly trigger: { readonly kind: TriggerKind; readonly summary: string };
+  readonly memoryPins?: readonly MemoryPin[];
   readonly capabilities: readonly CapabilityDescriptor[];
   readonly maxSteps: number;
 }
@@ -36,6 +37,13 @@ export function createLifeFrame(input: CreateFrameInput): LifeFrame {
       kind: input.trigger.kind,
       summary: input.trigger.summary,
     },
+    memoryPins: (input.memoryPins ?? []).slice(0, 5).map((pin) => ({
+      memoryId: pin.memoryId,
+      kind: pin.kind,
+      text: pin.text,
+      confidence: pin.confidence,
+      occurredAt: pin.occurredAt,
+    })),
     capabilities: input.capabilities.map(snapshotCapabilityDescriptor),
     maxSteps: input.maxSteps,
   };

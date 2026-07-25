@@ -55,6 +55,7 @@ function frame(overrides: Partial<LifeFrame>): LifeFrame {
     attention: { focus: null, threadIds: [] },
     relationship: { primaryPersonId: "person-eval", contextRef: null },
     trigger: { kind: "foreground_user", summary: "" },
+    memoryPins: [],
     capabilities: [READ_CAPABILITY, INCREMENT_CAPABILITY],
     maxSteps: 8,
     ...overrides,

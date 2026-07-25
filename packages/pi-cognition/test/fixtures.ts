@@ -117,6 +117,7 @@ export function createFrame(
     attention: { focus: null, threadIds: [] },
     relationship: { primaryPersonId: "person-1", contextRef: null },
     trigger: { kind: "foreground_user", summary: "hello" },
+    memoryPins: [],
     capabilities: [],
     maxSteps: 8,
     ...overrides,

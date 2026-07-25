@@ -10,6 +10,7 @@ const baseFrame = {
   attention: { focus: null, threadIds: [] },
   relationship: { primaryPersonId: "person-eval", contextRef: null },
   trigger: { kind: "foreground_user" as const, summary: "hi" },
+  memoryPins: [],
   capabilities: [],
   maxSteps: 8,
 };
