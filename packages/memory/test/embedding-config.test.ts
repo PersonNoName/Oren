@@ -36,6 +36,19 @@ describe("resolveEmbeddingConfig", () => {
     }
   });
 
+  it("rejects whitespace-only API keys", () => {
+    const result = resolveEmbeddingConfig({
+      [EMBEDDING_PROVIDER_ENV]: "openai",
+      [EMBEDDING_MODEL_ENV]: "text-embedding-3-small",
+      OPENAI_API_KEY: "   ",
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.kind).toBe("invalid");
+      expect(result.reason).toContain("OPENAI_API_KEY");
+    }
+  });
+
   it("returns an embedder when fully configured (no network call)", () => {
     const result = resolveEmbeddingConfig({
       [EMBEDDING_PROVIDER_ENV]: "openai",

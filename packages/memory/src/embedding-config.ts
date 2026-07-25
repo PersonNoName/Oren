@@ -53,9 +53,9 @@ export function resolveEmbeddingConfig(
       reason: `Provider "${provider}" requires ${EMBEDDING_BASE_URL_ENV}.`,
     };
   }
-  const apiKey = info.keyEnvVars.map((name) => env[name]).find(
-    (value): value is string => typeof value === "string" && value.length > 0,
-  );
+  const apiKey = info.keyEnvVars
+    .map((name) => env[name]?.trim())
+    .find((value): value is string => typeof value === "string" && value.length > 0);
   if (!apiKey) {
     return {
       ok: false,
