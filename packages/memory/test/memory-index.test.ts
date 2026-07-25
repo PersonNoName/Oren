@@ -112,6 +112,20 @@ describe("SqliteMemoryIndex projection", () => {
     expect(byKeyword[0]!.text).toContain("演讲");
   });
 
+  it("returns empty for keyword recall with no substring matches (no embedder)", async () => {
+    const index = makeIndex();
+    await index.project([
+      record(1, { type: "UserMessageReceived", personId: "p1", text: "聊聊天气" }),
+      record(2, { type: "UserMessageReceived", personId: "p1", text: "演讲的事有进展" }),
+    ]);
+    const results = await index.recall({
+      orenId: "oren-1",
+      text: "完全不存在的词",
+      limit: 10,
+    });
+    expect(results).toHaveLength(0);
+  });
+
   it("is idempotent per sequence and rebuild matches incremental projection", async () => {
     const index = makeIndex();
     const records = [

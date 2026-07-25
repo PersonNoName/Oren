@@ -95,7 +95,7 @@ export class SqliteMemoryIndex implements MemoryPort {
       ? (await this.embedder.embed([query.text]))[0]
       : undefined;
 
-    const scored: ScoredEntry[] = rows.map((row) => {
+    const scored: ScoredEntry[] = rows.flatMap((row) => {
       const entry = rowToEntry(row);
       const embedding = row.embedding_json === null
         ? undefined
@@ -107,8 +107,9 @@ export class SqliteMemoryIndex implements MemoryPort {
         relevance = cosine(queryVector, embedding);
       } else {
         relevance = entry.text.includes(query.text) ? 1 : 0;
+        if (relevance === 0) return [];
       }
-      return { entry, score: relevance * this.recencyFactor(entry.occurredAt) };
+      return [{ entry, score: relevance * this.recencyFactor(entry.occurredAt) }];
     });
 
     scored.sort((left, right) =>
