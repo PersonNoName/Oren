@@ -56,7 +56,9 @@ describe("judge", () => {
       { id: "a", title: "a", runs: 3, passes: 3, totalTokens: 0, failures: [] },
       { id: "b", title: "b", runs: 3, passes: 2, totalTokens: 0, failures: [] },
     ];
-    expect(judge(results, 0.8)).toMatchObject({ pass: true });
+    const atThreshold = judge(results, 0.8);
+    expect(atThreshold.pass).toBe(false);
+    expect(atThreshold.failingScenarioIds).toEqual(["b"]);
     const strict = judge(results, 0.9);
     expect(strict.pass).toBe(false);
     expect(strict.failingScenarioIds).toEqual(["b"]);

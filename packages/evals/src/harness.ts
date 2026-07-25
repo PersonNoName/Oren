@@ -106,7 +106,7 @@ export function judge(
     .filter(({ runs, passes }) => runs > 0 && passes / runs < threshold)
     .map(({ id }) => id);
   return {
-    pass: overallRate >= threshold,
+    pass: overallRate >= threshold && failingScenarioIds.length === 0,
     overallRate,
     failingScenarioIds,
   };
