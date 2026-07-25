@@ -221,7 +221,9 @@ export function allScenarios(): readonly Scenario[] {
         const base = completedWithValidProposals(outcome);
         if (base.length > 0) return base;
         const texts = expressTexts(outcome);
-        if (texts.length === 0) return [];
+        if (texts.length === 0) {
+          return ["expected an ExpressToUser reply acknowledging the failed/unavailable action"];
+        }
         return texts.some((text) => containsAny(text, FAILURE_MARKERS))
           ? []
           : ["expected the reply to acknowledge the failed/unavailable action"];
