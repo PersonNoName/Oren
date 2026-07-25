@@ -47,6 +47,7 @@ export interface EffectRegistry {
 export interface EffectDispatcherOptions {
   readonly now?: () => number;
   readonly claimLimit?: number;
+  readonly acceptingWork?: () => boolean;
 }
 
 export interface EffectDispatchResult {
@@ -136,6 +137,7 @@ function canonicalizeCapabilityResult(value: unknown): CapabilityResult | undefi
 export class EffectDispatcher {
   private readonly now: () => number;
   private readonly claimLimit: number;
+  private readonly acceptingWork: (() => boolean) | undefined;
 
   public constructor(
     private readonly repository: EffectRepository,
@@ -145,6 +147,7 @@ export class EffectDispatcher {
   ) {
     this.now = options.now ?? Date.now;
     this.claimLimit = options.claimLimit ?? 8;
+    this.acceptingWork = options.acceptingWork;
   }
 
   public async runOnce(): Promise<EffectDispatchResult[]> {
@@ -155,6 +158,7 @@ export class EffectDispatcher {
     );
     const results: EffectDispatchResult[] = [];
     for (const row of claimed) {
+      if (this.acceptingWork && !this.acceptingWork()) break;
       results.push(await this.processClaimedEffect(row));
     }
     return results;
