@@ -93,7 +93,7 @@ export async function runSmoke(
     await first.receiveUserMessage(
       "oren-smoke",
       "person-smoke",
-      "请读取计数器，把它加一，然后安排一次后续查看。",
+      "请读取计数器，把它加一，记住一个关于这个计数器用途的判断，然后安排一次后续查看。",
     );
     await first.drain();
     const beforeRestart = first.inspect("oren-smoke");
@@ -126,6 +126,12 @@ export async function runSmoke(
         }
         return 1;
       }
+      const memories = await second.recall("oren-smoke", { limit: 50 });
+      if (memories.length === 0) {
+        log("FAIL: expected recallable memories after restart");
+        return 1;
+      }
+      log(`memories recallable after restart: ${memories.length}`);
       log("Oren smoke completed; restart replay matched");
       return 0;
     } finally {

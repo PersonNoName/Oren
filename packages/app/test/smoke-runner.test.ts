@@ -64,6 +64,7 @@ describe("runSmoke", () => {
     expect(code).toBe(0);
     const output = lines.join("\n");
     expect(output).toContain("restart replay matched");
+    expect(output).toContain("memories recallable after restart");
     expect(output).toContain("waiting_for_effect");
     expect(output).toContain("ScheduleWake");
     expect(output).toContain("totalTokens");

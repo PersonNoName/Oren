@@ -38,6 +38,26 @@ export OREN_MODEL_ID=<model id>
 
 Both commands print setup instructions and exit 0 when unconfigured.
 
+## 记忆（Phase 3）
+
+- Oren 从生命事件史投影可召回记忆：用户消息、Oren 的表达、线索推进自动入库；
+  模型可通过 `Remember` / `ReviseBelief` / `Forget` 提议经营记忆。
+- 召回默认使用向量检索（需配置 embedding 凭据）；未配置时自动降级为
+  结构化检索（类型/线索/时间过滤 + 关键词 + 时近排序），离线测试全部走降级或假 embedder。
+- 启用真实向量召回（可选，手动路径）：
+
+  ```bash
+  export OREN_EMBEDDING_PROVIDER=openai
+  export OREN_EMBEDDING_MODEL=text-embedding-3-small
+  export OPENAI_API_KEY=sk-...
+  # 或任意 OpenAI 兼容端点：
+  # export OREN_EMBEDDING_PROVIDER=openai-compatible
+  # export OREN_EMBEDDING_BASE_URL=https://your-endpoint/v1
+  # export OREN_EMBEDDING_API_KEY=...
+  ```
+
+- 「忘记」只降低可召回性，生命史与索引行都不会删除；记忆索引可随时从事件史重建。
+
 ## Architecture boundaries
 
 - `LifeActor` is the only writer of life-state events.

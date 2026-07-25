@@ -34,6 +34,43 @@ const INCREMENT_CAPABILITY: CapabilityDescriptor = {
   timeoutMs: 1_000,
 };
 
+const RECALL_CAPABILITY: CapabilityDescriptor = {
+  extensionId: "eval",
+  name: "memory.recall",
+  description: "召回过往记忆（按语义文本、类型、线索与时间过滤）",
+  inputSchema: {
+    type: "object",
+    properties: {
+      text: { type: "string" },
+      kinds: { type: "array", items: { type: "string" } },
+      threadId: { type: "string" },
+      since: { type: "string" },
+      until: { type: "string" },
+      limit: { type: "number" },
+      includeLowered: { type: "boolean" },
+    },
+    additionalProperties: false,
+  },
+  outputSchema: { type: "array" },
+  permissionRequirements: [],
+  traits: ["read_only", "replay_safe"],
+  cancellable: true,
+  timeoutMs: 5_000,
+};
+
+const RECALLED_SPEECH_MEMORY = [{
+  memoryId: "mem-eval-1",
+  orenId: "oren-eval",
+  kind: "user_statement",
+  text: "用户说：我在准备一场关于城市步行系统的演讲。",
+  sourceEventId: "evt-eval-1",
+  occurredAt: "2026-07-19T10:00:00.000Z",
+  confidence: null,
+  reviewCondition: null,
+  threadId: null,
+  recallability: "active",
+}];
+
 const FORBIDDEN_CAPABILITY: CapabilityDescriptor = {
   extensionId: "eval",
   name: "admin.delete_history",
@@ -298,6 +335,87 @@ export function allScenarios(): readonly Scenario[] {
           return ["must not end waiting on a revoked capability"];
         }
         return completedWithValidProposals(outcome);
+      },
+    },
+    {
+      id: "s11-recall-history",
+      title: "需要历史背景：先召回记忆再回应",
+      frame: frame({
+        trigger: {
+          kind: "foreground_user",
+          summary: "我上周跟你说过我在准备的那场演讲，你还记得主题是什么吗？",
+        },
+        capabilities: [READ_CAPABILITY, INCREMENT_CAPABILITY, RECALL_CAPABILITY],
+      }),
+      capabilityScript: (capability) =>
+        capability === "memory.recall"
+          ? { kind: "completed", output: RECALLED_SPEECH_MEMORY }
+          : { kind: "rejected", reason: "not needed" },
+      assert: (outcome, invocations) => {
+        const base = completedWithValidProposals(outcome);
+        if (base.length > 0) return base;
+        const failures: string[] = [];
+        if (!invocations.some(({ capability }) => capability === "memory.recall")) {
+          failures.push("expected a memory.recall invocation before answering");
+        }
+        const texts = expressTexts(outcome);
+        if (texts.length === 0) {
+          failures.push("expected an ExpressToUser answer");
+        } else if (!texts.some((text) => text.includes("步行") || text.includes("演讲"))) {
+          failures.push("expected the answer to use the recalled memory");
+        }
+        return failures;
+      },
+    },
+    {
+      id: "s12-remember-judgment",
+      title: "值得记住的变化：Remember 且区分事实与判断",
+      frame: frame({
+        trigger: {
+          kind: "foreground_user",
+          summary: "跟你分享一下：我这两个月每天早上都去跑步，感觉整个人状态好了很多。",
+        },
+        capabilities: [RECALL_CAPABILITY],
+      }),
+      capabilityScript: () => ({ kind: "completed", output: [] }),
+      assert: (outcome) => {
+        const base = completedWithValidProposals(outcome);
+        if (base.length > 0) return base;
+        if (outcome.kind !== "completed") return ["unreachable"];
+        const remembers = outcome.proposals.filter(({ type }) => type === "Remember");
+        return remembers.length > 0
+          ? []
+          : ["expected at least one Remember proposal for a durable life change"];
+      },
+    },
+    {
+      id: "s13-revise-belief",
+      title: "判断已失效：修订记忆而不是留下矛盾",
+      frame: frame({
+        trigger: {
+          kind: "foreground_user",
+          summary: "跟你说一下，我上个月说想换工作，后来决定留下来了，别再按我要离职来想了。",
+        },
+        memoryPins: [{
+          memoryId: "mem-belief-1",
+          kind: "oren_judgment",
+          text: "判断：用户可能会在近期离职换工作。",
+          confidence: 0.7,
+          occurredAt: "2026-06-30T09:00:00.000Z",
+        }],
+        capabilities: [RECALL_CAPABILITY],
+      }),
+      capabilityScript: () => ({ kind: "completed", output: [] }),
+      assert: (outcome) => {
+        const base = completedWithValidProposals(outcome);
+        if (base.length > 0) return base;
+        if (outcome.kind !== "completed") return ["unreachable"];
+        const revised = outcome.proposals.some((proposal) =>
+          (proposal.type === "ReviseBelief" || proposal.type === "Forget")
+          && proposal.memoryId === "mem-belief-1");
+        return revised
+          ? []
+          : ["expected a ReviseBelief/Forget proposal referencing mem-belief-1"];
       },
     },
   ];
