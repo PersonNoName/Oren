@@ -353,6 +353,29 @@ export class SqliteLifeRepository {
     return this.loadEventsAfter(orenId, 0);
   }
 
+  public loadEventRecordsAfter(sequence: number): Array<{
+    readonly sequence: number;
+    readonly envelope: EventEnvelope;
+  }> {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error("Event record cursor must be a nonnegative safe integer");
+    }
+    return this.db.prepare(`
+      SELECT sequence, envelope_json FROM events
+      WHERE sequence > ?
+      ORDER BY sequence
+    `).all(sequence).flatMap((row) => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(row.envelope_json));
+      } catch {
+        return [];
+      }
+      const envelope = canonicalizeEventEnvelope(parsed);
+      return envelope ? [{ sequence: Number(row.sequence), envelope }] : [];
+    });
+  }
+
   public loadPendingCognitionJobs(): CognitionJob[] {
     const pending = new Map<string, CognitionJob>();
     const rows = this.db.prepare(`

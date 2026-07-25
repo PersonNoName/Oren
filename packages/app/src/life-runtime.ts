@@ -17,6 +17,15 @@ import {
   type CognitionJob,
   type LifeState,
 } from "@oren/kernel";
+import {
+  createMemoryRecallExtension,
+  resolveEmbeddingConfig,
+  SqliteMemoryIndex,
+  type EmbeddingPort,
+  type MemoryEntry,
+  type MemoryPort,
+  type RecallQuery,
+} from "@oren/memory";
 import { openDatabase, SqliteLifeRepository } from "@oren/storage";
 import { createTestCounterExtension } from "@oren/test-counter";
 import { CognitionWorker } from "./cognition-worker.js";
@@ -39,6 +48,7 @@ export interface LifeRuntimeOptions {
   readonly extensionFactory?: () => OrenExtension;
   readonly maxDrainCycles?: number;
   readonly shutdownGraceMs?: number;
+  readonly embedder?: EmbeddingPort;
 }
 
 export class LifeRuntime {
@@ -56,7 +66,8 @@ export class LifeRuntime {
     private readonly coordinator: EpisodeCoordinator,
     private readonly dispatcher: EffectDispatcher,
     private readonly scheduler: Scheduler,
-    private readonly extension: OrenExtension,
+    private readonly extensions: readonly OrenExtension[],
+    private readonly memory: MemoryPort,
     private readonly now: () => string,
     private readonly maxDrainCycles: number,
     private readonly shutdownGraceMs: number,
@@ -167,19 +178,35 @@ export class LifeRuntime {
       throw new Error("shutdownGraceMs must be a nonnegative safe integer");
     }
 
-    const repository = new SqliteLifeRepository(openDatabase(databasePath), now, nextId);
-    let extension: OrenExtension | undefined;
-    let activationAttempted = false;
+    const db = openDatabase(databasePath);
+    const repository = new SqliteLifeRepository(db, now, nextId);
+    const resolvedEmbedding = options.embedder === undefined
+      ? resolveEmbeddingConfig(process.env)
+      : undefined;
+    const embedder = options.embedder
+      ?? (resolvedEmbedding?.ok ? resolvedEmbedding.embedder : undefined);
+    const memory = new SqliteMemoryIndex(db, {
+      ...(embedder !== undefined ? { embedder } : {}),
+      now: () => Date.parse(now()),
+    });
+    let extensions: OrenExtension[] = [];
+    let activatedCount = 0;
     try {
-      extension = (options.extensionFactory ?? createTestCounterExtension)();
+      const businessExtension = (options.extensionFactory ?? createTestCounterExtension)();
+      const memoryExtension = createMemoryRecallExtension(memory);
+      extensions = [businessExtension, memoryExtension];
       const registry = new ExtensionRegistry();
-      registry.register(extension);
-      activationAttempted = true;
-      await extension.activate({
-        extensionId: extension.manifest.id,
-        reportProgress() {},
-        emitObservation() {},
-      });
+      for (const extension of extensions) {
+        registry.register(extension);
+      }
+      for (const extension of extensions) {
+        activatedCount += 1;
+        await extension.activate({
+          extensionId: extension.manifest.id,
+          reportProgress() {},
+          emitObservation() {},
+        });
+      }
 
       const actor = new LifeActor(repository, nextId, now);
       const guard = new Guard();
@@ -205,13 +232,31 @@ export class LifeRuntime {
         new Conductor(),
         actor,
         guard,
-        (job) => ({
-          state: repository.loadState(job.orenId),
-          correlationId: job.correlationId,
-          trigger: { kind: job.triggerKind, summary: job.correlationId },
-          capabilities: registry.listCapabilities(),
-          maxSteps: 8,
-        }),
+        async (job) => {
+          const state = repository.loadState(job.orenId);
+          const newRecords = repository.loadEventRecordsAfter(memory.cursor());
+          if (newRecords.length > 0) await memory.project(newRecords);
+          const focus = state.attention.currentFocus;
+          const pins = await memory.recall({
+            orenId: job.orenId,
+            ...(focus !== null ? { text: focus } : {}),
+            limit: 5,
+          });
+          return {
+            state,
+            correlationId: job.correlationId,
+            trigger: { kind: job.triggerKind, summary: job.correlationId },
+            capabilities: registry.listCapabilities(),
+            maxSteps: 8,
+            memoryPins: pins.map((entry) => ({
+              memoryId: entry.memoryId,
+              kind: entry.kind,
+              text: entry.text,
+              confidence: entry.confidence,
+              occurredAt: entry.occurredAt,
+            })),
+          };
+        },
         {
           invoke: (
             { orenId, descriptor, arguments: arguments_, stateVersion, correlationId },
@@ -246,7 +291,8 @@ export class LifeRuntime {
         coordinator,
         dispatcher,
         new Scheduler(repository, { now }),
-        extension,
+        extensions,
+        memory,
         now,
         maxDrainCycles,
         shutdownGraceMs,
@@ -254,7 +300,7 @@ export class LifeRuntime {
       );
     } catch (primaryError) {
       const cleanupErrors: unknown[] = [];
-      if (extension && activationAttempted) {
+      for (const extension of extensions.slice(0, activatedCount)) {
         try {
           await extension.deactivate();
         } catch (cleanupError) {
@@ -334,6 +380,19 @@ export class LifeRuntime {
     return this.repository.loadState(orenId);
   }
 
+  public async recall(
+    orenId: string,
+    query: Omit<RecallQuery, "orenId"> = {},
+  ): Promise<readonly MemoryEntry[]> {
+    this.assertOpen();
+    if (this.identity && this.identity.orenId !== orenId) {
+      throw new Error(`LifeRuntime identity conflict: expected ${this.identity.orenId}`);
+    }
+    const newRecords = this.repository.loadEventRecordsAfter(this.memory.cursor());
+    if (newRecords.length > 0) await this.memory.project(newRecords);
+    return this.memory.recall({ ...query, orenId });
+  }
+
   public close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
@@ -346,6 +405,8 @@ export class LifeRuntime {
     let productiveCycles = 0;
     while (!this.closing) {
       let activity = 0;
+      const newRecords = this.repository.loadEventRecordsAfter(this.memory.cursor());
+      if (newRecords.length > 0) await this.memory.project(newRecords);
       const recovered = this.repository.loadPendingCognitionJobs();
       if (recovered.length > 0) {
         const recoveredRuns = await Promise.all(recovered.map((job) =>
@@ -436,7 +497,9 @@ export class LifeRuntime {
       ];
       const observed = Promise.allSettled(pending);
       await this.waitForShutdownGrace(observed);
-      await this.extension.deactivate();
+      for (const extension of this.extensions) {
+        await extension.deactivate();
+      }
     } finally {
       this.repository.close();
       this.closed = true;
