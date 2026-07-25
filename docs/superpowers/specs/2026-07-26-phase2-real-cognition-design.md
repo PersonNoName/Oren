@@ -66,12 +66,12 @@
   - 「配置非法」→ 打印原因后以非零退出码结束；
 - 配置有效时：在临时目录数据库上，用 `PiCognitionAdapter` + `LifeRuntime.create` 跑完整垂直切片：
   用户消息 → 即时能力（`test.read`）→ 持久能力（`test.increment`）→ episode 等待 → 回执 → 新 episode → 安排唤醒 → 关闭重启 → 状态回放一致；
-- 输出：每个 episode 的 Proposal 列表、token 用量与按 `pi-ai` `calculateCost` 估算的成本；
+- 输出：每个 episode 的终态、Proposal 列表与 token 用量合计（`CognitionOutcome` 当前只上报 `totalTokens`；成本估算留待后续暴露 usage 细分后加入，不在 Phase 2 改 cognition 类型）；
 - 不进入 `npm test`、typecheck 门槛或 CI；是骨架 §16 允许的「开发者主动配置凭据才运行」路径。
 
 ### 3.4 行为评估套件
 
-新增 workspace 包 `packages/evals`（依赖 `app`、`pi-cognition`、`kernel`），`package.json` 增加 `"eval"` 脚本：
+新增 workspace 包 `packages/evals`（依赖 `cognition`、`pi-cognition`、`kernel`；评估在 `CognitionPort` 层进行——构造 `LifeFrame` 与脚本化能力端口直接驱动适配器，不经 SQLite 运行时，便宜且聚焦模型行为），根 `package.json` 增加 `"eval"` 脚本：
 
 - **场景**（8~12 个，代码定义，每个含初始状态、触发输入、断言集）：
   1. 普通用户消息 → 提交合法 Proposal 并回应；
@@ -85,7 +85,7 @@
   9. maxSteps 压力（复杂任务）→ 在界内停止且状态合法；
   10. 预算/授权不足场景 → 缩小范围、请求授权或说明，而非硬闯；
 - **运行**：每场景对真实模型跑 N 次（`OREN_EVAL_RUNS`，默认 3）；断言为程序化行为属性（Proposal 类型合法、终态合法、无 Guard 违规、无虚报回执、按需安排唤醒）；
-- **判定**：每场景通过率与总通过率对门槛（`OREN_EVAL_THRESHOLD`，默认 0.9）；输出逐场景报告（通过率、失败样本摘要、token/成本合计），任一门槛不达则非零退出；
+- **判定**：每场景通过率与总通过率对门槛（`OREN_EVAL_THRESHOLD`，默认 0.9）；输出逐场景报告（通过率、失败样本摘要、token 合计），任一门槛不达则非零退出；
 - **凭据门控**：与 smoke 相同——未配置说明后退出 0，非法配置非零退出；
 - **harness 离线单测**：用脚本化/假 stream 认知验证断言逻辑本身（能正确判定通过与失败样本），进入 `npm test`；
 - 不做逐字快照（骨架 §17.4），不做 LLM 评审员（留待 Phase 5/6 有真实分享内容后）。
