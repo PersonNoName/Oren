@@ -130,6 +130,34 @@ export class LifeActor {
             at: proposal.at,
             purpose: proposal.purpose,
           })];
+        case "Remember":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "MemoryRemembered",
+            memoryId: this.nextId(),
+            kind: proposal.kind,
+            text: proposal.text,
+            ...(proposal.confidence !== undefined ? { confidence: proposal.confidence } : {}),
+            ...(proposal.reviewCondition !== undefined
+              ? { reviewCondition: proposal.reviewCondition }
+              : {}),
+            ...(proposal.threadId !== undefined ? { threadId: proposal.threadId } : {}),
+          })];
+        case "ReviseBelief":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "BeliefRevised",
+            memoryId: proposal.memoryId,
+            confidence: proposal.confidence,
+            reason: proposal.reason,
+            ...(proposal.revisedText !== undefined
+              ? { revisedText: proposal.revisedText }
+              : {}),
+          })];
+        case "Forget":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "MemoryForgotten",
+            memoryId: proposal.memoryId,
+            reason: proposal.reason,
+          })];
         case "NoAction":
         case "ExpressToUser":
           return [];

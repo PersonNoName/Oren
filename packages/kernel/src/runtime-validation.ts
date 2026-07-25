@@ -4,6 +4,7 @@ import type {
   Effect,
   EpisodeInterruptionReason,
   EventEnvelope,
+  MemoryKind,
   Proposal,
   TriggerKind,
 } from "./protocol.js";
@@ -24,6 +25,35 @@ const INTERRUPTION_REASONS = new Set<unknown>([
 ]);
 const INSTANT_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|[+-](\d{2}):(\d{2}))$/;
+const MEMORY_KINDS = new Set<unknown>([
+  "user_statement",
+  "external_fact",
+  "oren_judgment",
+  "oren_expression",
+]);
+const MAX_MEMORY_TEXT_LENGTH = 4_000;
+
+function hasKeysWithin(
+  value: JsonObject,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const keys = Object.keys(value);
+  return required.every((key) => keys.includes(key))
+    && keys.every((key) => required.includes(key) || optional.includes(key));
+}
+
+function isConfidence(value: JsonValue | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isNonemptyString(value: JsonValue | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isMemoryText(value: JsonValue | undefined): value is string {
+  return isNonemptyString(value) && value.length <= MAX_MEMORY_TEXT_LENGTH;
+}
 
 function isRecord(value: JsonValue | undefined): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -192,6 +222,53 @@ export function canonicalizeProposal(value: unknown): Proposal | undefined {
           }
         : undefined;
     }
+    case "Remember": {
+      if (
+        !hasKeysWithin(proposal, ["type", "text", "kind"], ["confidence", "reviewCondition", "threadId"])
+        || !isMemoryText(proposal.text)
+        || !MEMORY_KINDS.has(proposal.kind)
+        || (proposal.confidence !== undefined && !isConfidence(proposal.confidence))
+        || (proposal.kind === "oren_judgment" && proposal.confidence === undefined)
+        || (proposal.reviewCondition !== undefined && !isNonemptyString(proposal.reviewCondition))
+        || (proposal.threadId !== undefined && !isNonemptyString(proposal.threadId))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "Remember",
+        text: proposal.text,
+        kind: proposal.kind as MemoryKind,
+        ...(proposal.confidence !== undefined ? { confidence: proposal.confidence } : {}),
+        ...(proposal.reviewCondition !== undefined
+          ? { reviewCondition: proposal.reviewCondition }
+          : {}),
+        ...(proposal.threadId !== undefined ? { threadId: proposal.threadId } : {}),
+      };
+    }
+    case "ReviseBelief": {
+      if (
+        !hasKeysWithin(proposal, ["type", "memoryId", "confidence", "reason"], ["revisedText"])
+        || !isNonemptyString(proposal.memoryId)
+        || !isConfidence(proposal.confidence)
+        || !isNonemptyString(proposal.reason)
+        || (proposal.revisedText !== undefined && !isMemoryText(proposal.revisedText))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "ReviseBelief",
+        memoryId: proposal.memoryId,
+        confidence: proposal.confidence,
+        reason: proposal.reason,
+        ...(proposal.revisedText !== undefined ? { revisedText: proposal.revisedText } : {}),
+      };
+    }
+    case "Forget":
+      return hasExactKeys(proposal, ["type", "memoryId", "reason"])
+        && isNonemptyString(proposal.memoryId)
+        && isNonemptyString(proposal.reason)
+        ? { type: "Forget", memoryId: proposal.memoryId, reason: proposal.reason }
+        : undefined;
     default:
       return undefined;
   }
@@ -347,6 +424,59 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
         && isString(event.scheduleId)
         && isString(event.purpose)
         ? { type: "WakeDue", scheduleId: event.scheduleId, purpose: event.purpose }
+        : undefined;
+    case "MemoryRemembered": {
+      if (
+        !hasKeysWithin(
+          event,
+          ["type", "memoryId", "kind", "text"],
+          ["confidence", "reviewCondition", "threadId"],
+        )
+        || !isNonemptyString(event.memoryId)
+        || !MEMORY_KINDS.has(event.kind)
+        || !isMemoryText(event.text)
+        || (event.confidence !== undefined && !isConfidence(event.confidence))
+        || (event.kind === "oren_judgment" && event.confidence === undefined)
+        || (event.reviewCondition !== undefined && !isNonemptyString(event.reviewCondition))
+        || (event.threadId !== undefined && !isNonemptyString(event.threadId))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "MemoryRemembered",
+        memoryId: event.memoryId,
+        kind: event.kind as MemoryKind,
+        text: event.text,
+        ...(event.confidence !== undefined ? { confidence: event.confidence } : {}),
+        ...(event.reviewCondition !== undefined
+          ? { reviewCondition: event.reviewCondition }
+          : {}),
+        ...(event.threadId !== undefined ? { threadId: event.threadId } : {}),
+      };
+    }
+    case "BeliefRevised": {
+      if (
+        !hasKeysWithin(event, ["type", "memoryId", "confidence", "reason"], ["revisedText"])
+        || !isNonemptyString(event.memoryId)
+        || !isConfidence(event.confidence)
+        || !isNonemptyString(event.reason)
+        || (event.revisedText !== undefined && !isMemoryText(event.revisedText))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "BeliefRevised",
+        memoryId: event.memoryId,
+        confidence: event.confidence,
+        reason: event.reason,
+        ...(event.revisedText !== undefined ? { revisedText: event.revisedText } : {}),
+      };
+    }
+    case "MemoryForgotten":
+      return hasExactKeys(event, ["type", "memoryId", "reason"])
+        && isNonemptyString(event.memoryId)
+        && isNonemptyString(event.reason)
+        ? { type: "MemoryForgotten", memoryId: event.memoryId, reason: event.reason }
         : undefined;
     default:
       return undefined;

@@ -17,6 +17,12 @@ export type TriggerKind =
   | "scheduled_wake"
   | "health_check";
 
+export type MemoryKind =
+  | "user_statement"
+  | "external_fact"
+  | "oren_judgment"
+  | "oren_expression";
+
 export type EpisodeInterruptionReason =
   | "foreground_user"
   | "shutdown"
@@ -28,7 +34,23 @@ export type Proposal =
   | { readonly type: "AdvanceThread"; readonly threadId: ThreadId; readonly summary: string }
   | { readonly type: "UpdateDisposition"; readonly disposition: string; readonly reason: string }
   | { readonly type: "ExpressToUser"; readonly text: string; readonly reason: string }
-  | { readonly type: "ScheduleWake"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string };
+  | { readonly type: "ScheduleWake"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string }
+  | {
+      readonly type: "Remember";
+      readonly text: string;
+      readonly kind: MemoryKind;
+      readonly confidence?: number;
+      readonly reviewCondition?: string;
+      readonly threadId?: ThreadId;
+    }
+  | {
+      readonly type: "ReviseBelief";
+      readonly memoryId: string;
+      readonly revisedText?: string;
+      readonly confidence: number;
+      readonly reason: string;
+    }
+  | { readonly type: "Forget"; readonly memoryId: string; readonly reason: string };
 
 export interface Effect {
   readonly effectId: EffectId;
@@ -57,7 +79,24 @@ export type CoreEvent =
   | { readonly type: "EffectFailed"; readonly effectId: EffectId; readonly code: string; readonly message: string }
   | { readonly type: "EffectUncertain"; readonly effectId: EffectId; readonly message: string }
   | { readonly type: "WakeScheduled"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string }
-  | { readonly type: "WakeDue"; readonly scheduleId: ScheduleId; readonly purpose: string };
+  | { readonly type: "WakeDue"; readonly scheduleId: ScheduleId; readonly purpose: string }
+  | {
+      readonly type: "MemoryRemembered";
+      readonly memoryId: string;
+      readonly kind: MemoryKind;
+      readonly text: string;
+      readonly confidence?: number;
+      readonly reviewCondition?: string;
+      readonly threadId?: ThreadId;
+    }
+  | {
+      readonly type: "BeliefRevised";
+      readonly memoryId: string;
+      readonly revisedText?: string;
+      readonly confidence: number;
+      readonly reason: string;
+    }
+  | { readonly type: "MemoryForgotten"; readonly memoryId: string; readonly reason: string };
 
 export type InboxCoreEvent =
   | Extract<CoreEvent, { type: "WakeDue" }>
