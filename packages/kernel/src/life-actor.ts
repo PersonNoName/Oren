@@ -2,6 +2,7 @@ import type {
   Effect,
   EpisodeInterruptionReason,
   EventEnvelope,
+  ObservationKind,
   Proposal,
 } from "./protocol.js";
 import type {
@@ -245,6 +246,40 @@ export class LifeActor {
         effectId,
       }),
     ]);
+  }
+
+  public recordObservation(
+    orenId: string,
+    correlationId: string,
+    input: {
+      readonly kind: ObservationKind;
+      readonly sourceUrl: string;
+      readonly title?: string;
+      readonly excerpt: string;
+      readonly retrievedAt: string;
+      readonly query?: string;
+      readonly confidence: number;
+    },
+  ): { readonly accepted: true } | { readonly accepted: false; readonly reason: string } {
+    const current = this.repository.loadState(orenId);
+    if ((current.budgets.webQuotaRemaining ?? 0) < 1) {
+      return { accepted: false, reason: "web_quota_exhausted" };
+    }
+    const payload = {
+      type: "ObservationRecorded" as const,
+      observationId: this.nextId(),
+      kind: input.kind,
+      sourceUrl: input.sourceUrl,
+      excerpt: input.excerpt,
+      retrievedAt: input.retrievedAt,
+      confidence: input.confidence,
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.query !== undefined ? { query: input.query } : {}),
+    };
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, payload),
+    ]);
+    return { accepted: true };
   }
 
   public requestEffect(

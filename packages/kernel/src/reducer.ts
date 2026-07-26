@@ -95,6 +95,19 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
           ? state.schedules
           : [...state.schedules, event.payload.scheduleId],
       };
+    case "ObservationRecorded": {
+      const remaining = state.budgets.webQuotaRemaining ?? 0;
+      if (remaining < 1) {
+        throw new Error("ObservationRecorded rejected: web quota exhausted");
+      }
+      return {
+        ...base,
+        budgets: {
+          ...state.budgets,
+          webQuotaRemaining: remaining - 1,
+        },
+      };
+    }
     default:
       return base;
   }

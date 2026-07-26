@@ -23,6 +23,8 @@ export type MemoryKind =
   | "oren_judgment"
   | "oren_expression";
 
+export type ObservationKind = "web_search_result" | "web_page";
+
 export type EpisodeInterruptionReason =
   | "foreground_user"
   | "shutdown"
@@ -96,7 +98,18 @@ export type CoreEvent =
       readonly confidence: number;
       readonly reason: string;
     }
-  | { readonly type: "MemoryForgotten"; readonly memoryId: string; readonly reason: string };
+  | { readonly type: "MemoryForgotten"; readonly memoryId: string; readonly reason: string }
+  | {
+      readonly type: "ObservationRecorded";
+      readonly observationId: string;
+      readonly kind: ObservationKind;
+      readonly sourceUrl: string;
+      readonly title?: string;
+      readonly excerpt: string;
+      readonly retrievedAt: string;
+      readonly query?: string;
+      readonly confidence: number;
+    };
 
 export type InboxCoreEvent =
   | Extract<CoreEvent, { type: "WakeDue" }>

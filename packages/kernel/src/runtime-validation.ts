@@ -5,6 +5,7 @@ import type {
   EpisodeInterruptionReason,
   EventEnvelope,
   MemoryKind,
+  ObservationKind,
   Proposal,
   TriggerKind,
 } from "./protocol.js";
@@ -32,6 +33,8 @@ const MEMORY_KINDS = new Set<unknown>([
   "oren_expression",
 ]);
 const MAX_MEMORY_TEXT_LENGTH = 4_000;
+const MAX_OBSERVATION_EXCERPT_LENGTH = 8_192;
+const OBSERVATION_KINDS = new Set<unknown>(["web_search_result", "web_page"]);
 
 function hasKeysWithin(
   value: JsonObject,
@@ -53,6 +56,10 @@ function isNonemptyString(value: JsonValue | undefined): value is string {
 
 function isMemoryText(value: JsonValue | undefined): value is string {
   return isNonemptyString(value) && value.length <= MAX_MEMORY_TEXT_LENGTH;
+}
+
+function isObservationExcerpt(value: JsonValue | undefined): value is string {
+  return isNonemptyString(value) && value.length <= MAX_OBSERVATION_EXCERPT_LENGTH;
 }
 
 function isRecord(value: JsonValue | undefined): value is JsonObject {
@@ -138,6 +145,10 @@ export function hasValidLifeStateBudgets(state: LifeState): boolean {
     && budgets.interactionMaxSteps >= 0
     && Object.values(budgets.commitmentRemaining).every(
       (remaining) => Number.isSafeInteger(remaining) && remaining >= 0,
+    )
+    && (
+      budgets.webQuotaRemaining === undefined
+      || (Number.isSafeInteger(budgets.webQuotaRemaining) && budgets.webQuotaRemaining >= 0)
     );
 }
 
@@ -478,6 +489,37 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
         && isNonemptyString(event.reason)
         ? { type: "MemoryForgotten", memoryId: event.memoryId, reason: event.reason }
         : undefined;
+    case "ObservationRecorded": {
+      const retrievedAt = canonicalizeInstant(event.retrievedAt);
+      if (
+        !hasKeysWithin(
+          event,
+          ["type", "observationId", "kind", "sourceUrl", "excerpt", "retrievedAt", "confidence"],
+          ["title", "query"],
+        )
+        || !isNonemptyString(event.observationId)
+        || !OBSERVATION_KINDS.has(event.kind)
+        || !isNonemptyString(event.sourceUrl)
+        || !isObservationExcerpt(event.excerpt)
+        || retrievedAt === undefined
+        || !isConfidence(event.confidence)
+        || (event.title !== undefined && !isNonemptyString(event.title))
+        || (event.kind === "web_search_result" && !isNonemptyString(event.query))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "ObservationRecorded",
+        observationId: event.observationId,
+        kind: event.kind as ObservationKind,
+        sourceUrl: event.sourceUrl,
+        excerpt: event.excerpt,
+        retrievedAt,
+        confidence: event.confidence,
+        ...(event.title !== undefined ? { title: event.title } : {}),
+        ...(event.query !== undefined ? { query: event.query as string } : {}),
+      };
+    }
     default:
       return undefined;
   }

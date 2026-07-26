@@ -23,6 +23,7 @@ export interface LifeState {
     readonly autonomyRemaining: number;
     readonly interactionMaxSteps: number;
     readonly commitmentRemaining: Readonly<Record<string, number>>;
+    readonly webQuotaRemaining?: number;
   };
   /**
    * Durable replay index for exactly-once background autonomy reservations.
@@ -36,6 +37,10 @@ export interface LifeState {
   readonly chronicleCursor: number;
 }
 
+export function webQuotaRemaining(state: LifeState): number {
+  return state.budgets.webQuotaRemaining ?? 0;
+}
+
 export function createInitialLifeState(orenId: OrenId, personId: PersonId): LifeState {
   return {
     orenId,
@@ -46,7 +51,12 @@ export function createInitialLifeState(orenId: OrenId, personId: PersonId): Life
     grantIds: [],
     pendingEffectIds: [],
     schedules: [],
-    budgets: { autonomyRemaining: 0, interactionMaxSteps: 8, commitmentRemaining: {} },
+    budgets: {
+      autonomyRemaining: 0,
+      interactionMaxSteps: 8,
+      commitmentRemaining: {},
+      webQuotaRemaining: 8,
+    },
     autonomyReservations: {},
     chronicleCursor: 0,
   };
