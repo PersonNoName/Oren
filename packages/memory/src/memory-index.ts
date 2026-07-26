@@ -187,6 +187,24 @@ export class SqliteMemoryIndex implements MemoryPort {
           recallability: "active",
         });
         return;
+      case "ObservationRecorded": {
+        const text = payload.kind === "web_search_result"
+          ? `来源观察（搜索「${payload.query ?? ""}」）：${payload.excerpt}`
+          : `来源观察（${payload.title ?? payload.sourceUrl}）：${payload.excerpt}`;
+        await this.upsertEntry({
+          memoryId: `mem:${envelope.eventId}`,
+          orenId: envelope.orenId,
+          kind: "external_fact",
+          text,
+          sourceEventId: envelope.eventId,
+          occurredAt: envelope.occurredAt,
+          confidence: payload.confidence,
+          reviewCondition: null,
+          threadId: null,
+          recallability: "active",
+        });
+        return;
+      }
       case "BeliefRevised": {
         const existing = this.db.prepare(`
           SELECT text FROM memory_entries WHERE memory_id = ? AND oren_id = ?
