@@ -1,8 +1,27 @@
 import type { EventEnvelope, InboxCoreEvent, TriggerKind } from "./protocol.js";
 import type { LifeState } from "./state.js";
 
+export type DeliverWakeOutcome =
+  | { readonly kind: "missing_deferred" }
+  | {
+      readonly kind: "delivered";
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly deliveredAt: string;
+    }
+  | {
+      readonly kind: "failed";
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly code: string;
+      readonly message: string;
+    };
+
 export interface LifeRepositoryPort {
   loadState(orenId: string): LifeState;
+  loadEvents(orenId: string): readonly EventEnvelope[];
   commit(orenId: string, events: readonly EventEnvelope[]): void;
   commitIfVersion(
     orenId: string,
@@ -10,6 +29,13 @@ export interface LifeRepositoryPort {
     events: readonly EventEnvelope[],
   ): boolean;
   commitInbox(
+    inboxId: string,
+    orenId: string,
+    leaseOwner: string,
+    leaseToken: string,
+    events: readonly EventEnvelope[],
+  ): boolean;
+  commitDeliverInbox(
     inboxId: string,
     orenId: string,
     leaseOwner: string,

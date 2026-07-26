@@ -915,6 +915,93 @@ export class SqliteLifeRepository {
     }
   }
 
+  public commitDeliverInbox(
+    inboxId: string,
+    orenId: string,
+    leaseOwner: string,
+    leaseToken: string,
+    events: readonly EventEnvelope[],
+    now = this.now(),
+  ): boolean {
+    const canonicalEvents = this.canonicalEvents(orenId, events);
+    if (canonicalEvents.length < 1 || canonicalEvents.length > 2) {
+      throw new Error("Deliver inbox commit requires one or two events");
+    }
+    const accepted = canonicalEvents[0]!;
+    if (accepted.payload.type !== "WakeDue") {
+      throw new Error("Deliver inbox transition must begin with WakeDue");
+    }
+    const deliverMatch = /^deliver:(.+)$/.exec(accepted.payload.purpose);
+    if (!deliverMatch) {
+      throw new Error("Deliver inbox WakeDue must use a deliver: purpose");
+    }
+    const deliveryId = deliverMatch[1]!;
+    const followUp = canonicalEvents[1];
+    if (followUp !== undefined) {
+      if (
+        followUp.payload.type !== "MessageDelivered"
+        && followUp.payload.type !== "MessageDeliveryFailed"
+      ) {
+        throw new Error("Deliver inbox follow-up must be a delivery result event");
+      }
+      if (followUp.payload.deliveryId !== deliveryId) {
+        throw new Error("Deliver inbox deliveryId must match WakeDue purpose");
+      }
+    }
+    const canonicalNow = canonicalizeInstant(now);
+    if (!canonicalNow) throw new Error("Inbox commit time must be a valid instant");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`
+        SELECT oren_id, payload_json
+        FROM inbox WHERE inbox_id = ?
+      `).get(inboxId);
+      if (!row) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      if (String(row.oren_id) !== orenId) {
+        throw new Error(`Inbox ${inboxId} belongs to another Oren`);
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(String(row.payload_json));
+      } catch {
+        throw new Error(`Inbox ${inboxId} payload is corrupt`);
+      }
+      const payload = canonicalizeInboxPayload(parsed);
+      const durableEvent = payload ? canonicalizeCoreEvent(payload.event) : undefined;
+      if (
+        !payload
+        || !durableEvent
+        || durableEvent.type !== "WakeDue"
+        || accepted.correlationId !== payload.correlationId
+        || accepted.orenId !== orenId
+        || !semanticUnknownEqual(accepted.payload, durableEvent)
+      ) {
+        throw new Error(`Inbox ${inboxId} event identity does not match its durable payload`);
+      }
+      const current = this.rehydrate(orenId);
+      this.validateStateTransition(current, canonicalEvents);
+      const committed = this.db.prepare(`
+        UPDATE inbox
+        SET processed_at = ?, lease_owner = NULL, lease_token = NULL, lease_until = NULL
+        WHERE inbox_id = ? AND oren_id = ? AND processed_at IS NULL
+          AND lease_owner = ? AND lease_token = ? AND lease_until > ?
+      `).run(canonicalNow, inboxId, orenId, leaseOwner, leaseToken, canonicalNow);
+      if (Number(committed.changes) !== 1) {
+        this.db.exec("ROLLBACK");
+        return false;
+      }
+      this.insertEventsAndSideTables(orenId, canonicalEvents, []);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   public quarantineInbox(
     inboxId: string,
     leaseOwner: string,

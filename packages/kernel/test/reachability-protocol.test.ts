@@ -19,6 +19,7 @@ function fakeRepo(initial: LifeState): {
     events,
     repo: {
       loadState: () => state,
+      loadEvents: () => events,
       commit: (_orenId, accepted) => {
         events.push(...accepted);
         for (const event of accepted) {
@@ -34,6 +35,7 @@ function fakeRepo(initial: LifeState): {
         return true;
       },
       commitInbox: () => false,
+      commitDeliverInbox: () => false,
     },
   };
 }

@@ -102,9 +102,11 @@ describe("LifeActor memory proposal mapping", () => {
     const actor = new LifeActor(
       {
         loadState: () => state.current,
+        loadEvents: () => [],
         commit: (_orenId, events) => { committed.push([...events]); },
         commitIfVersion: () => true,
         commitInbox: () => true,
+      commitDeliverInbox: () => false,
       },
       () => `id-${ids += 1}`,
       () => "2026-07-26T00:00:00.000Z",

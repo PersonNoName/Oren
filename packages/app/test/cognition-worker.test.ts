@@ -445,11 +445,13 @@ describe("CognitionWorker", () => {
     const events: EventEnvelope[] = [];
     const repository: LifeRepositoryPort = {
       loadState: () => state,
+      loadEvents: () => events,
       commit: (_orenId, accepted) => events.push(...accepted),
       commitIfVersion: () => {
         throw new Error("reservation exploded");
       },
       commitInbox: () => false,
+      commitDeliverInbox: () => false,
     };
     const actor = new LifeActor(repository, () => `event-${events.length}`, () => "2026-07-24T00:00:00.000Z");
     const worker = new CognitionWorker(
@@ -705,6 +707,7 @@ function actorHarness(initial: LifeState) {
   };
   const repository = {
     loadState: () => state,
+    loadEvents: () => events,
     commit: (_orenId: string, accepted: readonly EventEnvelope[]) => {
       apply(accepted);
     },
@@ -718,6 +721,7 @@ function actorHarness(initial: LifeState) {
       return true;
     },
     commitInbox: () => false,
+      commitDeliverInbox: () => false,
   } as LifeRepositoryPort;
   let id = 0;
   return {

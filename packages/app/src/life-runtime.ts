@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { ScriptedChannelAdapter, type ChannelPort } from "@oren/channel";
 import {
   Conductor,
   ScriptedCognitionAdapter,
@@ -16,6 +17,7 @@ import {
   LifeActor,
   webQuotaRemaining,
   type CognitionJob,
+  type ClaimedInboxItem,
   type LifeState,
 } from "@oren/kernel";
 import {
@@ -37,6 +39,7 @@ import {
   type WebPort,
 } from "@oren/web";
 import { CognitionWorker } from "./cognition-worker.js";
+import { deliverExpressProposals, findDeferredMessage } from "./delivery.js";
 import { EffectDispatcher } from "./effect-dispatcher.js";
 import { EpisodeCoordinator } from "./episode-coordinator.js";
 import { Scheduler } from "./scheduler.js";
@@ -76,6 +79,7 @@ export interface LifeRuntimeOptions {
    * provider credentials are exported in the shell.
    */
   readonly useProcessWebEnv?: boolean;
+  readonly channelPort?: ChannelPort;
 }
 
 export class LifeRuntime {
@@ -99,6 +103,7 @@ export class LifeRuntime {
     private readonly maxDrainCycles: number,
     private readonly shutdownGraceMs: number,
     private readonly runtimeGate: { closed: boolean },
+    private readonly channelPort: ChannelPort,
   ) {
     const identities = repository.listLifeIdentities();
     if (identities.length > 1) {
@@ -217,6 +222,7 @@ export class LifeRuntime {
       : undefined;
     const webPort = options.webPort
       ?? (resolvedWeb?.ok ? resolvedWeb.adapter : undefined);
+    const channelPort = options.channelPort ?? new ScriptedChannelAdapter();
     const memory = new SqliteMemoryIndex(db, {
       ...(embedder !== undefined ? { embedder } : {}),
       now: () => Date.parse(now()),
@@ -339,6 +345,20 @@ export class LifeRuntime {
             return outcome;
           },
         },
+        async (job, proposals) => {
+          await deliverExpressProposals({
+            orenId: job.orenId,
+            correlationId: job.correlationId,
+            triggerKind: job.triggerKind,
+            proposals,
+            state: repository.loadState(job.orenId),
+            now: now(),
+            channel: channelPort,
+            actor,
+            nextId,
+            reloadState: () => repository.loadState(job.orenId),
+          });
+        },
       );
       const coordinator = new EpisodeCoordinator(
         (job, signal) => worker.run(job, signal),
@@ -364,6 +384,7 @@ export class LifeRuntime {
         maxDrainCycles,
         shutdownGraceMs,
         runtimeGate,
+        channelPort,
       );
     } catch (primaryError) {
       const cleanupErrors: unknown[] = [];
@@ -511,6 +532,13 @@ export class LifeRuntime {
         async () => {
           try {
             this.knownOrenIds.add(inbox.orenId);
+            if (
+              inbox.event.type === "WakeDue"
+              && /^deliver:/.test(inbox.event.purpose)
+            ) {
+              await this.processDeliverWake(inbox);
+              return;
+            }
             const job = this.actor.handleInbox(inbox);
             if (job) await this.runJob(job);
           } catch (error) {
@@ -545,6 +573,46 @@ export class LifeRuntime {
     this.knownOrenIds.add(job.orenId);
     await this.coordinator.start(job);
     await this.coordinator.waitForIdle(job.orenId);
+  }
+
+  private async processDeliverWake(inbox: ClaimedInboxItem): Promise<void> {
+    const match = inbox.event.type === "WakeDue"
+      ? /^deliver:(.+)$/.exec(inbox.event.purpose)
+      : null;
+    if (!match) return;
+    const deliveryId = match[1]!;
+    const deferred = findDeferredMessage(
+      this.repository.loadEvents(inbox.orenId),
+      deliveryId,
+    );
+    if (!deferred) {
+      this.actor.handleDeliverWake(inbox, { kind: "missing_deferred" });
+      return;
+    }
+    const result = await this.channelPort.deliver({
+      deliveryId,
+      text: deferred.text,
+      reason: deferred.reason,
+      proactive: true,
+    });
+    if (result.ok) {
+      this.actor.handleDeliverWake(inbox, {
+        kind: "delivered",
+        deliveryId,
+        text: deferred.text,
+        reason: deferred.reason,
+        deliveredAt: result.deliveredAt,
+      });
+      return;
+    }
+    this.actor.handleDeliverWake(inbox, {
+      kind: "failed",
+      deliveryId,
+      text: deferred.text,
+      reason: deferred.reason,
+      code: result.code,
+      message: result.message,
+    });
   }
 
   private async withOrenWorkflow<T>(

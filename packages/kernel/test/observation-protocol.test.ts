@@ -101,12 +101,14 @@ describe("LifeActor.recordObservation", () => {
     const actor = new LifeActor(
       {
         loadState: () => state,
+        loadEvents: () => [],
         commit: (_orenId, events) => {
           committed.push([...events]);
           state = events.reduce(reduceLifeState, state);
         },
         commitIfVersion: () => true,
         commitInbox: () => true,
+      commitDeliverInbox: () => false,
       },
       () => `id-${++ids}`,
       () => "2026-07-26T00:00:00.000Z",

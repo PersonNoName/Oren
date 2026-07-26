@@ -13,6 +13,7 @@ import {
   type Guard,
   type JsonObject,
   type LifeActor,
+  type Proposal,
 } from "@oren/kernel";
 import type { CognitionOutcome } from "@oren/cognition";
 
@@ -123,6 +124,10 @@ export class CognitionWorker {
       job: CognitionJob,
     ) => CreateFrameInput | Promise<CreateFrameInput>,
     private readonly capabilityPort: CognitionCapabilityPort,
+    private readonly onCognitionAccepted?: (
+      job: CognitionJob,
+      proposals: readonly Proposal[],
+    ) => Promise<void>,
   ) {}
 
   public async run(job: CognitionJob, signal: AbortSignal): Promise<void> {
@@ -256,6 +261,10 @@ export class CognitionWorker {
           const accepted = this.actor.acceptCognition(activeJob, outcome.proposals);
           if (!accepted.accepted) {
             fail(`Cognition result rejected: ${accepted.reason ?? "unknown_reason"}`);
+            return;
+          }
+          if (this.onCognitionAccepted) {
+            await this.onCognitionAccepted(activeJob, outcome.proposals);
           }
           return;
         }

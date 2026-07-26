@@ -13,6 +13,7 @@ import type {
 import type {
   ClaimedInboxItem,
   CognitionJob,
+  DeliverWakeOutcome,
   LifeRepositoryPort,
 } from "./ports.js";
 import { reachabilityOf } from "./reachability.js";
@@ -437,6 +438,46 @@ export class LifeActor {
         ...input,
       }),
     ]);
+  }
+
+  public handleDeliverWake(
+    input: ClaimedInboxItem,
+    outcome: DeliverWakeOutcome,
+  ): boolean {
+    if (input.event.type !== "WakeDue") {
+      throw new Error("handleDeliverWake requires a WakeDue inbox event");
+    }
+    const match = /^deliver:(.+)$/.exec(input.event.purpose);
+    if (!match) {
+      throw new Error("handleDeliverWake requires a deliver: purpose");
+    }
+    const accepted = this.envelope(input.orenId, input.correlationId, input.event);
+    const resultEvents: EventEnvelope[] = [accepted];
+    if (outcome.kind === "delivered") {
+      resultEvents.push(this.envelope(input.orenId, input.correlationId, {
+        type: "MessageDelivered",
+        deliveryId: outcome.deliveryId,
+        text: outcome.text,
+        reason: outcome.reason,
+        channel: "panel",
+        proactive: true,
+      }));
+    } else if (outcome.kind === "failed") {
+      resultEvents.push(this.envelope(input.orenId, input.correlationId, {
+        type: "MessageDeliveryFailed",
+        deliveryId: outcome.deliveryId,
+        text: outcome.text,
+        reason: outcome.reason,
+        code: outcome.code,
+      }));
+    }
+    return this.repository.commitDeliverInbox(
+      input.inboxId,
+      input.orenId,
+      input.leaseOwner,
+      input.leaseToken,
+      resultEvents,
+    );
   }
 
   public revokeGrant(
