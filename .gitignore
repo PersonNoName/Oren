@@ -5,9 +5,11 @@ oren.json
 !.env.example
 node_modules/
 dist/
+.next/
 data/
 .oren-life/
 .npm-cache/
 .worktrees/
 .superpowers/
 *.log
+*.tsbuildinfo

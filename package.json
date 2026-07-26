@@ -11,7 +11,8 @@
     "start": "npm run build && node --enable-source-maps dist/packages/app/src/serve.js",
     "smoke": "npm run build && node --enable-source-maps dist/packages/app/src/smoke.js",
     "eval": "npm run build && node --enable-source-maps dist/packages/evals/src/eval.js",
-    "sim": "npm run build && node --enable-source-maps dist/packages/sim/src/sim.js"
+    "sim": "npm run build && node --enable-source-maps dist/packages/sim/src/sim.js",
+    "panel-ui": "npm run dev -w @oren/panel-ui"
   },
   "devDependencies": {
     "@types/node": "24.12.4",
