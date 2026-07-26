@@ -1,0 +1,24 @@
+:root {
+  --bg: #f7f3ec;
+  --bg-chat: #faf7f1;
+  --bg-rail: #efe8dc;
+  --bg-detail: #f3eee5;
+  --ink: #2c2920;
+  --muted: #8a8274;
+  --line: #d9d0c0;
+  --surface: #ffffff;
+  --accent: #c2410c;
+  --accent-muted: #a8a29e;
+  --serif: "Source Serif 4", Georgia, serif;
+  --sans: "Source Sans 3", ui-sans-serif, system-ui, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+}

@@ -14,5 +14,6 @@
     "types": ["node", "vitest/globals"],
     "skipLibCheck": true
   },
-  "include": ["packages/**/*.ts", "extensions/**/*.ts", "vitest.config.ts"]
+  "include": ["packages/**/*.ts", "extensions/**/*.ts", "vitest.config.ts"],
+  "exclude": ["packages/panel-ui", "node_modules", "dist"]
 }
