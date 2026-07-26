@@ -176,7 +176,7 @@ function matchesInboxFilters(item: InboxItem, args: Record<string, unknown>): bo
   }
   if (args.proactive !== undefined) {
     const expected = Boolean(args.proactive);
-    if (item.proactive !== undefined && item.proactive !== expected) {
+    if (item.proactive === undefined || item.proactive !== expected) {
       return false;
     }
   }
@@ -201,9 +201,18 @@ async function shareDelivered(ctx: AssertContext): Promise<void> {
 
 async function shareDeferred(ctx: AssertContext): Promise<void> {
   const snapshot = ctx.runtime.getPanelSnapshot();
-  const deferred = filterInboxByStatus(snapshot.inbox, "deferred", ctx.args);
+  const { proactive: _proactive, ...rest } = ctx.args;
+  const deferred = filterInboxByStatus(snapshot.inbox, "deferred", rest);
   if (deferred.length === 0) {
     throw new Error("shareDeferred: no matching deferred inbox message");
+  }
+}
+
+async function shareFailed(ctx: AssertContext): Promise<void> {
+  const snapshot = ctx.runtime.getPanelSnapshot();
+  const failed = filterInboxByStatus(snapshot.inbox, "failed", ctx.args);
+  if (failed.length === 0) {
+    throw new Error("shareFailed: no matching failed inbox message");
   }
 }
 
@@ -286,6 +295,7 @@ export const defaultAssertions: Readonly<Record<string, AssertionFn>> = {
   commitmentProgressed,
   shareDelivered,
   shareDeferred,
+  shareFailed,
   noOverDisturb,
   grantGone,
   budgetMonotone,

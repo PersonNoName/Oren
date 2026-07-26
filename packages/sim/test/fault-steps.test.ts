@@ -94,4 +94,56 @@ describe("ScenarioRunner fault steps", () => {
     });
     expect(report.ok).toBe(true);
   });
+
+  it("swapCognition restarts with a different cognition script", async () => {
+    const runner = new ScenarioRunner();
+    const report = await runner.run({
+      id: "t4-swap-cog",
+      scripts: {
+        default: createSequencedCognition([
+          { proposals: [{ type: "NoAction", reason: "default" }] },
+        ]),
+        "model-b": createSequencedCognition([
+          {
+            proposals: [
+              { type: "AdvanceThread", threadId: "t1", summary: "model-b" },
+              { type: "NoAction", reason: "model-b done" },
+            ],
+          },
+        ]),
+      },
+      steps: [
+        { type: "message", text: "go" },
+        { type: "swapCognition", scriptId: "model-b" },
+        { type: "message", text: "continue" },
+        { type: "assert", name: "threadContinues" },
+      ],
+    });
+    expect(report.ok).toBe(true);
+  });
+
+  it("failNetwork clearing restores default web and channel gates", async () => {
+    const cognition = createSequencedCognition([
+      {
+        proposals: [
+          { type: "ExpressToUser", text: "ping", reason: "n" },
+          { type: "NoAction", reason: "d" },
+        ],
+      },
+    ]);
+    const runner = new ScenarioRunner();
+    const report = await runner.run({
+      id: "t4-net-reset",
+      startIso: "2026-01-01T12:00:00.000Z",
+      scripts: { default: cognition },
+      steps: [
+        { type: "setReachability", quietHours: null, maxProactivePerDay: 10 },
+        { type: "failNetwork", failing: true, targets: ["web"] },
+        { type: "failNetwork", failing: false },
+        { type: "message", text: "hi" },
+        { type: "assert", name: "shareDelivered", args: { textIncludes: "ping" } },
+      ],
+    });
+    expect(report.ok).toBe(true);
+  });
 });

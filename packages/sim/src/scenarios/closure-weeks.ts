@@ -18,12 +18,15 @@ const COMMITMENT_ID = "closure-commit-1";
 const THREAD_ID = "closure-thread-1";
 
 const START = "2026-01-01T12:00:00.000Z";
-const WAKE_CLUE = "2026-01-02T12:00:00.000Z";
-const WAKE_SHARE = "2026-01-02T12:05:00.000Z";
-const WAKE_PROGRESS = "2026-01-03T12:00:00.000Z";
-const WAKE_QUIET = "2026-01-04T23:00:00.000Z";
-const MORNING_AFTER_QUIET = "2026-01-05T08:30:00.000Z";
-const WAKE_WEB_FAIL = "2026-01-06T12:00:00.000Z";
+const WAKE_CLUE = "2026-01-04T12:00:00.000Z";
+const WAKE_SHARE = "2026-01-04T12:05:00.000Z";
+const WAKE_PROGRESS = "2026-01-08T12:00:00.000Z";
+const WAKE_QUIET = "2026-01-14T23:00:00.000Z";
+const MORNING_AFTER_QUIET = "2026-01-15T08:30:00.000Z";
+const WAKE_WEB_FAIL = "2026-01-18T12:00:00.000Z";
+const WAKE_CHANNEL_FAIL = "2026-01-20T12:00:00.000Z";
+const CHANNEL_FAIL_REASON = "channel fault probe";
+const CHANNEL_FAIL_TEXT = "Channel fault probe message.";
 const QUIET_SHARE_REASON = "quiet share";
 const QUIET_SHARE_TEXT = "quiet-hours proactive update";
 
@@ -31,6 +34,7 @@ type ClosureTurn = {
   readonly when?: (frame: LifeFrame) => boolean;
   readonly webSearch?: boolean;
   readonly failOnWebError?: boolean;
+  readonly grantDenyCheck?: boolean;
   readonly proposals: readonly Proposal[];
 };
 
@@ -90,6 +94,22 @@ function createClosureCognition(turns: readonly ClosureTurn[]): CognitionPort {
         const webResult = await tryWebSearch(frame, capabilityPort, signal);
         if (webResult === "fail" && turn.failOnWebError) {
           return noAction("web search failed");
+        }
+      }
+
+      if (turn.grantDenyCheck) {
+        const increment = frame.capabilities.find(({ name }) => name === "test.increment");
+        if (increment) {
+          const result = await capabilityPort.invoke({
+            orenId: frame.orenId,
+            descriptor: increment,
+            arguments: {},
+            stateVersion: frame.stateVersion,
+            correlationId: frame.correlationId,
+          }, signal);
+          if (result.kind !== "rejected") {
+            throw new Error("expected grant denial for test.increment");
+          }
         }
       }
 
@@ -214,9 +234,32 @@ const defaultCognition = createClosureCognition([
   {
     when: (frame) => frame.trigger.kind === "scheduled_wake",
     webSearch: true,
-    failOnWebError: true,
     proposals: [
-      { type: "NoAction", reason: "web retry succeeded unexpectedly" },
+      { type: "NoAction", reason: "web search failed as expected" },
+      {
+        type: "ScheduleWake",
+        scheduleId: "wake-channel-fail",
+        at: WAKE_CHANNEL_FAIL,
+        purpose: "channel probe",
+      },
+    ],
+  },
+  {
+    when: (frame) => frame.trigger.kind === "scheduled_wake",
+    proposals: [
+      {
+        type: "ExpressToUser",
+        text: CHANNEL_FAIL_TEXT,
+        reason: CHANNEL_FAIL_REASON,
+      },
+      { type: "NoAction", reason: "channel fault probe done" },
+    ],
+  },
+  {
+    when: (frame) => frame.trigger.kind === "foreground_user",
+    grantDenyCheck: true,
+    proposals: [
+      { type: "NoAction", reason: "grant denied as expected" },
     ],
   },
 ]);
@@ -288,8 +331,21 @@ export function buildClosureWeeksScenario(): ScenarioDefinition {
       { type: "advance", to: WAKE_WEB_FAIL },
       { type: "failNetwork", failing: false },
 
+      { type: "failNetwork", failing: true, targets: ["channel"] },
+      { type: "advance", to: WAKE_CHANNEL_FAIL },
+      {
+        type: "assert",
+        name: "shareFailed",
+        args: {
+          reason: CHANNEL_FAIL_REASON,
+          textIncludes: CHANNEL_FAIL_TEXT,
+        },
+      },
+      { type: "failNetwork", failing: false },
+
       { type: "revokeGrant", grantId: GRANT_ID, reason: "sim revoke" },
       { type: "assert", name: "grantGone", args: { grantId: GRANT_ID } },
+      { type: "message", text: "Try using the counter after revoke." },
 
       { type: "swapExtension", version: "1.1.0" },
       { type: "swapCognition", scriptId: "model-b" },
@@ -303,6 +359,10 @@ export function buildClosureWeeksScenario(): ScenarioDefinition {
       { type: "assert", name: "commitmentProgressed", args: { since: "start" } },
       { type: "assert", name: "noOverDisturb" },
       { type: "assert", name: "budgetMonotone", args: { since: "start" } },
+
+      { type: "checkpoint", name: "end" },
+      { type: "restart" },
+      { type: "assert", name: "replayMatches", args: { before: "end" } },
     ],
   };
 }

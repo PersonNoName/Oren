@@ -313,9 +313,17 @@ export class ScenarioRunner {
 
       case "failNetwork": {
         session.gate.failing = step.failing;
-        if (step.targets !== undefined) {
-          session.gate.web = step.targets.includes("web");
-          session.gate.channel = step.targets.includes("channel");
+        if (step.failing) {
+          if (step.targets !== undefined) {
+            session.gate.web = step.targets.includes("web");
+            session.gate.channel = step.targets.includes("channel");
+          } else {
+            session.gate.web = true;
+            session.gate.channel = true;
+          }
+        } else {
+          session.gate.web = true;
+          session.gate.channel = true;
         }
         return;
       }
