@@ -10,6 +10,11 @@ export class PanelInboxAdapter implements ChannelPort {
       return { ok: false, code: "empty_text", message: "text must not be empty" };
     }
 
+    const existing = this.messages.find((message) => message.deliveryId === input.deliveryId);
+    if (existing) {
+      return { ok: true, deliveredAt: existing.deliveredAt };
+    }
+
     const deliveredAt = this.now();
     this.messages.push({ ...input, deliveredAt });
     return { ok: true, deliveredAt };

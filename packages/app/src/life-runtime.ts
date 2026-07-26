@@ -586,7 +586,9 @@ export class LifeRuntime {
       deliveryId,
     );
     if (!deferred) {
-      this.actor.handleDeliverWake(inbox, { kind: "missing_deferred" });
+      if (!this.actor.handleDeliverWake(inbox, { kind: "missing_deferred" })) {
+        throw new Error(`Deliver wake commit failed for missing deferred ${deliveryId}`);
+      }
       return;
     }
     const result = await this.channelPort.deliver({
@@ -596,23 +598,27 @@ export class LifeRuntime {
       proactive: true,
     });
     if (result.ok) {
-      this.actor.handleDeliverWake(inbox, {
+      if (!this.actor.handleDeliverWake(inbox, {
         kind: "delivered",
         deliveryId,
         text: deferred.text,
         reason: deferred.reason,
         deliveredAt: result.deliveredAt,
-      });
+      })) {
+        throw new Error(`Deliver wake commit failed after channel delivery ${deliveryId}`);
+      }
       return;
     }
-    this.actor.handleDeliverWake(inbox, {
+    if (!this.actor.handleDeliverWake(inbox, {
       kind: "failed",
       deliveryId,
       text: deferred.text,
       reason: deferred.reason,
       code: result.code,
       message: result.message,
-    });
+    })) {
+      throw new Error(`Deliver wake commit failed after channel failure ${deliveryId}`);
+    }
   }
 
   private async withOrenWorkflow<T>(

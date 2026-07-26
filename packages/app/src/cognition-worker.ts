@@ -264,7 +264,12 @@ export class CognitionWorker {
             return;
           }
           if (this.onCognitionAccepted) {
-            await this.onCognitionAccepted(activeJob, outcome.proposals);
+            try {
+              // Delivery is best-effort after accept; proposals stay committed.
+              await this.onCognitionAccepted(activeJob, outcome.proposals);
+            } catch (error) {
+              fail(`Delivery orchestration failed: ${errorMessage(error)}`);
+            }
           }
           return;
         }

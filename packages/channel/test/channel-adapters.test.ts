@@ -29,4 +29,19 @@ describe("PanelInboxAdapter", () => {
     expect(r).toEqual({ ok: true, deliveredAt: "2026-07-26T12:00:00.000Z" });
     expect(port.messages[0]?.deliveryId).toBe("d1");
   });
+
+  it("is idempotent by deliveryId", async () => {
+    const port = new PanelInboxAdapter(() => "2026-07-26T12:00:00.000Z");
+    const input = {
+      deliveryId: "d1",
+      text: "hi",
+      reason: "share",
+      proactive: true,
+    };
+    const first = await port.deliver(input);
+    const second = await port.deliver({ ...input, text: "duplicate attempt" });
+    expect(second).toEqual(first);
+    expect(port.messages).toHaveLength(1);
+    expect(port.messages[0]?.text).toBe("hi");
+  });
 });
