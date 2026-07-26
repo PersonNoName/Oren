@@ -61,6 +61,17 @@ configured provider's key is missing but another provider's key is present,
 
 Both commands print setup instructions and exit 0 when unconfigured.
 
+## Daily use
+
+Keep a local life running with the loopback panel (real model required):
+
+```bash
+set -a && source .env && set +a
+npm run start
+```
+
+Open the printed `http://127.0.0.1:7465/` URL (or `OREN_PANEL_PORT`). Message Oren from the panel. Ctrl+C stops cleanly. Database defaults to `~/.oren/life.db` (`OREN_DB` to override).
+
 ## 记忆（Phase 3）
 
 - Oren 从生命事件史投影可召回记忆：用户消息、Oren 的表达、线索推进自动入库；
