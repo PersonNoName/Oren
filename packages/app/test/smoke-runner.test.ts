@@ -37,7 +37,10 @@ function scriptedCognition() {
 describe("runSmoke", () => {
   it("exits 0 with instructions when model env is unconfigured", async () => {
     const lines: string[] = [];
-    const code = await runSmoke({}, (line) => lines.push(line));
+    const code = await runSmoke(
+      { OREN_CONFIG_SEARCH_FROM: mkdtempSync(join(tmpdir(), "oren-smoke-empty-")) },
+      (line) => lines.push(line),
+    );
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("OREN_MODEL_PROVIDER");
     expect(lines.join("\n")).toContain("OREN_MODEL_ID");

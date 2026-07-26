@@ -41,6 +41,18 @@ describe("loadOrenConfigFile", () => {
     });
   });
 
+  it("trims provider and id on success", () => {
+    const path = join(tempDir(), "oren.json");
+    writeFileSync(path, JSON.stringify({
+      model: { provider: "  anthropic  ", id: "  claude-sonnet-4-5  " },
+    }));
+    const result = loadOrenConfigFile(path);
+    expect(result).toEqual({
+      ok: true,
+      config: { model: { provider: "anthropic", id: "claude-sonnet-4-5" } },
+    });
+  });
+
   it("rejects unknown top-level fields", () => {
     const path = join(tempDir(), "oren.json");
     writeFileSync(path, JSON.stringify({

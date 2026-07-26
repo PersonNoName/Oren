@@ -41,7 +41,11 @@ export async function runEvals(
   if (cognitionOverride) {
     cognition = cognitionOverride;
   } else {
-    const config = resolveModelConfig(env);
+    const configSearchFrom = env.OREN_CONFIG_SEARCH_FROM?.trim();
+    const config = resolveModelConfig(
+      env,
+      configSearchFrom ? { searchFrom: configSearchFrom } : undefined,
+    );
     if (!config.ok) {
       log(config.reason);
       return config.kind === "unconfigured" ? 0 : 1;

@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ScriptedCognitionAdapter } from "@oren/cognition";
 import { allScenarios, runEvals } from "../src/index.js";
@@ -28,7 +31,10 @@ describe("allScenarios", () => {
 describe("runEvals", () => {
   it("exits 0 with instructions when model env is unconfigured", async () => {
     const lines: string[] = [];
-    const code = await runEvals({}, (line) => lines.push(line));
+    const code = await runEvals(
+      { OREN_CONFIG_SEARCH_FROM: mkdtempSync(join(tmpdir(), "oren-eval-empty-")) },
+      (line) => lines.push(line),
+    );
     expect(code).toBe(0);
     expect(lines.join("\n")).toContain("OREN_MODEL_PROVIDER");
   });

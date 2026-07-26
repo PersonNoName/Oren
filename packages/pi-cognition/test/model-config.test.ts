@@ -33,6 +33,8 @@ describe("resolveModelConfig", () => {
     expect(result).toMatchObject({ ok: false, kind: "unconfigured" });
     if (result.ok) throw new Error("unreachable");
     expect(result.reason).toContain(MODEL_ID_ENV);
+    expect(result.reason).toMatch(/oren\.json/i);
+    expect(result.reason).toContain(MODEL_PROVIDER_ENV);
   });
 
   it("rejects an unknown provider and lists known providers", () => {

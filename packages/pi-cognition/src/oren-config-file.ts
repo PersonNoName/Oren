@@ -42,19 +42,19 @@ function validateConfig(path: string, parsed: unknown): LoadSuccess | LoadFailur
     return invalid(path, "Config must be a JSON object.");
   }
 
+  if ("apiKey" in parsed) {
+    return invalid(
+      path,
+      "apiKey must not be set in oren.json; use environment variables for API keys.",
+    );
+  }
+
   const keys = Object.keys(parsed);
   const unknownKeys = keys.filter((key) => key !== "model");
   if (unknownKeys.length > 0) {
     return invalid(
       path,
       `Unknown top-level field(s): ${unknownKeys.join(", ")}. Only "model" is allowed.`,
-    );
-  }
-
-  if ("apiKey" in parsed) {
-    return invalid(
-      path,
-      "apiKey must not be set in oren.json; use environment variables for API keys.",
     );
   }
 
