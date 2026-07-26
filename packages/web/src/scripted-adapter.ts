@@ -25,9 +25,10 @@ export class ScriptedWebAdapter implements WebPort {
       throw new Error(safety.reason);
     }
 
-    const result = await this.handlers.read(input.url);
+    const result = await this.handlers.read(safety.href);
     return {
       ...result,
+      url: safety.href,
       text: result.text.slice(0, WEB_READ_MAX_CHARS),
     };
   }
