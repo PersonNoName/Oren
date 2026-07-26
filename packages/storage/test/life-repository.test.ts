@@ -460,6 +460,26 @@ describe("SqliteLifeRepository", () => {
     expect(repo.loadGrants("oren-1")).toEqual([grant]);
     expect(repo.loadGrants("oren-2")).toEqual([]);
   });
+
+  it("revokeGrant sets revoked_at and excludes grant from loadGrants", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db, () => "2026-07-26T12:00:00.000Z");
+    const grant: Grant = {
+      grantId: "grant-1",
+      capabilityPattern: "test.*",
+      expiresAt: "2026-08-01T00:00:00.000Z",
+      revoked: false,
+    };
+    repo.putGrant("oren-1", grant);
+
+    expect(repo.revokeGrant("oren-1", "grant-1", "2026-07-26T12:00:00.000Z")).toBe(true);
+    expect(repo.loadGrants("oren-1")).toEqual([]);
+    expect(db.prepare("SELECT revoked_at FROM grants WHERE grant_id = ?").get("grant-1"))
+      .toEqual({ revoked_at: "2026-07-26T12:00:00.000Z" });
+
+    expect(repo.revokeGrant("oren-1", "grant-1", "2026-07-26T13:00:00.000Z")).toBe(false);
+    expect(repo.revokeGrant("oren-1", "missing-grant", "2026-07-26T12:00:00.000Z")).toBe(false);
+  });
 });
 
 function event(

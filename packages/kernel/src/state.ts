@@ -1,4 +1,5 @@
 import type { OrenId, PersonId } from "./ids.js";
+import { DEFAULT_REACHABILITY, type ReachabilityPolicy } from "./reachability.js";
 
 export interface LifeState {
   readonly orenId: OrenId;
@@ -35,6 +36,10 @@ export interface LifeState {
     readonly correlationId: string;
   }>>;
   readonly chronicleCursor: number;
+  /**
+   * Optional only so snapshots written before reachability existed remain replayable.
+   */
+  readonly reachability?: ReachabilityPolicy;
 }
 
 export function webQuotaRemaining(state: LifeState): number {
@@ -59,5 +64,6 @@ export function createInitialLifeState(orenId: OrenId, personId: PersonId): Life
     },
     autonomyReservations: {},
     chronicleCursor: 0,
+    reachability: { ...DEFAULT_REACHABILITY },
   };
 }

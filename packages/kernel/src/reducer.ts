@@ -1,5 +1,6 @@
 import type { EventEnvelope } from "./protocol.js";
 import type { LifeState } from "./state.js";
+import { reachabilityOf, utcDayKey } from "./reachability.js";
 import {
   canonicalizeEventEnvelope,
   hasValidLifeStateBudgets,
@@ -108,6 +109,37 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
         },
       };
     }
+    case "ReachabilityPolicyUpdated":
+      return {
+        ...base,
+        reachability: event.payload.policy,
+      };
+    case "MessageDelivered": {
+      if (!event.payload.proactive) {
+        return base;
+      }
+      const reachability = reachabilityOf(state);
+      const dayKey = utcDayKey(event.occurredAt);
+      const proactiveCountToday = reachability.proactiveDayKey === dayKey
+        ? reachability.proactiveCountToday + 1
+        : 1;
+      return {
+        ...base,
+        reachability: {
+          ...reachability,
+          proactiveDayKey: dayKey,
+          proactiveCountToday,
+        },
+      };
+    }
+    case "MessageDeferred":
+    case "MessageDeliveryFailed":
+      return base;
+    case "GrantRevoked":
+      return {
+        ...base,
+        grantIds: state.grantIds.filter((id) => id !== event.payload.grantId),
+      };
     default:
       return base;
   }

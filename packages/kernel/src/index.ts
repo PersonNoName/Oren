@@ -4,6 +4,7 @@ export * from "./runtime-validation.js";
 export * from "./capability.js";
 export * from "./protocol.js";
 export * from "./state.js";
+export * from "./reachability.js";
 export * from "./reducer.js";
 export * from "./guard.js";
 export * from "./ports.js";

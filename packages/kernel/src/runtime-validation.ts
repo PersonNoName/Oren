@@ -10,6 +10,7 @@ import type {
   TriggerKind,
 } from "./protocol.js";
 import type { LifeState } from "./state.js";
+import type { DeliveryCause, QuietHours, ReachabilityPolicy } from "./reachability.js";
 
 const TRIGGERS = new Set<unknown>([
   "foreground_user",
@@ -34,6 +35,9 @@ const MEMORY_KINDS = new Set<unknown>([
 ]);
 const MAX_MEMORY_TEXT_LENGTH = 4_000;
 const MAX_OBSERVATION_EXCERPT_LENGTH = 8_192;
+const MAX_DELIVERY_TEXT_LENGTH = 8_192;
+const HH_MM_PATTERN = /^\d{2}:\d{2}$/;
+const DELIVERY_CAUSES = new Set<unknown>(["quiet_hours", "frequency_cap"]);
 const OBSERVATION_KINDS = new Set<unknown>(["web_search_result", "web_page"]);
 
 function hasKeysWithin(
@@ -60,6 +64,39 @@ function isMemoryText(value: JsonValue | undefined): value is string {
 
 function isObservationExcerpt(value: JsonValue | undefined): value is string {
   return isNonemptyString(value) && value.length <= MAX_OBSERVATION_EXCERPT_LENGTH;
+}
+
+function isDeliveryText(value: JsonValue | undefined): value is string {
+  return isNonemptyString(value) && value.length <= MAX_DELIVERY_TEXT_LENGTH;
+}
+
+function isQuietHours(value: JsonValue | undefined): value is QuietHours {
+  if (!isRecord(value)) return false;
+  return hasExactKeys(value, ["start", "end", "timezone"])
+    && HH_MM_PATTERN.test(value.start)
+    && HH_MM_PATTERN.test(value.end)
+    && value.timezone === "UTC";
+}
+
+function isReachabilityPolicy(value: JsonValue | undefined): value is ReachabilityPolicy {
+  if (!isRecord(value)) return false;
+  if (
+    !hasExactKeys(value, [
+      "quietHours",
+      "maxProactivePerDay",
+      "deferWhenQuiet",
+      "proactiveDayKey",
+      "proactiveCountToday",
+    ])
+    || (value.quietHours !== null && !isQuietHours(value.quietHours))
+    || !isNonnegativeSafeInteger(value.maxProactivePerDay)
+    || value.deferWhenQuiet !== true
+    || (value.proactiveDayKey !== null && typeof value.proactiveDayKey !== "string")
+    || !isNonnegativeSafeInteger(value.proactiveCountToday)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function isRecord(value: JsonValue | undefined): value is JsonObject {
@@ -520,6 +557,70 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
         ...(event.query !== undefined ? { query: event.query as string } : {}),
       };
     }
+    case "ReachabilityPolicyUpdated":
+      return hasExactKeys(event, ["type", "policy", "reason"])
+        && isReachabilityPolicy(event.policy)
+        && isNonemptyString(event.reason)
+        ? {
+            type: "ReachabilityPolicyUpdated",
+            policy: event.policy,
+            reason: event.reason,
+          }
+        : undefined;
+    case "MessageDelivered":
+      return hasExactKeys(event, ["type", "deliveryId", "text", "reason", "channel", "proactive"])
+        && isNonemptyString(event.deliveryId)
+        && isDeliveryText(event.text)
+        && isNonemptyString(event.reason)
+        && event.channel === "panel"
+        && typeof event.proactive === "boolean"
+        ? {
+            type: "MessageDelivered",
+            deliveryId: event.deliveryId,
+            text: event.text,
+            reason: event.reason,
+            channel: "panel",
+            proactive: event.proactive,
+          }
+        : undefined;
+    case "MessageDeferred": {
+      const deferUntil = canonicalizeInstant(event.deferUntil);
+      return hasExactKeys(event, ["type", "deliveryId", "text", "reason", "deferUntil", "cause"])
+        && isNonemptyString(event.deliveryId)
+        && isDeliveryText(event.text)
+        && isNonemptyString(event.reason)
+        && deferUntil !== undefined
+        && DELIVERY_CAUSES.has(event.cause)
+        ? {
+            type: "MessageDeferred",
+            deliveryId: event.deliveryId,
+            text: event.text,
+            reason: event.reason,
+            deferUntil,
+            cause: event.cause as DeliveryCause,
+          }
+        : undefined;
+    }
+    case "MessageDeliveryFailed":
+      return hasExactKeys(event, ["type", "deliveryId", "text", "reason", "code"])
+        && isNonemptyString(event.deliveryId)
+        && isDeliveryText(event.text)
+        && isNonemptyString(event.reason)
+        && isNonemptyString(event.code)
+        ? {
+            type: "MessageDeliveryFailed",
+            deliveryId: event.deliveryId,
+            text: event.text,
+            reason: event.reason,
+            code: event.code,
+          }
+        : undefined;
+    case "GrantRevoked":
+      return hasExactKeys(event, ["type", "grantId", "reason"])
+        && isNonemptyString(event.grantId)
+        && isNonemptyString(event.reason)
+        ? { type: "GrantRevoked", grantId: event.grantId, reason: event.reason }
+        : undefined;
     default:
       return undefined;
   }

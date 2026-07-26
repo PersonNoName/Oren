@@ -349,6 +349,19 @@ export class SqliteLifeRepository {
     `).all(orenId).map((row) => JSON.parse(String(row.grant_json)) as Grant);
   }
 
+  public revokeGrant(orenId: string, grantId: string, revokedAtIso: string): boolean {
+    const canonicalRevokedAt = canonicalizeInstant(revokedAtIso);
+    if (!canonicalRevokedAt) {
+      throw new Error("Grant revocation time must be a valid instant");
+    }
+    const result = this.db.prepare(`
+      UPDATE grants
+      SET revoked_at = ?
+      WHERE grant_id = ? AND oren_id = ? AND revoked_at IS NULL
+    `).run(canonicalRevokedAt, grantId, orenId);
+    return Number(result.changes) === 1;
+  }
+
   public loadEvents(orenId: string): EventEnvelope[] {
     return this.loadEventsAfter(orenId, 0);
   }

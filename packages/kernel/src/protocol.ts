@@ -9,6 +9,7 @@ import type {
   ThreadId,
 } from "./ids.js";
 import type { JsonObject } from "./json.js";
+import type { DeliveryCause, ReachabilityPolicy } from "./reachability.js";
 
 export type TriggerKind =
   | "foreground_user"
@@ -109,7 +110,36 @@ export type CoreEvent =
       readonly retrievedAt: string;
       readonly query?: string;
       readonly confidence: number;
-    };
+    }
+  | {
+      readonly type: "ReachabilityPolicyUpdated";
+      readonly policy: ReachabilityPolicy;
+      readonly reason: string;
+    }
+  | {
+      readonly type: "MessageDelivered";
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly channel: "panel";
+      readonly proactive: boolean;
+    }
+  | {
+      readonly type: "MessageDeferred";
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly deferUntil: string;
+      readonly cause: DeliveryCause;
+    }
+  | {
+      readonly type: "MessageDeliveryFailed";
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly code: string;
+    }
+  | { readonly type: "GrantRevoked"; readonly grantId: GrantId; readonly reason: string };
 
 export type InboxCoreEvent =
   | Extract<CoreEvent, { type: "WakeDue" }>

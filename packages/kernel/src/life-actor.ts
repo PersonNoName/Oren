@@ -6,10 +6,15 @@ import type {
   Proposal,
 } from "./protocol.js";
 import type {
+  DeliveryCause,
+  ReachabilityPolicyInput,
+} from "./reachability.js";
+import type {
   ClaimedInboxItem,
   CognitionJob,
   LifeRepositoryPort,
 } from "./ports.js";
+import { reachabilityOf } from "./reachability.js";
 import { hasValidLifeStateBudgets } from "./runtime-validation.js";
 
 export class LifeActor {
@@ -309,6 +314,104 @@ export class LifeActor {
       : { type: "EpisodeInterrupted", episodeId: job.episodeId, reason: exit.reason };
     this.repository.commit(job.orenId, [
       this.envelope(job.orenId, job.correlationId, payload),
+    ]);
+  }
+
+  public updateReachabilityPolicy(
+    orenId: string,
+    correlationId: string,
+    policyInput: ReachabilityPolicyInput,
+    reason: string,
+  ): void {
+    const current = this.repository.loadState(orenId);
+    const existing = reachabilityOf(current);
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "ReachabilityPolicyUpdated",
+        policy: {
+          ...policyInput,
+          proactiveDayKey: existing.proactiveDayKey,
+          proactiveCountToday: existing.proactiveCountToday,
+        },
+        reason,
+      }),
+    ]);
+  }
+
+  public recordMessageDelivered(
+    orenId: string,
+    correlationId: string,
+    input: {
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly channel: "panel";
+      readonly proactive: boolean;
+    },
+  ): void {
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "MessageDelivered",
+        ...input,
+      }),
+    ]);
+  }
+
+  public recordMessageDeferred(
+    orenId: string,
+    correlationId: string,
+    input: {
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly deferUntil: string;
+      readonly cause: DeliveryCause;
+    },
+  ): void {
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "MessageDeferred",
+        ...input,
+      }),
+      this.envelope(orenId, correlationId, {
+        type: "WakeScheduled",
+        scheduleId: input.deliveryId,
+        at: input.deferUntil,
+        purpose: `deliver:${input.deliveryId}`,
+      }),
+    ]);
+  }
+
+  public recordMessageDeliveryFailed(
+    orenId: string,
+    correlationId: string,
+    input: {
+      readonly deliveryId: string;
+      readonly text: string;
+      readonly reason: string;
+      readonly code: string;
+    },
+  ): void {
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "MessageDeliveryFailed",
+        ...input,
+      }),
+    ]);
+  }
+
+  public revokeGrant(
+    orenId: string,
+    correlationId: string,
+    grantId: string,
+    reason: string,
+  ): void {
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "GrantRevoked",
+        grantId,
+        reason,
+      }),
     ]);
   }
 
