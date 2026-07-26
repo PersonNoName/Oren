@@ -15,7 +15,8 @@ type InboxStatus = InboxRow["status"];
 const INBOX_STATUS_RANK: Record<InboxStatus, number> = {
   deferred: 1,
   failed: 2,
-  delivered: 3,
+  interrupted: 3,
+  delivered: 4,
 };
 
 function summarizeEvent(event: EventEnvelope): string | undefined {
@@ -49,6 +50,17 @@ function mergeInboxRow(existing: InboxRow | undefined, incoming: InboxRow): Inbo
 
 function inboxRowFromEvent(event: EventEnvelope): InboxRow | undefined {
   const payload = event.payload;
+  if (payload.type === "AssistantMessageDelivered") {
+    return {
+      deliveryId: payload.messageId,
+      text: payload.text,
+      reason: "foreground",
+      status: payload.status === "complete" ? "delivered" : "interrupted",
+      proactive: false,
+      source: "foreground",
+      at: event.occurredAt,
+    };
+  }
   if (payload.type === "MessageDelivered") {
     return {
       deliveryId: payload.deliveryId,
@@ -56,6 +68,7 @@ function inboxRowFromEvent(event: EventEnvelope): InboxRow | undefined {
       reason: payload.reason,
       status: "delivered",
       proactive: payload.proactive,
+      source: "proactive",
       at: event.occurredAt,
     };
   }
@@ -66,6 +79,7 @@ function inboxRowFromEvent(event: EventEnvelope): InboxRow | undefined {
       reason: payload.reason,
       status: "deferred",
       deferUntil: payload.deferUntil,
+      source: "proactive",
       at: event.occurredAt,
     };
   }
@@ -75,6 +89,7 @@ function inboxRowFromEvent(event: EventEnvelope): InboxRow | undefined {
       text: payload.text,
       reason: payload.reason,
       status: "failed",
+      source: "proactive",
       at: event.occurredAt,
     };
   }
@@ -106,6 +121,7 @@ function overlayAdapterMessages(
       reason: message.reason,
       status: "delivered",
       proactive: message.proactive,
+      source: "proactive",
       at: message.deliveredAt,
     };
     if (existing?.status === "delivered") {

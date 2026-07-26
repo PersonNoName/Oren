@@ -1,5 +1,8 @@
 import type {
+  AssistantMessageStatus,
   CommitmentStatus,
+  CognitionFinishReason,
+  CognitionUsage,
   Effect,
   EpisodeInterruptionReason,
   EventEnvelope,
@@ -16,6 +19,7 @@ import type {
   DeliverWakeOutcome,
   LifeRepositoryPort,
 } from "./ports.js";
+import type { LifeState } from "./state.js";
 import { reachabilityOf } from "./reachability.js";
 import { hasValidLifeStateBudgets } from "./runtime-validation.js";
 
@@ -95,6 +99,123 @@ export class LifeActor {
     };
   }
 
+  public acceptCognitionCommit(
+    job: CognitionJob,
+    commitId: string,
+    proposals: readonly Proposal[],
+  ): {
+    readonly accepted: boolean;
+    readonly stateVersion?: number;
+    readonly reason?: string;
+  } {
+    const current = this.repository.loadState(job.orenId);
+    const invalidReason = this.validateCognitionJob(job, current);
+    if (invalidReason !== undefined) {
+      return { accepted: false, reason: invalidReason };
+    }
+    const events = [
+      this.envelope(job.orenId, job.correlationId, {
+        type: "CognitionCommitAccepted" as const,
+        episodeId: job.episodeId,
+        commitId,
+        baseStateVersion: job.baseStateVersion,
+        proposals,
+      }),
+      ...this.proposalEvents(job, proposals),
+    ];
+    if (!this.repository.commitIfVersion(job.orenId, job.baseStateVersion, events)) {
+      return { accepted: false, reason: "stale_state_version" };
+    }
+    return {
+      accepted: true,
+      stateVersion: job.baseStateVersion + events.length,
+    };
+  }
+
+  public recordCognitionCommitRejected(
+    job: CognitionJob,
+    commitId: string,
+    reason: string,
+  ): {
+    readonly accepted: boolean;
+    readonly stateVersion?: number;
+    readonly reason?: string;
+  } {
+    const current = this.repository.loadState(job.orenId);
+    if (!hasValidLifeStateBudgets(current)) {
+      return { accepted: false, reason: "invalid_state_or_job" };
+    }
+    const rejected = this.envelope(job.orenId, job.correlationId, {
+      type: "CognitionCommitRejected",
+      episodeId: job.episodeId,
+      commitId,
+      reason,
+    });
+    if (!this.repository.commitIfVersion(job.orenId, current.version, [rejected])) {
+      return { accepted: false, reason: "stale_state_version" };
+    }
+    return { accepted: true, stateVersion: current.version + 1 };
+  }
+
+  public recordAssistantMessage(
+    job: CognitionJob,
+    input: {
+      readonly messageId: string;
+      readonly text: string;
+      readonly status: AssistantMessageStatus;
+    },
+  ): {
+    readonly accepted: boolean;
+    readonly stateVersion?: number;
+    readonly reason?: string;
+  } {
+    const current = this.repository.loadState(job.orenId);
+    const invalidReason = this.validateCognitionJob(job, current);
+    if (invalidReason !== undefined) {
+      return { accepted: false, reason: invalidReason };
+    }
+    const delivered = this.envelope(job.orenId, job.correlationId, {
+      type: "AssistantMessageDelivered",
+      episodeId: job.episodeId,
+      messageId: input.messageId,
+      text: input.text,
+      channel: "panel",
+      status: input.status,
+    });
+    if (!this.repository.commitIfVersion(job.orenId, job.baseStateVersion, [delivered])) {
+      return { accepted: false, reason: "stale_state_version" };
+    }
+    return { accepted: true, stateVersion: job.baseStateVersion + 1 };
+  }
+
+  public completeCognition(
+    job: CognitionJob,
+    reason: CognitionFinishReason,
+    usage: CognitionUsage,
+  ): {
+    readonly accepted: boolean;
+    readonly stateVersion?: number;
+    readonly reason?: string;
+  } {
+    const current = this.repository.loadState(job.orenId);
+    const invalidReason = this.validateCognitionJob(job, current);
+    if (invalidReason !== undefined) {
+      return { accepted: false, reason: invalidReason };
+    }
+    const completed = this.envelope(job.orenId, job.correlationId, {
+      type: "CognitionCompleted",
+      episodeId: job.episodeId,
+      baseStateVersion: job.baseStateVersion,
+      reason,
+      usage,
+    });
+    if (!this.repository.commitIfVersion(job.orenId, job.baseStateVersion, [completed])) {
+      return { accepted: false, reason: "stale_state_version" };
+    }
+    return { accepted: true, stateVersion: job.baseStateVersion + 1 };
+  }
+
+  /** @deprecated Use acceptCognitionCommit and completeCognition separately. */
   public acceptCognition(
     job: CognitionJob,
     proposals: readonly Proposal[],
@@ -117,77 +238,7 @@ export class LifeActor {
       baseStateVersion: job.baseStateVersion,
       proposals,
     });
-    const accepted = proposals.flatMap((proposal): EventEnvelope[] => {
-      switch (proposal.type) {
-        case "AdvanceThread":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "ThreadAdvanced",
-            threadId: proposal.threadId,
-            summary: proposal.summary,
-          })];
-        case "UpdateDisposition":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "DispositionUpdated",
-            disposition: proposal.disposition,
-            reason: proposal.reason,
-          })];
-        case "ScheduleWake":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "WakeScheduled",
-            scheduleId: proposal.scheduleId,
-            at: proposal.at,
-            purpose: proposal.purpose,
-          })];
-        case "Remember":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "MemoryRemembered",
-            memoryId: this.nextId(),
-            kind: proposal.kind,
-            text: proposal.text,
-            ...(proposal.confidence !== undefined ? { confidence: proposal.confidence } : {}),
-            ...(proposal.reviewCondition !== undefined
-              ? { reviewCondition: proposal.reviewCondition }
-              : {}),
-            ...(proposal.threadId !== undefined ? { threadId: proposal.threadId } : {}),
-          })];
-        case "ReviseBelief":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "BeliefRevised",
-            memoryId: proposal.memoryId,
-            confidence: proposal.confidence,
-            reason: proposal.reason,
-            ...(proposal.revisedText !== undefined
-              ? { revisedText: proposal.revisedText }
-              : {}),
-          })];
-        case "Forget":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "MemoryForgotten",
-            memoryId: proposal.memoryId,
-            reason: proposal.reason,
-          })];
-        case "UpsertCommitment":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "CommitmentUpserted",
-            commitmentId: proposal.commitmentId ?? this.nextId(),
-            goal: proposal.goal,
-            status: proposal.status,
-            nextStep: proposal.nextStep,
-            mayAdvanceAutonomously: proposal.mayAdvanceAutonomously,
-          })];
-        case "UpdateCommitmentStatus":
-          return [this.envelope(job.orenId, job.correlationId, {
-            type: "CommitmentStatusChanged",
-            commitmentId: proposal.commitmentId,
-            status: proposal.status,
-            reason: proposal.reason,
-            ...(proposal.nextStep !== undefined ? { nextStep: proposal.nextStep } : {}),
-          })];
-        case "NoAction":
-        case "ExpressToUser":
-          return [];
-      }
-    });
+    const accepted = this.proposalEvents(job, proposals);
 
     this.repository.commit(job.orenId, [completed, ...accepted]);
     return { accepted: true };
@@ -493,6 +544,100 @@ export class LifeActor {
         reason,
       }),
     ]);
+  }
+
+  private validateCognitionJob(
+    job: CognitionJob,
+    current: LifeState,
+  ): string | undefined {
+    if (
+      !Number.isSafeInteger(job.baseStateVersion)
+      || job.baseStateVersion < 0
+      || !hasValidLifeStateBudgets(current)
+    ) {
+      return "invalid_state_or_job";
+    }
+    return current.version === job.baseStateVersion
+      ? undefined
+      : "stale_state_version";
+  }
+
+  private proposalEvents(
+    job: CognitionJob,
+    proposals: readonly Proposal[],
+  ): EventEnvelope[] {
+    return proposals.flatMap((proposal): EventEnvelope[] => {
+      switch (proposal.type) {
+        case "AdvanceThread":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "ThreadAdvanced",
+            threadId: proposal.threadId,
+            summary: proposal.summary,
+          })];
+        case "UpdateDisposition":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "DispositionUpdated",
+            disposition: proposal.disposition,
+            reason: proposal.reason,
+          })];
+        case "ScheduleWake":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "WakeScheduled",
+            scheduleId: proposal.scheduleId,
+            at: proposal.at,
+            purpose: proposal.purpose,
+          })];
+        case "Remember":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "MemoryRemembered",
+            memoryId: this.nextId(),
+            kind: proposal.kind,
+            text: proposal.text,
+            ...(proposal.confidence !== undefined ? { confidence: proposal.confidence } : {}),
+            ...(proposal.reviewCondition !== undefined
+              ? { reviewCondition: proposal.reviewCondition }
+              : {}),
+            ...(proposal.threadId !== undefined ? { threadId: proposal.threadId } : {}),
+          })];
+        case "ReviseBelief":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "BeliefRevised",
+            memoryId: proposal.memoryId,
+            confidence: proposal.confidence,
+            reason: proposal.reason,
+            ...(proposal.revisedText !== undefined
+              ? { revisedText: proposal.revisedText }
+              : {}),
+          })];
+        case "Forget":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "MemoryForgotten",
+            memoryId: proposal.memoryId,
+            reason: proposal.reason,
+          })];
+        case "UpsertCommitment":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "CommitmentUpserted",
+            commitmentId: proposal.commitmentId ?? this.nextId(),
+            goal: proposal.goal,
+            status: proposal.status,
+            nextStep: proposal.nextStep,
+            mayAdvanceAutonomously: proposal.mayAdvanceAutonomously,
+          })];
+        case "UpdateCommitmentStatus":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "CommitmentStatusChanged",
+            commitmentId: proposal.commitmentId,
+            status: proposal.status,
+            reason: proposal.reason,
+            ...(proposal.nextStep !== undefined ? { nextStep: proposal.nextStep } : {}),
+          })];
+        case "NoAction":
+        case "ExpressToUser":
+        case "InitiateContact":
+          return [];
+      }
+    });
   }
 
   private envelope(

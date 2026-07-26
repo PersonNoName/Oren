@@ -55,6 +55,27 @@ describe("SqliteMemoryIndex projection", () => {
     expect(index.cursor()).toBe(3);
   });
 
+  it("projects delivered assistant speech as an Oren expression", async () => {
+    const index = makeIndex();
+    await index.project([
+      record(1, {
+        type: "AssistantMessageDelivered",
+        episodeId: "episode-1",
+        messageId: "message-1",
+        text: "新的表达",
+        channel: "panel",
+        status: "complete",
+      }),
+    ]);
+
+    const entries = await index.recall({
+      orenId: "oren-1",
+      kinds: ["oren_expression"],
+      limit: 10,
+    });
+    expect(entries.map(({ text }) => text)).toEqual(["新的表达"]);
+  });
+
   it("projects explicit memory events and applies revise/forget", async () => {
     const index = makeIndex();
     await index.project([

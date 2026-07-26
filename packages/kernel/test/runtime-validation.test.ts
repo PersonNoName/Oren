@@ -40,6 +40,34 @@ const validEvents: readonly CoreEvent[] = [
       },
     ],
   },
+  {
+    type: "CognitionCommitAccepted",
+    episodeId: "episode-1",
+    commitId: "commit-1",
+    baseStateVersion: 2,
+    proposals: [{ type: "NoAction", reason: "done" }],
+  },
+  {
+    type: "CognitionCommitRejected",
+    episodeId: "episode-1",
+    commitId: "commit-2",
+    reason: "stale_state_version",
+  },
+  {
+    type: "AssistantMessageDelivered",
+    episodeId: "episode-1",
+    messageId: "message-1",
+    text: "hello",
+    channel: "panel",
+    status: "complete",
+  },
+  {
+    type: "CognitionCompleted",
+    episodeId: "episode-2",
+    baseStateVersion: 4,
+    reason: "stop",
+    usage: { totalTokens: 7 },
+  },
   { type: "CognitionDenied", episodeId: "episode-1", reason: "budget" },
   { type: "CognitionWaitingForEffect", episodeId: "episode-1", effectId: "effect-1" },
   { type: "CognitionFailed", episodeId: "episode-1", message: "failed" },
@@ -76,6 +104,30 @@ describe("runtime protocol validation", () => {
       expect(canonicalizeCoreEvent({ ...event, hostile: true })).toBeUndefined();
     },
   );
+
+  it("accepts either cognition completion shape but rejects mixed shapes", () => {
+    expect(canonicalizeCoreEvent({
+      type: "CognitionCompleted",
+      episodeId: "episode-old",
+      baseStateVersion: 2,
+      proposals: [{ type: "NoAction", reason: "historical" }],
+    })).toBeDefined();
+    expect(canonicalizeCoreEvent({
+      type: "CognitionCompleted",
+      episodeId: "episode-new",
+      baseStateVersion: 4,
+      reason: "max_steps",
+      usage: { totalTokens: 9 },
+    })).toBeDefined();
+    expect(canonicalizeCoreEvent({
+      type: "CognitionCompleted",
+      episodeId: "episode-mixed",
+      baseStateVersion: 4,
+      proposals: [],
+      reason: "stop",
+      usage: { totalTokens: 1 },
+    })).toBeUndefined();
+  });
 
   it("normalizes envelope and nested schedule instants to canonical UTC", () => {
     const result = canonicalizeEventEnvelope({

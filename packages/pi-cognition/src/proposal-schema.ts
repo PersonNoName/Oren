@@ -21,6 +21,17 @@ export const ProposalSchema = Type.Union([
     reason: Type.String(),
   }, { additionalProperties: false }),
   Type.Object({
+    type: Type.Literal("InitiateContact"),
+    text: Type.String(),
+    reason: Type.String(),
+    urgency: Type.Union([
+      Type.Literal("low"),
+      Type.Literal("normal"),
+      Type.Literal("high"),
+    ]),
+    channel: Type.Literal("panel"),
+  }, { additionalProperties: false }),
+  Type.Object({
     type: Type.Literal("ScheduleWake"),
     scheduleId: Type.String(),
     at: Type.String(),

@@ -36,6 +36,42 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
   }
 }
 
+class MockTextDeltaStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
+  public constructor(chunks: readonly string[], totalTokens: number) {
+    super(
+      (event) => event.type === "done" || event.type === "error",
+      (event) => {
+        if (event.type === "done") return event.message;
+        if (event.type === "error") return event.error;
+        throw new Error(`Unexpected terminal fake event: ${event.type}`);
+      },
+    );
+    queueMicrotask(() => {
+      const empty = assistantMessage([{ type: "text", text: "" }], totalTokens);
+      this.push({ type: "start", partial: { ...empty, content: [] } });
+      this.push({ type: "text_start", contentIndex: 0, partial: empty });
+      let text = "";
+      for (const delta of chunks) {
+        text += delta;
+        this.push({
+          type: "text_delta",
+          contentIndex: 0,
+          delta,
+          partial: { ...empty, content: [{ type: "text", text }] },
+        });
+      }
+      const message = assistantMessage([{ type: "text", text }], totalTokens);
+      this.push({
+        type: "text_end",
+        contentIndex: 0,
+        content: text,
+        partial: message,
+      });
+      this.push({ type: "done", reason: "stop", message });
+    });
+  }
+}
+
 export function createMockModel(): Model<"openai-responses"> {
   return {
     id: "mock",
@@ -104,6 +140,13 @@ export function createCommitStream(
       arguments: { proposals },
     }], totalTokens),
   ]);
+}
+
+export function createTextDeltaStream(
+  chunks: readonly string[],
+  totalTokens = 2,
+) {
+  return () => new MockTextDeltaStream(chunks, totalTokens);
 }
 
 export function createFrame(

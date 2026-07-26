@@ -1,13 +1,15 @@
 import type { Commitment, CommitmentStatus } from "@oren/kernel";
 import type { LifeState } from "@oren/kernel";
 import type { ReachabilityPolicy } from "@oren/kernel";
+import type { SpeechEvent } from "@oren/channel";
 
 export type PanelSnapshot = {
   readonly inbox: ReadonlyArray<{
     deliveryId: string;
     text: string;
     reason: string;
-    status: "delivered" | "deferred" | "failed";
+    status: "delivered" | "interrupted" | "deferred" | "failed";
+    source?: "foreground" | "proactive";
     proactive?: boolean;
     deferUntil?: string;
     at: string;
@@ -43,6 +45,7 @@ export type PanelHandlers = {
       reason: string;
     },
   ) => Promise<void>;
+  subscribeSpeech?: (listener: (event: SpeechEvent) => void) => () => void;
 };
 
 export type PanelServer = {

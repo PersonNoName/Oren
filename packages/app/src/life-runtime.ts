@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { PanelInboxAdapter, ScriptedChannelAdapter, type ChannelPort } from "@oren/channel";
+import {
+  PanelInboxAdapter,
+  ScriptedChannelAdapter,
+  type ChannelPort,
+  type ForegroundSpeechPort,
+} from "@oren/channel";
 import {
   Conductor,
   ScriptedCognitionAdapter,
   resolveTriggerSummary,
+  type CognitionCapabilityPort,
   type CognitionPort,
+  type StreamingCognitionPort,
 } from "@oren/cognition";
 import {
   CapabilityBroker,
@@ -21,6 +28,7 @@ import {
   type ClaimedInboxItem,
   type CommitmentStatus,
   type LifeState,
+  type Proposal,
 } from "@oren/kernel";
 import {
   createMemoryRecallExtension,
@@ -49,6 +57,7 @@ import { CognitionWorker } from "./cognition-worker.js";
 import { deliverExpressProposals, findDeferredMessage } from "./delivery.js";
 import { EffectDispatcher } from "./effect-dispatcher.js";
 import { EpisodeCoordinator } from "./episode-coordinator.js";
+import { EpisodeScheduler } from "./episode-scheduler.js";
 import { buildPanelSnapshot } from "./panel-snapshot.js";
 import { Scheduler } from "./scheduler.js";
 import {
@@ -109,7 +118,7 @@ export class LifeRuntime {
   private constructor(
     private readonly repository: SqliteLifeRepository,
     private readonly actor: LifeActor,
-    private readonly coordinator: EpisodeCoordinator,
+    private readonly coordinator: EpisodeScheduler,
     private readonly dispatcher: EffectDispatcher,
     private readonly scheduler: Scheduler,
     private readonly extensions: readonly OrenExtension[],
@@ -212,7 +221,7 @@ export class LifeRuntime {
 
   public static async create(
     databasePath: string,
-    cognition: CognitionPort,
+    cognition: CognitionPort | StreamingCognitionPort,
     options: LifeRuntimeOptions = {},
   ): Promise<LifeRuntime> {
     const rawNow = options.now ?? (() => new Date().toISOString());
@@ -293,110 +302,131 @@ export class LifeRuntime {
         }).allowed,
         () => Date.parse(now()),
       );
-      const worker = new CognitionWorker(
-        cognition,
-        new Conductor(),
-        actor,
-        guard,
-        async (job) => {
-          const state = repository.loadState(job.orenId);
-          const newRecords = repository.loadEventRecordsAfter(memory.cursor());
-          if (newRecords.length > 0) await memory.project(newRecords);
-          const pins = await recallPinsWithFallback(memory, job.orenId, state.attention.currentFocus);
-          const events = repository.loadEvents(job.orenId);
-          return {
-            state,
-            correlationId: job.correlationId,
-            trigger: {
-              kind: job.triggerKind,
-              summary: resolveTriggerSummary({
-                triggerKind: job.triggerKind,
-                correlationId: job.correlationId,
-                events,
-              }),
-            },
-            capabilities: registry.listCapabilities(),
-            maxSteps: 8,
-            memoryPins: pins.map((entry) => ({
-              memoryId: entry.memoryId,
-              kind: entry.kind,
-              text: entry.text,
-              confidence: entry.confidence,
-              occurredAt: entry.occurredAt,
-            })),
-          };
-        },
-        {
-          invoke: async (
-            { orenId, descriptor, arguments: arguments_, stateVersion, correlationId },
-          ) => {
-            if (runtimeGate.closed) {
-              return { kind: "rejected", reason: "runtime_closed" };
-            }
-            const isWebCapability = descriptor.name === "web.search"
-              || descriptor.name === "web.read";
-            if (
-              isWebCapability
-              && webQuotaRemaining(repository.loadState(orenId)) < 1
-            ) {
-              return { kind: "rejected", reason: "web_quota_exhausted" };
-            }
-            const outcome = await broker.invoke({
-              orenId,
-              correlationId,
-              capability: descriptor.name,
-              arguments: arguments_,
-              grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
-              stateVersion,
-              effectId: nextId(),
-            });
-            if (outcome.kind !== "completed") return outcome;
-
-            if (descriptor.name === "web.search") {
-              const result = outcome.output as unknown as SearchResult;
-              const observation = observationFromSearch(
-                arguments_.query as string,
-                result.results,
-              );
-              if (observation !== null) {
-                actor.recordObservation(orenId, correlationId, {
-                  ...observation,
-                  retrievedAt: now(),
-                  confidence: 0.7,
-                });
-              }
-            } else if (descriptor.name === "web.read") {
-              const observation = observationFromRead(
-                outcome.output as unknown as ReadResult,
-              );
-              if (observation !== null) {
-                actor.recordObservation(orenId, correlationId, {
-                  ...observation,
-                  retrievedAt: now(),
-                  confidence: 0.7,
-                });
-              }
-            }
-            return outcome;
+      const loadFrameInput = async (job: CognitionJob) => {
+        const state = repository.loadState(job.orenId);
+        const newRecords = repository.loadEventRecordsAfter(memory.cursor());
+        if (newRecords.length > 0) await memory.project(newRecords);
+        const pins = await recallPinsWithFallback(
+          memory,
+          job.orenId,
+          state.attention.currentFocus,
+        );
+        const events = repository.loadEvents(job.orenId);
+        return {
+          state,
+          correlationId: job.correlationId,
+          trigger: {
+            kind: job.triggerKind,
+            summary: resolveTriggerSummary({
+              triggerKind: job.triggerKind,
+              correlationId: job.correlationId,
+              events,
+            }),
           },
-        },
-        async (job, proposals) => {
-          await deliverExpressProposals({
-            orenId: job.orenId,
-            correlationId: job.correlationId,
-            triggerKind: job.triggerKind,
-            proposals,
-            state: repository.loadState(job.orenId),
-            now: now(),
-            channel: channelPort,
-            actor,
-            nextId,
-            reloadState: () => repository.loadState(job.orenId),
+          capabilities: registry.listCapabilities(),
+          maxSteps: 8,
+          memoryPins: pins.map((entry) => ({
+            memoryId: entry.memoryId,
+            kind: entry.kind,
+            text: entry.text,
+            confidence: entry.confidence,
+            occurredAt: entry.occurredAt,
+          })),
+        };
+      };
+      const capabilityPort: CognitionCapabilityPort = {
+        invoke: async (
+          { orenId, descriptor, arguments: arguments_, stateVersion, correlationId },
+        ) => {
+          if (runtimeGate.closed) {
+            return { kind: "rejected" as const, reason: "runtime_closed" };
+          }
+          const isWebCapability = descriptor.name === "web.search"
+            || descriptor.name === "web.read";
+          if (
+            isWebCapability
+            && webQuotaRemaining(repository.loadState(orenId)) < 1
+          ) {
+            return { kind: "rejected" as const, reason: "web_quota_exhausted" };
+          }
+          const outcome = await broker.invoke({
+            orenId,
+            correlationId,
+            capability: descriptor.name,
+            arguments: arguments_,
+            grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
+            stateVersion,
+            effectId: nextId(),
           });
+          if (outcome.kind !== "completed") return outcome;
+
+          if (descriptor.name === "web.search") {
+            const result = outcome.output as unknown as SearchResult;
+            const observation = observationFromSearch(
+              arguments_.query as string,
+              result.results,
+            );
+            if (observation !== null) {
+              actor.recordObservation(orenId, correlationId, {
+                ...observation,
+                retrievedAt: now(),
+                confidence: 0.7,
+              });
+            }
+          } else if (descriptor.name === "web.read") {
+            const observation = observationFromRead(
+              outcome.output as unknown as ReadResult,
+            );
+            if (observation !== null) {
+              actor.recordObservation(orenId, correlationId, {
+                ...observation,
+                retrievedAt: now(),
+                confidence: 0.7,
+              });
+            }
+          }
+          return outcome;
         },
-      );
-      const coordinator = new EpisodeCoordinator(
-        (job, signal) => worker.run(job, signal),
+      };
+      const onCommitAccepted = async (
+        job: CognitionJob,
+        proposals: readonly Proposal[],
+      ) => {
+        await deliverExpressProposals({
+          orenId: job.orenId,
+          correlationId: job.correlationId,
+          triggerKind: job.triggerKind,
+          proposals,
+          state: repository.loadState(job.orenId),
+          now: now(),
+          channel: channelPort,
+          actor,
+          nextId,
+          reloadState: () => repository.loadState(job.orenId),
+        });
+      };
+      const episodeRunner = "stream" in cognition
+        ? new EpisodeCoordinator(
+            cognition,
+            new Conductor(),
+            actor,
+            guard,
+            loadFrameInput,
+            capabilityPort,
+            foregroundSpeechOf(channelPort),
+            onCommitAccepted,
+          )
+        : new CognitionWorker(
+            cognition,
+            new Conductor(),
+            actor,
+            guard,
+            loadFrameInput,
+            capabilityPort,
+            onCommitAccepted,
+          );
+      const coordinator = new EpisodeScheduler(
+        (job, signal) => episodeRunner.run(job, signal),
       );
       const dispatcher = new EffectDispatcher(
         repository,
@@ -409,8 +439,16 @@ export class LifeRuntime {
       );
       let runtimeRef: LifeRuntime | undefined;
       const panelServer = panelEnabled
-        ? await createPanelServer({
+          ? await createPanelServer({
             getSnapshot: () => runtimeRef!.getPanelSnapshot(),
+            ...(
+              channelPort instanceof PanelInboxAdapter
+                ? {
+                    subscribeSpeech: (listener) =>
+                      channelPort.subscribeSpeech(listener),
+                  }
+                : {}
+            ),
             postMessage: async (text) => {
               const identity = runtimeRef!.requireIdentity();
               await runtimeRef!.receiveUserMessage(identity.orenId, identity.personId, text);
@@ -806,6 +844,24 @@ export class LifeRuntime {
   private assertOpen(): void {
     if (this.closed || this.closing) throw new Error("LifeRuntime is closed");
   }
+}
+
+function foregroundSpeechOf(channel: ChannelPort): ForegroundSpeechPort {
+  if (
+    "startSpeech" in channel
+    && typeof channel.startSpeech === "function"
+    && "appendSpeech" in channel
+    && typeof channel.appendSpeech === "function"
+    && "completeSpeech" in channel
+    && typeof channel.completeSpeech === "function"
+  ) {
+    return channel as ChannelPort & ForegroundSpeechPort;
+  }
+  return {
+    async startSpeech() {},
+    async appendSpeech() {},
+    async completeSpeech() {},
+  };
 }
 
 const FUTURE_WAKE = "2099-01-02T00:00:00.000Z";

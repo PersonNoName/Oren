@@ -62,6 +62,26 @@ export function createPanelServer(
         return;
       }
 
+      if (method === "GET" && url.pathname === "/api/speech-events") {
+        res.writeHead(200, {
+          "content-type": "text/event-stream",
+          "cache-control": "no-cache",
+          "connection": "keep-alive",
+        });
+        res.write(": connected\n\n");
+        const unsubscribe = handlers.subscribeSpeech?.((event) => {
+          res.write(`event: ${event.type}\n`);
+          res.write(`data: ${JSON.stringify(event)}\n\n`);
+        });
+        const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15_000);
+        heartbeat.unref();
+        req.once("close", () => {
+          clearInterval(heartbeat);
+          unsubscribe?.();
+        });
+        return;
+      }
+
       if (method === "GET" && url.pathname === "/") {
         indexHtml ??= await readFile(join(STATIC_DIR, "index.html"), "utf8");
         sendText(res, 200, indexHtml, "text/html; charset=utf-8");

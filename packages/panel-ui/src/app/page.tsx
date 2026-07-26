@@ -8,6 +8,7 @@ import { ErrorBanner } from "@/components/ErrorBanner";
 import { NavRail } from "@/components/NavRail";
 import { PanelShell } from "@/components/PanelShell";
 import { usePanelSnapshot } from "@/hooks/usePanelSnapshot";
+import { useSpeechStream } from "@/hooks/useSpeechStream";
 import type { LocalUserMessage } from "@/lib/chat-messages";
 import type { NavSection } from "@/lib/nav";
 import { postMessage } from "@/lib/panel-api";
@@ -18,6 +19,7 @@ export default function Page() {
   const [sendPending, setSendPending] = useState(false);
   const [composerError, setComposerError] = useState<string | null>(null);
   const { snapshot, error, refresh } = usePanelSnapshot(2000);
+  const liveUtterances = useSpeechStream();
 
   async function handleSend(text: string) {
     const optimistic: LocalUserMessage = {
@@ -65,7 +67,11 @@ export default function Page() {
       }
       chat={
         <div className="chat-column">
-          <ChatPane inbox={snapshot?.inbox} localUserMessages={localUserMessages} />
+          <ChatPane
+            inbox={snapshot?.inbox}
+            localUserMessages={localUserMessages}
+            liveUtterances={liveUtterances}
+          />
           <Composer onSend={handleSend} pending={sendPending} error={composerError} />
         </div>
       }

@@ -1,0 +1,254 @@
+import { describe, expect, it } from "vitest";
+import { EpisodeScheduler } from "../src/index.js";
+
+describe("EpisodeScheduler", () => {
+  it("aborts an idle episode before starting foreground cognition", async () => {
+    const transitions: string[] = [];
+    const coordinator = new EpisodeScheduler(async (job, signal) => {
+      transitions.push(`start:${job.triggerKind}`);
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
+        transitions.push(`abort:${job.triggerKind}`);
+        resolve();
+      }, { once: true }));
+    });
+
+    void coordinator.start({
+      orenId: "oren-1",
+      episodeId: "background",
+      baseStateVersion: 1,
+      triggerKind: "health_check",
+      correlationId: "corr-background",
+    });
+    await coordinator.start({
+      orenId: "oren-1",
+      episodeId: "foreground",
+      baseStateVersion: 2,
+      triggerKind: "foreground_user",
+      correlationId: "corr-foreground",
+    });
+
+    expect(transitions.slice(0, 3)).toEqual([
+      "start:health_check",
+      "abort:health_check",
+      "start:foreground_user",
+    ]);
+  });
+
+  it("awaits aborted cleanup before running the deterministic highest-priority pending job", async () => {
+    const transitions: string[] = [];
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const coordinator = new EpisodeScheduler(async (job, signal) => {
+      transitions.push(`start:${job.episodeId}`);
+      if (job.episodeId === "background") {
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        transitions.push(`cleanup:${String(signal.reason)}`);
+        await cleanup;
+      }
+    });
+
+    await coordinator.start(job("background", "health_check"));
+    const wake = coordinator.start(job("wake", "scheduled_wake"));
+    const effect = coordinator.start(job("effect", "effect_result"));
+    await Promise.resolve();
+    expect(transitions).toEqual([
+      "start:background",
+      "cleanup:trigger_priority",
+    ]);
+
+    releaseCleanup();
+    await effect;
+    expect(transitions).toEqual([
+      "start:background",
+      "cleanup:trigger_priority",
+      "start:effect",
+    ]);
+    await wake;
+    expect(transitions.at(-1)).toBe("start:wake");
+  });
+
+  it("queues lower-priority durable work instead of dropping it", async () => {
+    const transitions: string[] = [];
+    let releaseForeground!: () => void;
+    const foregroundDone = new Promise<void>((resolve) => {
+      releaseForeground = resolve;
+    });
+    const coordinator = new EpisodeScheduler(async (candidate) => {
+      transitions.push(candidate.episodeId);
+      if (candidate.episodeId === "foreground") await foregroundDone;
+    });
+
+    await coordinator.start(job("foreground", "foreground_user"));
+    const background = coordinator.start(job("background", "health_check"));
+    await Promise.resolve();
+    expect(transitions).toEqual(["foreground"]);
+
+    releaseForeground();
+    await background;
+    expect(transitions).toEqual(["foreground", "background"]);
+  });
+
+  it("contains an aborted episode rejection and still starts its foreground replacement", async () => {
+    const transitions: string[] = [];
+    const coordinator = new EpisodeScheduler(async (candidate, signal) => {
+      transitions.push(`start:${candidate.episodeId}`);
+      if (candidate.episodeId === "background") {
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("cleanup failed")), { once: true });
+        });
+      }
+    });
+
+    await coordinator.start(job("background", "health_check"));
+    await expect(coordinator.start(job("foreground", "foreground_user"))).resolves.toBeUndefined();
+    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
+    expect(transitions).toEqual(["start:background", "start:foreground"]);
+  });
+
+  it("allows different Orens to run concurrently", async () => {
+    const active = new Set<string>();
+    let observedConcurrent = false;
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const coordinator = new EpisodeScheduler(async (candidate) => {
+      active.add(candidate.orenId);
+      observedConcurrent ||= active.size === 2;
+      await done;
+      active.delete(candidate.orenId);
+    });
+
+    await coordinator.start(job("episode-a", "foreground_user", "oren-a"));
+    await coordinator.start(job("episode-b", "foreground_user", "oren-b"));
+    expect(observedConcurrent).toBe(true);
+    release();
+    await Promise.all([
+      coordinator.waitForIdle("oren-a"),
+      coordinator.waitForIdle("oren-b"),
+    ]);
+  });
+
+  it("installs the active slot before a run callback can reentrantly enqueue work", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let coordinator!: EpisodeScheduler;
+    coordinator = new EpisodeScheduler(async (candidate) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      if (candidate.episodeId === "first") {
+        void coordinator.start(job("second", "health_check"));
+        await firstDone;
+      }
+      active -= 1;
+    });
+
+    await coordinator.start(job("first", "health_check"));
+    expect(maximumActive).toBe(1);
+    releaseFirst();
+    await coordinator.waitForIdle("oren-1");
+    expect(maximumActive).toBe(1);
+  });
+
+  it("shutdown aborts active work and durably closes pending and new jobs without cognition", async () => {
+    const cognition: string[] = [];
+    const closed: Array<{ episodeId: string; reason: unknown }> = [];
+    const coordinator = new EpisodeScheduler(
+      async (candidate, signal) => {
+        cognition.push(candidate.episodeId);
+        if (candidate.episodeId === "active") {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        }
+      },
+      async (candidate, signal) => {
+        closed.push({ episodeId: candidate.episodeId, reason: signal.reason });
+      },
+    );
+
+    await coordinator.start(job("active", "health_check"));
+    void coordinator.start(job("pending-a", "health_check"));
+    void coordinator.start(job("pending-b", "scheduled_wake"));
+
+    await expect(coordinator.interrupt("oren-1", "shutdown")).resolves.toBeUndefined();
+    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
+    await expect(coordinator.start(job("after-shutdown", "foreground_user"))).resolves.toBeUndefined();
+    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
+
+    expect(cognition).toEqual(["active"]);
+    expect(closed).toEqual([
+      { episodeId: "pending-b", reason: "shutdown" },
+      { episodeId: "pending-a", reason: "shutdown" },
+      { episodeId: "after-shutdown", reason: "shutdown" },
+    ]);
+  });
+
+  it("requires explicit resume before cognition starts after shutdown", async () => {
+    const cognition: string[] = [];
+    const closed: string[] = [];
+    const coordinator = new EpisodeScheduler(
+      async (candidate) => {
+        cognition.push(candidate.episodeId);
+      },
+      async (candidate) => {
+        closed.push(candidate.episodeId);
+      },
+    );
+
+    await coordinator.interrupt("oren-1", "shutdown");
+    await coordinator.start(job("closed", "health_check"));
+    coordinator.resume("oren-1");
+    await coordinator.start(job("resumed", "health_check"));
+    await coordinator.waitForIdle("oren-1");
+
+    expect(closed).toEqual(["closed"]);
+    expect(cognition).toEqual(["resumed"]);
+  });
+
+  it("a non-shutdown interruption preserves queued work", async () => {
+    const transitions: string[] = [];
+    const coordinator = new EpisodeScheduler(async (candidate, signal) => {
+      transitions.push(`start:${candidate.episodeId}`);
+      if (candidate.episodeId === "active") {
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            transitions.push(`abort:${String(signal.reason)}`);
+            resolve();
+          }, { once: true });
+        });
+      }
+    });
+
+    await coordinator.start(job("active", "health_check"));
+    void coordinator.start(job("queued", "health_check"));
+    await coordinator.interrupt("oren-1", "cognition_abort");
+    await coordinator.waitForIdle("oren-1");
+
+    expect(transitions).toEqual([
+      "start:active",
+      "abort:cognition_abort",
+      "start:queued",
+    ]);
+  });
+});
+
+function job(
+  episodeId: string,
+  triggerKind: "foreground_user" | "effect_result" | "scheduled_wake" | "health_check",
+  orenId = "oren-1",
+) {
+  return {
+    orenId,
+    episodeId,
+    baseStateVersion: 1,
+    triggerKind,
+    correlationId: `corr:${episodeId}`,
+  } as const;
+}

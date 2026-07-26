@@ -1,5 +1,9 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { CognitionCapabilityPort, LifeFrame } from "@oren/cognition";
+import type {
+  CognitionCapabilityPort,
+  CognitionHandlers,
+  LifeFrame,
+} from "@oren/cognition";
 import {
   isImmediateCapability,
   type CapabilityDescriptor,
@@ -44,6 +48,59 @@ export function toPiTool(
           descriptor,
           arguments: params as JsonObject,
           stateVersion: frame.stateVersion,
+          correlationId: frame.correlationId,
+        }, invocationSignal),
+        invocationSignal,
+      );
+
+      switch (outcome.kind) {
+        case "completed":
+          return {
+            content: [{ type: "text", text: JSON.stringify(outcome.output) }],
+            details: outcome,
+          };
+        case "waiting_for_effect":
+          return {
+            content: [{
+              type: "text",
+              text: `持久效应已排队，等待回执 ${outcome.effectId}；本轮思考结束，请勿重复调用同一持久能力。`,
+            }],
+            details: outcome,
+            terminate: true,
+          };
+        case "rejected":
+          return {
+            content: [{ type: "text", text: `能力被拒绝：${outcome.reason}` }],
+            details: outcome,
+          };
+      }
+    },
+  };
+}
+
+export function toStreamingPiTool(
+  descriptor: CapabilityDescriptor,
+  frame: LifeFrame,
+  handlers: CognitionHandlers,
+): AgentTool {
+  const llmName = toLlmToolName(descriptor.name);
+  return {
+    name: llmName,
+    label: llmName,
+    description: describeCapabilityForLlm(descriptor),
+    parameters: descriptor.inputSchema as TSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, params, signal) {
+      if (signal?.aborted) {
+        throw abortReason(signal);
+      }
+
+      const invocationSignal = signal ?? new AbortController().signal;
+      const outcome = await raceWithAbort(
+        handlers.invokeCapability({
+          orenId: frame.orenId,
+          descriptor,
+          arguments: params as JsonObject,
           correlationId: frame.correlationId,
         }, invocationSignal),
         invocationSignal,

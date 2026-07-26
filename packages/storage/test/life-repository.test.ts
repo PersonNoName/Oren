@@ -102,6 +102,37 @@ describe("SqliteLifeRepository", () => {
     expect(repo.loadPendingCognitionJobs()).toHaveLength(1);
   });
 
+  it("closes a pending request with a new completion after intermediate episode facts", () => {
+    const db = openDatabase(":memory:");
+    const repo = new SqliteLifeRepository(db);
+    repo.initialize(createInitialLifeState("oren-1", "person-1"));
+    repo.commit("oren-1", [
+      event("request", "oren-1", {
+        type: "CognitionRequested",
+        episodeId: "episode-1",
+        baseStateVersion: 1,
+        triggerKind: "foreground_user",
+      }, "corr-1"),
+      event("message", "oren-1", {
+        type: "AssistantMessageDelivered",
+        episodeId: "episode-1",
+        messageId: "message-1",
+        text: "hello",
+        channel: "panel",
+        status: "complete",
+      }, "corr-1"),
+      event("completion", "oren-1", {
+        type: "CognitionCompleted",
+        episodeId: "episode-1",
+        baseStateVersion: 3,
+        reason: "stop",
+        usage: { totalTokens: 5 },
+      }, "corr-1"),
+    ]);
+
+    expect(repo.loadPendingCognitionJobs()).toEqual([]);
+  });
+
   it("continues exact pending reconstruction past malformed legacy history", () => {
     const db = openDatabase(":memory:");
     const repo = new SqliteLifeRepository(db);
