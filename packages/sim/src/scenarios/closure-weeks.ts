@@ -24,6 +24,8 @@ const WAKE_PROGRESS = "2026-01-03T12:00:00.000Z";
 const WAKE_QUIET = "2026-01-04T23:00:00.000Z";
 const MORNING_AFTER_QUIET = "2026-01-05T08:30:00.000Z";
 const WAKE_WEB_FAIL = "2026-01-06T12:00:00.000Z";
+const QUIET_SHARE_REASON = "quiet share";
+const QUIET_SHARE_TEXT = "quiet-hours proactive update";
 
 type ClosureTurn = {
   readonly when?: (frame: LifeFrame) => boolean;
@@ -262,8 +264,25 @@ export function buildClosureWeeksScenario(): ScenarioDefinition {
         maxProactivePerDay: 10,
       },
       { type: "advance", to: WAKE_QUIET },
+      {
+        type: "assert",
+        name: "shareDeferred",
+        args: {
+          proactive: true,
+          reason: QUIET_SHARE_REASON,
+          textIncludes: QUIET_SHARE_TEXT,
+        },
+      },
       { type: "advance", to: MORNING_AFTER_QUIET },
-      { type: "assert", name: "shareDelivered", args: { proactive: true } },
+      {
+        type: "assert",
+        name: "shareDelivered",
+        args: {
+          proactive: true,
+          reason: QUIET_SHARE_REASON,
+          textIncludes: QUIET_SHARE_TEXT,
+        },
+      },
 
       { type: "failNetwork", failing: true, targets: ["web"] },
       { type: "advance", to: WAKE_WEB_FAIL },

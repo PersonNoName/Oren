@@ -6,7 +6,11 @@ import {
   type QuietHours,
   type ReachabilityPolicy,
 } from "@oren/kernel";
+import type { PanelSnapshot } from "@oren/panel";
 import type { VirtualClock } from "./clock.js";
+
+type InboxItem = PanelSnapshot["inbox"][number];
+type InboxStatus = InboxItem["status"];
 
 export type AssertContext = {
   readonly runtime: LifeRuntime;
@@ -157,17 +161,49 @@ async function commitmentProgressed(ctx: AssertContext): Promise<void> {
   throw new Error("commitmentProgressed: no commitment status or nextStep change");
 }
 
+function matchesInboxFilters(item: InboxItem, args: Record<string, unknown>): boolean {
+  if (args.reason !== undefined) {
+    const expected = requireStringArg(args, "reason");
+    if (item.reason !== expected) {
+      return false;
+    }
+  }
+  if (args.textIncludes !== undefined) {
+    const needle = requireStringArg(args, "textIncludes");
+    if (!item.text.includes(needle)) {
+      return false;
+    }
+  }
+  if (args.proactive !== undefined) {
+    const expected = Boolean(args.proactive);
+    if (item.proactive !== undefined && item.proactive !== expected) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function filterInboxByStatus(
+  inbox: readonly InboxItem[],
+  status: InboxStatus,
+  args: Record<string, unknown>,
+): InboxItem[] {
+  return inbox.filter((item) => item.status === status && matchesInboxFilters(item, args));
+}
+
 async function shareDelivered(ctx: AssertContext): Promise<void> {
   const snapshot = ctx.runtime.getPanelSnapshot();
-  const delivered = snapshot.inbox.filter((item) => item.status === "delivered");
+  const delivered = filterInboxByStatus(snapshot.inbox, "delivered", ctx.args);
   if (delivered.length === 0) {
-    throw new Error("shareDelivered: no delivered inbox message");
+    throw new Error("shareDelivered: no matching delivered inbox message");
   }
-  if (ctx.args.proactive !== undefined) {
-    const expected = Boolean(ctx.args.proactive);
-    if (!delivered.some((item) => item.proactive === expected)) {
-      throw new Error(`shareDelivered: no delivered message with proactive=${String(expected)}`);
-    }
+}
+
+async function shareDeferred(ctx: AssertContext): Promise<void> {
+  const snapshot = ctx.runtime.getPanelSnapshot();
+  const deferred = filterInboxByStatus(snapshot.inbox, "deferred", ctx.args);
+  if (deferred.length === 0) {
+    throw new Error("shareDeferred: no matching deferred inbox message");
   }
 }
 
@@ -249,6 +285,7 @@ export const defaultAssertions: Readonly<Record<string, AssertionFn>> = {
   threadContinues,
   commitmentProgressed,
   shareDelivered,
+  shareDeferred,
   noOverDisturb,
   grantGone,
   budgetMonotone,

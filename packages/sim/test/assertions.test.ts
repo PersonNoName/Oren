@@ -53,4 +53,64 @@ describe("shareDelivered integration", () => {
     expect(report.ok).toBe(true);
     expect(report.stepsCompleted).toBe(2);
   });
+
+  it("shareDelivered filters by reason and textIncludes", async () => {
+    const inbox = [
+      {
+        deliveryId: "d1",
+        text: "Other share",
+        reason: "proactive share",
+        status: "delivered" as const,
+        proactive: true,
+        at: "2026-01-02T12:05:00.000Z",
+      },
+      {
+        deliveryId: "d2",
+        text: "Here is a quiet-hours proactive update.",
+        reason: "quiet share",
+        status: "delivered" as const,
+        proactive: true,
+        at: "2026-01-05T08:30:00.000Z",
+      },
+    ];
+    await expect(
+      defaultAssertions.shareDelivered!({
+        runtime: { getPanelSnapshot: () => ({ inbox }) } as never,
+        orenId: "oren-1",
+        checkpoints: new Map(),
+        clock: { now: () => "2026-01-05T08:30:00.000Z" } as never,
+        args: {
+          proactive: true,
+          reason: "quiet share",
+          textIncludes: "quiet-hours proactive update",
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("shareDeferred matches deferred inbox rows", async () => {
+    const inbox = [
+      {
+        deliveryId: "d1",
+        text: "Here is a quiet-hours proactive update on the mystery progress.",
+        reason: "quiet share",
+        status: "deferred" as const,
+        deferUntil: "2026-01-05T08:00:00.000Z",
+        at: "2026-01-04T23:00:00.000Z",
+      },
+    ];
+    await expect(
+      defaultAssertions.shareDeferred!({
+        runtime: { getPanelSnapshot: () => ({ inbox }) } as never,
+        orenId: "oren-1",
+        checkpoints: new Map(),
+        clock: { now: () => "2026-01-04T23:00:00.000Z" } as never,
+        args: {
+          proactive: true,
+          reason: "quiet share",
+          textIncludes: "quiet-hours proactive update",
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
 });
