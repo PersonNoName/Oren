@@ -75,14 +75,17 @@ Cognition 提出 ExpressToUser
 
 ```text
 reachability: {
-  quietHours: { start: "HH:MM", end: "HH:MM", timezone: "local" } | null
+  quietHours: { start: "HH:MM", end: "HH:MM", timezone: "UTC" } | null
   maxProactivePerDay: number    // 默认 3
   deferWhenQuiet: true          // 首版固定 true；不做硬静音丢弃
+  proactiveDayKey: string | null   // UTC "YYYY-MM-DD"
+  proactiveCountToday: number
 }
 ```
 
-- `createInitialLifeState`：提供合理默认（如 `quietHours: 22:00–08:00`、`maxProactivePerDay: 3`）。
+- `createInitialLifeState`：提供合理默认（`quietHours: 22:00–08:00` UTC、`maxProactivePerDay: 3`、计数为 0）。
 - 旧快照缺字段时：加载路径填入上述默认（与「安全默认」一致：有边界，而非无限主动打扰）。
+- 首版时区锁定 **UTC**，保证离线测试与回放确定性；主机 local 时区留给后续。
 
 事件：
 
