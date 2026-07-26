@@ -10,7 +10,7 @@ import type { NavSection } from "@/lib/nav";
 
 export default function Page() {
   const [active, setActive] = useState<NavSection>("overview");
-  const { snapshot, error } = usePanelSnapshot(2000);
+  const { snapshot, error, refresh } = usePanelSnapshot(2000);
 
   return (
     <PanelShell
@@ -24,7 +24,12 @@ export default function Page() {
       detail={
         <>
           <ErrorBanner error={error} />
-          <DetailPane section={active} snapshot={snapshot} error={error} />
+          <DetailPane
+            section={active}
+            snapshot={snapshot}
+            error={error}
+            onMutated={refresh}
+          />
         </>
       }
       chat={<div className="chat-placeholder">Chat placeholder</div>}

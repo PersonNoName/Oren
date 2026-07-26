@@ -13,34 +13,39 @@ type Props = {
   section: NavSection;
   snapshot: PanelSnapshot | null;
   error: string | null;
+  onMutated: () => void | Promise<void>;
   children?: ReactNode;
 };
 
-function renderView(section: NavSection, snapshot: PanelSnapshot) {
+function renderView(
+  section: NavSection,
+  snapshot: PanelSnapshot,
+  onMutated: () => void | Promise<void>,
+) {
   switch (section) {
     case "overview":
       return <OverviewView snapshot={snapshot} />;
     case "inbox":
       return <InboxView snapshot={snapshot} />;
     case "commitments":
-      return <CommitmentsView snapshot={snapshot} />;
+      return <CommitmentsView snapshot={snapshot} onMutated={onMutated} />;
     case "grants":
-      return <GrantsView snapshot={snapshot} />;
+      return <GrantsView snapshot={snapshot} onMutated={onMutated} />;
     case "budgets":
       return <BudgetsView snapshot={snapshot} />;
     case "reachability":
-      return <ReachabilityView snapshot={snapshot} />;
+      return <ReachabilityView snapshot={snapshot} onMutated={onMutated} />;
     case "ledger":
       return <LedgerView snapshot={snapshot} />;
   }
 }
 
-export function DetailPane({ section, snapshot, error, children }: Props) {
+export function DetailPane({ section, snapshot, error, onMutated, children }: Props) {
   return (
     <div className="detail-pane">
       {snapshot ? (
         <>
-          {renderView(section, snapshot)}
+          {renderView(section, snapshot, onMutated)}
           {children}
         </>
       ) : error ? null : (
