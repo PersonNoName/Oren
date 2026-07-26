@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { DetailPane } from "@/components/DetailPane";
 import { ErrorBanner } from "@/components/ErrorBanner";
 import { NavRail } from "@/components/NavRail";
 import { PanelShell } from "@/components/PanelShell";
@@ -10,10 +11,6 @@ import type { NavSection } from "@/lib/nav";
 export default function Page() {
   const [active, setActive] = useState<NavSection>("overview");
   const { snapshot, error } = usePanelSnapshot(2000);
-
-  const snapshotSnippet = snapshot
-    ? JSON.stringify(snapshot, null, 2).slice(0, 800) + (JSON.stringify(snapshot).length > 800 ? "…" : "")
-    : "Loading…";
 
   return (
     <PanelShell
@@ -27,10 +24,7 @@ export default function Page() {
       detail={
         <>
           <ErrorBanner error={error} />
-          <div className="detail-placeholder">
-            <h2>{active}</h2>
-            <pre>{snapshotSnippet}</pre>
-          </div>
+          <DetailPane section={active} snapshot={snapshot} error={error} />
         </>
       }
       chat={<div className="chat-placeholder">Chat placeholder</div>}

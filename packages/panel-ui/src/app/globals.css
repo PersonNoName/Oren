@@ -114,20 +114,126 @@ html, body {
   font-size: 0.875rem;
 }
 
-.detail-placeholder,
 .chat-placeholder {
+  padding: 1rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.detail-pane {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.detail-view {
   padding: 1rem;
 }
 
-.detail-placeholder h2 {
-  margin: 0 0 0.75rem;
+.detail-section {
+  margin-bottom: 1.25rem;
+}
+
+.detail-section:last-child {
+  margin-bottom: 0;
+}
+
+.detail-section-title {
+  margin: 0 0 0.5rem;
   font-family: var(--serif);
-  font-size: 1.125rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.detail-count {
+  font-family: var(--sans);
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.detail-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.list-item {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--ink);
+  padding: 8px;
+  font-size: 0.8125rem;
+}
+
+.status-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.status-row-status {
   font-weight: 600;
   text-transform: capitalize;
 }
 
-.detail-placeholder pre {
+.status-row-time,
+.list-item-time {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+}
+
+.status-row-text,
+.list-item-primary {
+  line-height: 1.4;
+}
+
+.status-row-reason,
+.list-item-secondary {
+  margin-top: 0.25rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.list-item-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.list-item-id {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+}
+
+.list-item-status {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.list-item-flag {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.list-item-flag-revoked {
+  color: var(--accent-muted);
+}
+
+.detail-json {
   margin: 0;
   padding: 0.75rem;
   background: var(--surface);
@@ -138,9 +244,4 @@ html, body {
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
-}
-
-.chat-placeholder {
-  color: var(--muted);
-  font-size: 0.875rem;
 }
