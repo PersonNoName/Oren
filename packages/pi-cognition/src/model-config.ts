@@ -66,10 +66,14 @@ export type ResolveModelConfigOptions = {
   readonly loadFile?: boolean;
 };
 
+type LoadFileConfigResult =
+  | { readonly ok: true; readonly config?: OrenFileConfig }
+  | { readonly ok: false; readonly kind: "invalid"; readonly reason: string };
+
 function loadFileConfig(
   env: Readonly<Record<string, string | undefined>>,
   options?: ResolveModelConfigOptions,
-): { readonly ok: true; readonly config?: OrenFileConfig } | ModelConfigResult {
+): LoadFileConfigResult {
   const explicit = options?.configPath ?? env[OREN_CONFIG_ENV]?.trim();
   if (explicit) {
     if (!existsSync(explicit)) {

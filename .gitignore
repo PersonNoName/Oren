@@ -1,4 +1,5 @@
 .DS_Store
+oren.json
 .env
 .env.*
 !.env.example

@@ -29,6 +29,22 @@ export OREN_MODEL_ID=<model id>
 # plus the provider's standard API key env var (e.g. ANTHROPIC_API_KEY)
 ```
 
+Or create `oren.json` in the project root (see `oren.json.example`):
+
+```json
+{
+  "model": {
+    "provider": "anthropic",
+    "id": "claude-sonnet-4-5"
+  }
+}
+```
+
+Copy: `cp oren.json.example oren.json` then edit. API keys still come from
+the provider's env var (never put secrets in `oren.json`).  
+`OREN_MODEL_PROVIDER` / `OREN_MODEL_ID` override the file when set.  
+`OREN_CONFIG` points at an alternate config path.
+
 - `npm run smoke` — full vertical slice (message → immediate read → durable
   increment → wait → receipt → new episode → scheduled wake → restart replay)
   against the configured model.
