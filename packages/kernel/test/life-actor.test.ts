@@ -173,6 +173,125 @@ describe("LifeActor", () => {
     ]);
   });
 
+  it("records a commit separately from assistant speech and episode completion", () => {
+    const events: EventEnvelope[] = [];
+    let version = 2;
+    const repository: LifeRepositoryPort = {
+      loadState: () => ({
+        ...createInitialLifeState("oren-1", "person-1"),
+        version,
+      }),
+      loadEvents: () => events,
+      commit: (_orenId, accepted) => {
+        events.push(...accepted);
+        version += accepted.length;
+      },
+      commitIfVersion: (_orenId, expectedVersion, accepted) => {
+        if (version !== expectedVersion) return false;
+        events.push(...accepted);
+        version += accepted.length;
+        return true;
+      },
+      commitInbox: () => false,
+      commitDeliverInbox: () => false,
+    };
+    let id = 0;
+    const actor = new LifeActor(
+      repository,
+      () => `event-${++id}`,
+      () => "2026-07-26T00:00:00.000Z",
+    );
+    const job: CognitionJob = {
+      orenId: "oren-1",
+      episodeId: "episode-1",
+      baseStateVersion: 2,
+      triggerKind: "foreground_user",
+      correlationId: "corr-1",
+    };
+
+    const receipt = actor.acceptCognitionCommit(job, "commit-1", [{
+      type: "AdvanceThread",
+      threadId: "speech",
+      summary: "Natural conversation",
+    }]);
+    expect(receipt).toEqual({ accepted: true, stateVersion: 4 });
+
+    const message = actor.recordAssistantMessage(
+      { ...job, baseStateVersion: receipt.stateVersion! },
+      {
+        messageId: "message-1",
+        text: "你好。",
+        status: "complete",
+      },
+    );
+    expect(message).toEqual({ accepted: true, stateVersion: 5 });
+
+    const completed = actor.completeCognition(
+      { ...job, baseStateVersion: message.stateVersion! },
+      "stop",
+      { totalTokens: 8 },
+    );
+    expect(completed).toEqual({ accepted: true, stateVersion: 6 });
+    expect(events.map(({ payload }) => payload.type)).toEqual([
+      "CognitionCommitAccepted",
+      "ThreadAdvanced",
+      "AssistantMessageDelivered",
+      "CognitionCompleted",
+    ]);
+    expect(events.at(-1)?.payload).toEqual({
+      type: "CognitionCompleted",
+      episodeId: "episode-1",
+      baseStateVersion: 5,
+      reason: "stop",
+      usage: { totalTokens: 8 },
+    });
+    expect(events.at(-1)?.payload).not.toHaveProperty("proposals");
+  });
+
+  it("audits a rejected cognition commit and returns the advanced version", () => {
+    const events: EventEnvelope[] = [];
+    let version = 3;
+    const repository: LifeRepositoryPort = {
+      loadState: () => ({
+        ...createInitialLifeState("oren-1", "person-1"),
+        version,
+      }),
+      loadEvents: () => events,
+      commit: (_orenId, accepted) => {
+        events.push(...accepted);
+        version += accepted.length;
+      },
+      commitIfVersion: (_orenId, expectedVersion, accepted) => {
+        if (version !== expectedVersion) return false;
+        events.push(...accepted);
+        version += accepted.length;
+        return true;
+      },
+      commitInbox: () => false,
+      commitDeliverInbox: () => false,
+    };
+    const actor = new LifeActor(
+      repository,
+      () => "event-rejected",
+      () => "2026-07-26T00:00:00.000Z",
+    );
+    const result = actor.recordCognitionCommitRejected({
+      orenId: "oren-1",
+      episodeId: "episode-1",
+      baseStateVersion: 3,
+      triggerKind: "foreground_user",
+      correlationId: "corr-1",
+    }, "commit-1", "invalid_proposals");
+
+    expect(result).toEqual({ accepted: true, stateVersion: 4 });
+    expect(events[0]?.payload).toEqual({
+      type: "CognitionCommitRejected",
+      episodeId: "episode-1",
+      commitId: "commit-1",
+      reason: "invalid_proposals",
+    });
+  });
+
   it("rejects a cognition result based on an older state version without committing", () => {
     const state = {
       ...createInitialLifeState("oren-1", "person-1"),

@@ -42,6 +42,17 @@ export type EpisodeInterruptionReason =
   | "trigger_priority"
   | "cognition_abort";
 
+export type CognitionFinishReason =
+  | "stop"
+  | "max_steps"
+  | "waiting_for_effect";
+
+export type AssistantMessageStatus = "complete" | "interrupted";
+
+export interface CognitionUsage {
+  readonly totalTokens: number;
+}
+
 export type Proposal =
   | { readonly type: "NoAction"; readonly reason: string }
   | { readonly type: "AdvanceThread"; readonly threadId: ThreadId; readonly summary: string }
@@ -97,7 +108,40 @@ export type CoreEvent =
   | { readonly type: "DispositionUpdated"; readonly disposition: string; readonly reason: string }
   | { readonly type: "CognitionRequested"; readonly episodeId: EpisodeId; readonly baseStateVersion: number; readonly triggerKind: TriggerKind }
   | { readonly type: "AutonomyConsumed"; readonly episodeId: EpisodeId; readonly baseStateVersion: number; readonly amount: number }
-  | { readonly type: "CognitionCompleted"; readonly episodeId: EpisodeId; readonly baseStateVersion: number; readonly proposals: readonly Proposal[] }
+  | {
+      readonly type: "CognitionCompleted";
+      readonly episodeId: EpisodeId;
+      readonly baseStateVersion: number;
+      readonly proposals: readonly Proposal[];
+    }
+  | {
+      readonly type: "CognitionCompleted";
+      readonly episodeId: EpisodeId;
+      readonly baseStateVersion: number;
+      readonly reason: CognitionFinishReason;
+      readonly usage: CognitionUsage;
+    }
+  | {
+      readonly type: "CognitionCommitAccepted";
+      readonly episodeId: EpisodeId;
+      readonly commitId: string;
+      readonly baseStateVersion: number;
+      readonly proposals: readonly Proposal[];
+    }
+  | {
+      readonly type: "CognitionCommitRejected";
+      readonly episodeId: EpisodeId;
+      readonly commitId: string;
+      readonly reason: string;
+    }
+  | {
+      readonly type: "AssistantMessageDelivered";
+      readonly episodeId: EpisodeId;
+      readonly messageId: string;
+      readonly text: string;
+      readonly channel: "panel";
+      readonly status: AssistantMessageStatus;
+    }
   | { readonly type: "CognitionDenied"; readonly episodeId: EpisodeId; readonly reason: string }
   | { readonly type: "CognitionWaitingForEffect"; readonly episodeId: EpisodeId; readonly effectId: EffectId }
   | { readonly type: "CognitionFailed"; readonly episodeId: EpisodeId; readonly message: string }

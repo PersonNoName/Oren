@@ -1,6 +1,8 @@
 import { canonicalizeJson, type JsonObject, type JsonValue } from "./json.js";
 import type {
+  AssistantMessageStatus,
   CommitmentStatus,
+  CognitionFinishReason,
   CoreEvent,
   Effect,
   EpisodeInterruptionReason,
@@ -41,6 +43,12 @@ const HH_MM_PATTERN = /^\d{2}:\d{2}$/;
 const DELIVERY_CAUSES = new Set<unknown>(["quiet_hours", "frequency_cap"]);
 const OBSERVATION_KINDS = new Set<unknown>(["web_search_result", "web_page"]);
 const COMMITMENT_STATUSES = new Set<unknown>(["active", "paused", "done"]);
+const COGNITION_FINISH_REASONS = new Set<unknown>([
+  "stop",
+  "max_steps",
+  "waiting_for_effect",
+]);
+const ASSISTANT_MESSAGE_STATUSES = new Set<unknown>(["complete", "interrupted"]);
 
 function hasKeysWithin(
   value: JsonObject,
@@ -432,9 +440,46 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
           }
         : undefined;
     case "CognitionCompleted": {
+      if (!isString(event.episodeId) || !isNonnegativeSafeInteger(event.baseStateVersion)) {
+        return undefined;
+      }
+      if (hasExactKeys(event, ["type", "episodeId", "baseStateVersion", "proposals"])) {
+        if (!Array.isArray(event.proposals)) return undefined;
+        const proposals = event.proposals.map(canonicalizeProposal);
+        return proposals.every((proposal) => proposal !== undefined)
+          ? {
+              type: "CognitionCompleted",
+              episodeId: event.episodeId,
+              baseStateVersion: event.baseStateVersion,
+              proposals: proposals as Proposal[],
+            }
+          : undefined;
+      }
       if (
-        !hasExactKeys(event, ["type", "episodeId", "baseStateVersion", "proposals"])
-        || !isString(event.episodeId)
+        !hasExactKeys(event, ["type", "episodeId", "baseStateVersion", "reason", "usage"])
+        || !COGNITION_FINISH_REASONS.has(event.reason)
+        || !isRecord(event.usage)
+        || !hasExactKeys(event.usage, ["totalTokens"])
+        || !isNonnegativeSafeInteger(event.usage.totalTokens)
+      ) {
+        return undefined;
+      }
+      return {
+        type: "CognitionCompleted",
+        episodeId: event.episodeId,
+        baseStateVersion: event.baseStateVersion,
+        reason: event.reason as CognitionFinishReason,
+        usage: { totalTokens: event.usage.totalTokens },
+      };
+    }
+    case "CognitionCommitAccepted": {
+      if (
+        !hasExactKeys(
+          event,
+          ["type", "episodeId", "commitId", "baseStateVersion", "proposals"],
+        )
+        || !isNonemptyString(event.episodeId)
+        || !isNonemptyString(event.commitId)
         || !isNonnegativeSafeInteger(event.baseStateVersion)
         || !Array.isArray(event.proposals)
       ) {
@@ -443,13 +488,45 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
       const proposals = event.proposals.map(canonicalizeProposal);
       return proposals.every((proposal) => proposal !== undefined)
         ? {
-            type: "CognitionCompleted",
+            type: "CognitionCommitAccepted",
             episodeId: event.episodeId,
+            commitId: event.commitId,
             baseStateVersion: event.baseStateVersion,
             proposals: proposals as Proposal[],
           }
         : undefined;
     }
+    case "CognitionCommitRejected":
+      return hasExactKeys(event, ["type", "episodeId", "commitId", "reason"])
+        && isNonemptyString(event.episodeId)
+        && isNonemptyString(event.commitId)
+        && isNonemptyString(event.reason)
+        ? {
+            type: "CognitionCommitRejected",
+            episodeId: event.episodeId,
+            commitId: event.commitId,
+            reason: event.reason,
+          }
+        : undefined;
+    case "AssistantMessageDelivered":
+      return hasExactKeys(
+        event,
+        ["type", "episodeId", "messageId", "text", "channel", "status"],
+      )
+        && isNonemptyString(event.episodeId)
+        && isNonemptyString(event.messageId)
+        && isDeliveryText(event.text)
+        && event.channel === "panel"
+        && ASSISTANT_MESSAGE_STATUSES.has(event.status)
+        ? {
+            type: "AssistantMessageDelivered",
+            episodeId: event.episodeId,
+            messageId: event.messageId,
+            text: event.text,
+            channel: "panel",
+            status: event.status as AssistantMessageStatus,
+          }
+        : undefined;
     case "CognitionDenied":
       return hasExactKeys(event, ["type", "episodeId", "reason"])
         && isString(event.episodeId)

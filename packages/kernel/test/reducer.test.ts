@@ -62,6 +62,29 @@ describe("reduceLifeState", () => {
     });
   });
 
+  it("keeps assistant delivery state-neutral apart from chronicle versioning", () => {
+    const initial = {
+      ...createInitialLifeState("oren-1", "person-1"),
+      reachability: {
+        ...createInitialLifeState("oren-1", "person-1").reachability!,
+        proactiveDayKey: "2026-07-26",
+        proactiveCountToday: 2,
+      },
+    };
+
+    const next = reduceLifeState(initial, envelope({
+      type: "AssistantMessageDelivered",
+      episodeId: "episode-1",
+      messageId: "message-1",
+      text: "A foreground answer",
+      channel: "panel",
+      status: "complete",
+    }));
+
+    expect(next.version).toBe(initial.version + 1);
+    expect(next.reachability).toEqual(initial.reachability);
+  });
+
   it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 6])(
     "rejects hostile autonomy amount %s without mutating state",
     (amount) => {

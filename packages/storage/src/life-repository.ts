@@ -449,6 +449,18 @@ export class SqliteLifeRepository {
         continue;
       }
       if (event.payload.type === "CognitionCompleted") {
+        if ("reason" in event.payload) {
+          for (const [key, job] of pending) {
+            if (
+              job.orenId === event.orenId
+              && job.episodeId === event.payload.episodeId
+              && job.correlationId === event.correlationId
+            ) {
+              pending.delete(key);
+            }
+          }
+          continue;
+        }
         pending.delete(this.cognitionJobKey({
           orenId: event.orenId,
           episodeId: event.payload.episodeId,

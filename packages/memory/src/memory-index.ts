@@ -156,6 +156,7 @@ export class SqliteMemoryIndex implements MemoryPort {
         });
         return;
       case "CognitionCompleted": {
+        if (!("proposals" in payload)) return;
         for (const [proposalIndex, proposal] of payload.proposals.entries()) {
           if (proposal.type !== "ExpressToUser") continue;
           await this.upsertEntry({
