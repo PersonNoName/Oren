@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CapabilityDescriptor, Proposal } from "@oren/kernel";
-import { PiCognitionAdapter } from "../src/index.js";
+import { PiCognitionAdapter, toLlmToolName } from "../src/index.js";
 import {
   assistantMessage,
   createCommitStream,
@@ -82,7 +82,7 @@ describe("PiCognitionAdapter", () => {
       assistantMessage([{
         type: "toolCall",
         id: "lookup-1",
-        name: immediateDescriptor.name,
+        name: toLlmToolName(immediateDescriptor.name),
         arguments: { query: "hello" },
       }]),
       assistantMessage([{
@@ -148,7 +148,7 @@ describe("PiCognitionAdapter", () => {
           {
             type: "toolCall",
             id: "lookup-1",
-            name: immediateDescriptor.name,
+            name: toLlmToolName(immediateDescriptor.name),
             arguments: { query: "must not execute" },
           },
         ]),
@@ -174,7 +174,7 @@ describe("PiCognitionAdapter", () => {
         assistantMessage([{
           type: "toolCall",
           id: "create-1",
-          name: persistentDescriptor.name,
+          name: toLlmToolName(persistentDescriptor.name),
           arguments: { title: "Meet" },
         }]),
       ], () => streamCalls++),
@@ -207,13 +207,13 @@ describe("PiCognitionAdapter", () => {
           {
             type: "toolCall",
             id: "create-1",
-            name: persistentDescriptor.name,
+            name: toLlmToolName(persistentDescriptor.name),
             arguments: { title: "Meet" },
           },
           {
             type: "toolCall",
             id: "create-2",
-            name: persistentDescriptor.name,
+            name: toLlmToolName(persistentDescriptor.name),
             arguments: { title: "Must not execute" },
           },
           {
@@ -283,7 +283,7 @@ describe("PiCognitionAdapter", () => {
         assistantMessage([{
           type: "toolCall",
           id: "lookup-1",
-          name: immediateDescriptor.name,
+          name: toLlmToolName(immediateDescriptor.name),
           arguments: { query: "hang" },
         }]),
       ]);
@@ -399,13 +399,13 @@ describe("PiCognitionAdapter", () => {
         assistantMessage([{
           type: "toolCall",
           id: "lookup-1",
-          name: immediateDescriptor.name,
+          name: toLlmToolName(immediateDescriptor.name),
           arguments: { query: "one" },
         }]),
         assistantMessage([{
           type: "toolCall",
           id: "lookup-2",
-          name: immediateDescriptor.name,
+          name: toLlmToolName(immediateDescriptor.name),
           arguments: { query: "two" },
         }]),
       ], () => streamCalls++),
@@ -482,7 +482,7 @@ describe("PiCognitionAdapter", () => {
         assistantMessage([{
           type: "toolCall",
           id: "lookup-1",
-          name: immediateDescriptor.name,
+          name: toLlmToolName(immediateDescriptor.name),
           arguments: { query: "hello" },
         }], 5),
         assistantMessage([{
@@ -633,6 +633,57 @@ describe("PiCognitionAdapter", () => {
     expect(result).toEqual({
       kind: "failed",
       message: "Capability name is reserved: oren_commit",
+      usage: { totalTokens: 0 },
+    });
+  });
+
+  it("rejects capabilities whose sanitized LLM names collide", async () => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({
+        capabilities: [
+          { ...immediateDescriptor, name: "foo.bar" },
+          { ...immediateDescriptor, name: "foo_bar" },
+        ],
+      }),
+      { invoke: async () => ({ kind: "completed", output: null }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(result).toEqual({
+      kind: "failed",
+      message: 'Capability LLM tool names collide after sanitization: "foo.bar" and "foo_bar" both map to "foo_bar"',
+      usage: { totalTokens: 0 },
+    });
+  });
+
+  it("rejects a capability whose sanitized name collides with oren_commit", async () => {
+    let streamCalls = 0;
+    const adapter = new PiCognitionAdapter({
+      model: createMockModel(),
+      streamFn: createSequenceStream([], () => streamCalls++),
+      messageTimestamp: () => 1_700_000_000_000,
+    });
+
+    const result = await adapter.run(
+      createFrame({
+        capabilities: [{ ...immediateDescriptor, name: "oren.commit" }],
+      }),
+      { invoke: async () => ({ kind: "completed", output: null }) },
+      new AbortController().signal,
+    );
+
+    expect(streamCalls).toBe(0);
+    expect(result).toEqual({
+      kind: "failed",
+      message: "Capability LLM tool name collides with reserved oren_commit: oren.commit",
       usage: { totalTokens: 0 },
     });
   });

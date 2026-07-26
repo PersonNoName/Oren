@@ -70,6 +70,18 @@ describe("resolveModelConfig", () => {
     expect(result.reason).not.toContain("sk-");
   });
 
+  it("hints when another provider's API key is set but provider mismatches", () => {
+    const result = resolveModelConfig({
+      [MODEL_PROVIDER_ENV]: "anthropic",
+      [MODEL_ID_ENV]: "claude-sonnet-4-5",
+      DEEPSEEK_API_KEY: "sk-not-real",
+    }, { loadFile: false });
+    expect(result).toMatchObject({ ok: false, kind: "invalid" });
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toMatch(/DEEPSEEK_API_KEY|deepseek/i);
+    expect(result.reason).toMatch(/provider is "anthropic"/i);
+  });
+
   it("resolves a model and streamFn when config and key are present", () => {
     const { provider, modelId, keyName } = FIXTURE;
     const result = resolveModelConfig({

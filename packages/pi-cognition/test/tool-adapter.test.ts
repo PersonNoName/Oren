@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CapabilityDescriptor } from "@oren/kernel";
-import { toPiTool } from "../src/index.js";
+import { toLlmToolName, toPiTool } from "../src/index.js";
 import { createFrame } from "./fixtures.js";
 
 const descriptor: CapabilityDescriptor = {
@@ -19,11 +19,24 @@ const descriptor: CapabilityDescriptor = {
   timeoutMs: 1000,
 };
 
+describe("toLlmToolName", () => {
+  it("replaces characters outside [a-zA-Z0-9_-] with underscores", () => {
+    expect(toLlmToolName("test.increment")).toBe("test_increment");
+    expect(toLlmToolName("web.search")).toBe("web_search");
+    expect(toLlmToolName("oren_commit")).toBe("oren_commit");
+  });
+});
+
 describe("toPiTool", () => {
-  it("returns an immediate capability result without terminating", async () => {
+  it("exposes a sanitized LLM tool name while invoking the original descriptor", async () => {
     const invoke = vi.fn(async () => ({ kind: "completed", output: { value: 2 } } as const));
     const tool = toPiTool(descriptor, createFrame(), { invoke });
     const signal = new AbortController().signal;
+
+    expect(tool.name).toBe("test_increment");
+    expect(tool.label).toBe("test_increment");
+    expect(tool.description).toContain("test_increment");
+    expect(tool.description).toContain("持久能力");
 
     const result = await tool.execute("tool-1", { by: 1 }, signal, undefined);
 
@@ -58,7 +71,7 @@ describe("toPiTool", () => {
     });
     expect(result.content).toEqual([{
       type: "text",
-      text: "External effect queued; execution is pending receipt effect-1.",
+      text: "持久效应已排队，等待回执 effect-1；本轮思考结束，请勿重复调用同一持久能力。",
     }]);
   });
 });

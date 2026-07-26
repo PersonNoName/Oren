@@ -205,6 +205,51 @@ export class SqliteMemoryIndex implements MemoryPort {
         });
         return;
       }
+      case "EffectCompleted": {
+        const receipt = JSON.stringify(payload.receipt);
+        const clipped = receipt.length > 240 ? `${receipt.slice(0, 239)}…` : receipt;
+        await this.upsertEntry({
+          memoryId: `mem:${envelope.eventId}`,
+          orenId: envelope.orenId,
+          kind: "external_fact",
+          text: `外部效应回执：effectId=${payload.effectId} 已完成，回执=${clipped}`,
+          sourceEventId: envelope.eventId,
+          occurredAt: envelope.occurredAt,
+          confidence: 0.9,
+          reviewCondition: null,
+          threadId: null,
+          recallability: "active",
+        });
+        return;
+      }
+      case "EffectFailed":
+        await this.upsertEntry({
+          memoryId: `mem:${envelope.eventId}`,
+          orenId: envelope.orenId,
+          kind: "external_fact",
+          text: `外部效应回执：effectId=${payload.effectId} 失败（${payload.code}: ${payload.message}）`,
+          sourceEventId: envelope.eventId,
+          occurredAt: envelope.occurredAt,
+          confidence: 0.5,
+          reviewCondition: null,
+          threadId: null,
+          recallability: "active",
+        });
+        return;
+      case "EffectUncertain":
+        await this.upsertEntry({
+          memoryId: `mem:${envelope.eventId}`,
+          orenId: envelope.orenId,
+          kind: "external_fact",
+          text: `外部效应回执：effectId=${payload.effectId} 结果不确定（${payload.message}）`,
+          sourceEventId: envelope.eventId,
+          occurredAt: envelope.occurredAt,
+          confidence: 0.5,
+          reviewCondition: null,
+          threadId: null,
+          recallability: "active",
+        });
+        return;
       case "BeliefRevised": {
         const existing = this.db.prepare(`
           SELECT text FROM memory_entries WHERE memory_id = ? AND oren_id = ?

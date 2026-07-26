@@ -17,7 +17,7 @@ import type { Static } from "typebox";
 import { Check } from "typebox/value";
 import { CommitSchema } from "./proposal-schema.js";
 import { systemPrompt, userPrompt } from "./prompts.js";
-import { toPiTool } from "./tool-adapter.js";
+import { toLlmToolName, toPiTool } from "./tool-adapter.js";
 
 const COMMIT_TOOL_NAME = "oren_commit";
 
@@ -61,6 +61,14 @@ export class PiCognitionAdapter implements CognitionPort {
         usage: { totalTokens },
       };
     }
+    const llmNameCollision = findLlmToolNameCollision(frame.capabilities);
+    if (llmNameCollision !== null) {
+      return {
+        kind: "failed",
+        message: llmNameCollision,
+        usage: { totalTokens },
+      };
+    }
     if (frame.maxSteps === 0) {
       return {
         kind: "failed",
@@ -71,8 +79,8 @@ export class PiCognitionAdapter implements CognitionPort {
 
     const commitTool: AgentTool<typeof CommitSchema> = {
       name: COMMIT_TOOL_NAME,
-      label: "Commit episode",
-      description: "Submit up to 16 typed proposals and finish this cognitive episode.",
+      label: "提交本轮提议",
+      description: "提交最多 16 条类型化提议并结束本轮认知。",
       parameters: CommitSchema,
       executionMode: "sequential",
       prepareArguments(args: unknown) {
@@ -202,4 +210,22 @@ function waitingEffectFromDetails(details: unknown): string | null {
     && typeof candidate.effectId === "string"
     ? candidate.effectId
     : null;
+}
+
+function findLlmToolNameCollision(
+  capabilities: LifeFrame["capabilities"],
+): string | null {
+  const seen = new Map<string, string>();
+  for (const { name } of capabilities) {
+    const llmName = toLlmToolName(name);
+    if (llmName === COMMIT_TOOL_NAME) {
+      return `Capability LLM tool name collides with reserved ${COMMIT_TOOL_NAME}: ${name}`;
+    }
+    const prior = seen.get(llmName);
+    if (prior !== undefined) {
+      return `Capability LLM tool names collide after sanitization: "${prior}" and "${name}" both map to "${llmName}"`;
+    }
+    seen.set(llmName, name);
+  }
+  return null;
 }

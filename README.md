@@ -8,6 +8,8 @@ scheduled wakes in SQLite, then rehydrates the same `LifeState` after restart.
 
 ```bash
 npm install
+# If NODE_ENV=production, install still needs TypeScript for build/smoke:
+#   npm install --include=dev
 npm test
 npm run typecheck
 npm run build
@@ -21,29 +23,34 @@ state replay.
 
 ## Real-model commands (optional, credential-gated)
 
-Automated tests never call a real model. To run the manual paths, set:
+Automated tests never call a real model. To run the manual paths:
+
+1. Copy `oren.json.example` → `oren.json` and set `model.provider` / `model.id`
+   (API keys must **not** go in this file).
+2. Put the provider key in a local `.env` (see `.env.example`), then load it
+   without pasting into chat/history, e.g. `set -a && source .env && set +a`.
+   Prefer a secrets manager / direnv in shared environments. If a key was ever
+   pasted into a terminal transcript, rotate it.
+
+DeepSeek example:
 
 ```bash
-export OREN_MODEL_PROVIDER=<pi-ai provider id>
-export OREN_MODEL_ID=<model id>
-# plus the provider's standard API key env var (e.g. ANTHROPIC_API_KEY)
+# oren.json: { "model": { "provider": "deepseek", "id": "deepseek-v4-pro" } }
+# .env: DEEPSEEK_API_KEY=...
+npm run smoke
 ```
 
-Or create `oren.json` in the project root (see `oren.json.example`):
+Anthropic example:
 
-```json
-{
-  "model": {
-    "provider": "anthropic",
-    "id": "claude-sonnet-4-5"
-  }
-}
+```bash
+# oren.json: { "model": { "provider": "anthropic", "id": "claude-sonnet-4-5" } }
+# .env: ANTHROPIC_API_KEY=...
 ```
 
-Copy: `cp oren.json.example oren.json` then edit. API keys still come from
-the provider's env var (never put secrets in `oren.json`).  
-`OREN_MODEL_PROVIDER` / `OREN_MODEL_ID` override the file when set.  
-`OREN_CONFIG` points at an alternate config path.
+Env overrides (optional): `OREN_MODEL_PROVIDER` / `OREN_MODEL_ID` override the
+file when set. `OREN_CONFIG` points at an alternate config path. If the
+configured provider's key is missing but another provider's key is present,
+`resolveModelConfig` prints a mismatch hint.
 
 - `npm run smoke` — full vertical slice (message → immediate read → durable
   increment → wait → receipt → new episode → scheduled wake → restart replay)

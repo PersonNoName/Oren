@@ -144,4 +144,19 @@ describe("SqliteMemoryIndex projection", () => {
     expect(rebuilt).toEqual(incremental);
     expect(index.cursor()).toBe(3);
   });
+
+  it("projects effect receipts into external_fact memories", async () => {
+    const index = makeIndex();
+    await index.project([
+      record(1, {
+        type: "EffectCompleted",
+        effectId: "effect-1",
+        receipt: { value: 3 },
+      }),
+    ]);
+    const entries = await index.recall({ orenId: "oren-1", kinds: ["external_fact"] });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.text).toContain("effect-1");
+    expect(entries[0]!.text).toContain("已完成");
+  });
 });

@@ -51,7 +51,7 @@
 - system prompt 分节，顺序固定：
   1. ethos 正文（按 frame.identity.ethosVersion 取）；
   2. 生命导演职责：她在决定「现在值得想什么」，不是在完成一次问答；
-  3. Proposal 纪律：只有 `oren_commit` 提交的类型化 Proposal 生效，类型限于 Phase 1 冻结的五种（`NoAction` / `AdvanceThread` / `UpdateDisposition` / `ExpressToUser` / `ScheduleWake`）；事实与判断分开表述；没有 completed 回执不得声称外部动作已完成；排队中的 Effect 仍是未完成；
+  3. Proposal 纪律：只有 `oren_commit` 提交的类型化 Proposal 生效，类型限于十种（`NoAction` / `AdvanceThread` / `UpdateDisposition` / `ExpressToUser` / `ScheduleWake` / `Remember` / `ReviseBelief` / `Forget` / `UpsertCommitment` / `UpdateCommitmentStatus`）；事实与判断分开表述；没有 completed 回执不得声称外部动作已完成；排队中的 Effect 仍是未完成；
   4. 停止与唤醒规则：episode 有界（maxSteps）；结束时必须处于「已提交 Proposal」「等待持久 Effect」或「休息」之一；需要再次醒来时用 `ScheduleWake` 类 Proposal 明确安排；
   5. 能力通道语义：即时能力当轮返回，持久能力结束本 episode、回执后以新 episode 继续；
 - user prompt 结构化呈现：trigger 种类与摘要、当前 focus 与活跃线索、关系上下文；不再裸 `JSON.stringify`；

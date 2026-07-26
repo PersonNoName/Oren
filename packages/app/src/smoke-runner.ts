@@ -11,36 +11,80 @@ import type { Proposal } from "@oren/kernel";
 import { PiCognitionAdapter, resolveModelConfig } from "@oren/pi-cognition";
 import { resolveWebConfig } from "@oren/web";
 import { LifeRuntime } from "./life-runtime.js";
+import { redactSecrets } from "./redact.js";
 
 export interface EpisodeRecord {
   readonly trigger: string;
   readonly kind: CognitionOutcome["kind"];
   readonly proposals: readonly Proposal[];
   readonly totalTokens: number;
+  readonly message?: string;
 }
 
-function assertVerticalSliceEpisodes(
+export function assertVerticalSliceEpisodes(
   episodes: readonly EpisodeRecord[],
 ): readonly string[] {
+  const failures: string[] = [];
+
+  const failed = episodes.filter(({ kind }) => kind === "failed");
+  for (const episode of failed) {
+    failures.push(
+      `unexpected failed episode trigger=${episode.trigger}`
+        + (episode.message !== undefined ? ` message=${episode.message}` : ""),
+    );
+  }
+
+  const waitingEpisodes = episodes.filter(({ kind }) => kind === "waiting_for_effect");
+  if (waitingEpisodes.length === 0) {
+    failures.push("expected at least one waiting_for_effect episode (durable effect invocation)");
+  } else if (waitingEpisodes.length > 1) {
+    failures.push(
+      `expected at most one waiting_for_effect episode, got ${waitingEpisodes.length}`,
+    );
+  }
+
+  const waitingOnEffectResult = episodes.filter(
+    ({ trigger, kind }) => trigger === "effect_result" && kind === "waiting_for_effect",
+  );
+  if (waitingOnEffectResult.length > 0) {
+    failures.push(
+      "effect_result episodes must not re-invoke durable effects (waiting_for_effect)",
+    );
+  }
+
   const waitingIndex = episodes.findIndex(({ kind }) => kind === "waiting_for_effect");
   if (waitingIndex === -1) {
-    return ["expected at least one waiting_for_effect episode (durable effect invocation)"];
+    return failures;
   }
+
   const completedAfterEffect = episodes
     .slice(waitingIndex + 1)
     .find(({ kind }) => kind === "completed");
   if (!completedAfterEffect) {
-    return ["expected a completed episode after waiting_for_effect"];
+    failures.push("expected a completed episode after waiting_for_effect");
+    return failures;
   }
+
   const hasScheduleWake = completedAfterEffect.proposals.some(
     ({ type }) => type === "ScheduleWake",
   );
   if (!hasScheduleWake) {
-    return [
+    failures.push(
       "expected the post-effect completed episode to include a ScheduleWake proposal",
-    ];
+    );
   }
-  return [];
+
+  const hasJudgment = episodes.some(({ proposals }) =>
+    proposals.some(
+      (proposal) =>
+        proposal.type === "Remember" && proposal.kind === "oren_judgment",
+    ),
+  );
+  if (!hasJudgment) {
+    failures.push("expected a Remember proposal with kind=oren_judgment");
+  }
+
+  return failures;
 }
 
 class RecordingCognition implements CognitionPort {
@@ -59,6 +103,7 @@ class RecordingCognition implements CognitionPort {
       kind: outcome.kind,
       proposals: outcome.kind === "completed" ? outcome.proposals : [],
       totalTokens: outcome.usage.totalTokens,
+      ...(outcome.kind === "failed" ? { message: outcome.message } : {}),
     });
     return outcome;
   }
@@ -79,7 +124,7 @@ export async function runSmoke(
       configSearchFrom ? { searchFrom: configSearchFrom } : undefined,
     );
     if (!config.ok) {
-      log(config.reason);
+      log(redactSecrets(config.reason));
       return config.kind === "unconfigured" ? 0 : 1;
     }
     inner = new PiCognitionAdapter({
@@ -122,7 +167,10 @@ export async function runSmoke(
       const afterRestart = second.inspect("oren-smoke");
       for (const episode of recorder.episodes) {
         log(`episode trigger=${episode.trigger} outcome=${episode.kind} `
-          + `totalTokens=${episode.totalTokens}`);
+          + `totalTokens=${episode.totalTokens}`
+          + (episode.message !== undefined
+            ? ` message=${redactSecrets(episode.message)}`
+            : ""));
         for (const proposal of episode.proposals) {
           log(`  proposal ${JSON.stringify(proposal)}`);
         }
@@ -180,7 +228,7 @@ export async function runSmoke(
       await second.close();
     }
   } catch (error) {
-    log(`FAIL: ${error instanceof Error ? error.message : String(error)}`);
+    log(`FAIL: ${redactSecrets(error instanceof Error ? error.message : String(error))}`);
     try {
       await first.close();
     } catch {

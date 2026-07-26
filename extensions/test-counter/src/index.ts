@@ -12,7 +12,7 @@ export function createTestCounterExtension(): OrenExtension {
         {
           extensionId: "test-counter",
           name: "test.read",
-          description: "Read the counter",
+          description: "即时读取计数器当前值",
           inputSchema: { type: "object", additionalProperties: false },
           outputSchema: { type: "number" },
           permissionRequirements: [],
@@ -23,7 +23,7 @@ export function createTestCounterExtension(): OrenExtension {
         {
           extensionId: "test-counter",
           name: "test.increment",
-          description: "Increment the counter",
+          description: "持久地将计数器加一；调用后本轮结束，需等回执",
           inputSchema: {
             type: "object",
             properties: { by: { type: "number" } },

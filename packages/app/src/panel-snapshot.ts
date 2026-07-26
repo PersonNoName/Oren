@@ -23,6 +23,12 @@ function summarizeEvent(event: EventEnvelope): string | undefined {
   switch (payload.type) {
     case "EffectRequested":
       return `Effect ${payload.effect.capability}`;
+    case "EffectCompleted":
+      return `Effect completed ${payload.effectId}`;
+    case "EffectFailed":
+      return `Effect failed ${payload.effectId}: ${payload.code}`;
+    case "EffectUncertain":
+      return `Effect uncertain ${payload.effectId}`;
     case "ObservationRecorded":
       return payload.title !== undefined
         ? `Observation ${payload.kind}: ${payload.title}`

@@ -17,8 +17,8 @@ describe("provenance prompts", () => {
   it("system prompt teaches web provenance discipline", () => {
     const prompt = systemPrompt(FRAME);
     expect(prompt).toContain("来源与事实");
-    expect(prompt).toContain("web.search");
-    expect(prompt).toContain("web.read");
+    expect(prompt).toContain("web_search");
+    expect(prompt).toContain("web_read");
     expect(prompt).toMatch(/观察|检索/);
     expect(prompt).toMatch(/来源|引用/);
   });
