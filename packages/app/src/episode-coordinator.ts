@@ -165,6 +165,19 @@ export class EpisodeCoordinator {
           return outcome;
         },
         submitCommit: async ({ commitId, proposals }) => {
+          if (
+            activeJob.triggerKind === "foreground_user"
+            && proposals.some(({ type }) => type === "InitiateContact")
+          ) {
+            const reason = "foreground_reply_must_use_speech";
+            const rejected = this.actor.recordCognitionCommitRejected(
+              activeJob,
+              commitId,
+              reason,
+            );
+            updateVersion(rejected.stateVersion);
+            return { kind: "rejected", commitId, reason };
+          }
           const result = this.actor.acceptCognitionCommit(
             activeJob,
             commitId,

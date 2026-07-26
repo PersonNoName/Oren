@@ -634,6 +634,7 @@ export class LifeActor {
           })];
         case "NoAction":
         case "ExpressToUser":
+        case "InitiateContact":
           return [];
       }
     });

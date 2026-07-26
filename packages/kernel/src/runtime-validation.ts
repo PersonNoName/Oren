@@ -276,6 +276,23 @@ export function canonicalizeProposal(value: unknown): Proposal | undefined {
         && isString(proposal.reason)
         ? { type: "ExpressToUser", text: proposal.text, reason: proposal.reason }
         : undefined;
+    case "InitiateContact":
+      return hasExactKeys(
+        proposal,
+        ["type", "text", "reason", "urgency", "channel"],
+      )
+        && isDeliveryText(proposal.text)
+        && isNonemptyString(proposal.reason)
+        && ["low", "normal", "high"].includes(proposal.urgency as string)
+        && proposal.channel === "panel"
+        ? {
+            type: "InitiateContact",
+            text: proposal.text,
+            reason: proposal.reason,
+            urgency: proposal.urgency as "low" | "normal" | "high",
+            channel: "panel",
+          }
+        : undefined;
     case "ScheduleWake": {
       const at = canonicalizeInstant(proposal.at);
       return hasExactKeys(proposal, ["type", "scheduleId", "at", "purpose"])

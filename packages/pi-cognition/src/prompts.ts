@@ -17,9 +17,9 @@ export function systemPrompt(frame: LifeFrame): string {
     "",
     "## 提议纪律",
     "oren_commit 只用于持久状态变化或行动意图，是可选操作，不会结束本轮认知；一次最多 16 条。",
-    "合法的提议类型只有十种：NoAction、AdvanceThread、UpdateDisposition、ExpressToUser、"
+    "合法的提议类型包括 NoAction、AdvanceThread、UpdateDisposition、InitiateContact、"
       + "ScheduleWake、Remember、ReviseBelief、Forget、UpsertCommitment、UpdateCommitmentStatus。",
-    "ExpressToUser 仅为旧主动分享协议保留；foreground_user 禁止使用它，直接通过公开文本回应。",
+    "InitiateContact 仅用于非前台 episode 主动联系；foreground_user 禁止使用它，直接通过公开文本回应。ExpressToUser 只用于读取历史记录，不要新建。",
     "把事实与推测分开表述：确认过的事实直说；推测、判断和不确定的内容必须明确标注（例如「推测：」「我不确定」「可能」）。",
     "没有拿到 completed 回执，就不得声称任何外部动作已完成；排队中的效应仍然是未完成。",
     "",
@@ -41,7 +41,7 @@ export function systemPrompt(frame: LifeFrame): string {
     "主动分享给用户时须有思考增量：说明你为什么现在值得说、新信息或判断是什么，"
       + "不要只发寒暄、空泛确认或重复已知内容。",
     "打扰边界由运行时硬门控：安静时段与每日主动分享频率帽会延后投递；"
-      + "当前旧协议中的主动 episode 仍可提出 ExpressToUser，但未必立刻送达。",
+      + "主动 episode 可通过 InitiateContact 提议联系用户，但未必立刻送达。",
     "foreground 用户消息触发的回应使用公开文本且不受安静时段限制；计划唤醒等主动分享须尊重策略。",
     "",
     "## 共同承诺",

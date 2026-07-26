@@ -22,7 +22,7 @@ export function findDeferredMessage(
   return undefined;
 }
 
-export async function deliverExpressProposals(input: {
+export async function deliverContactProposals(input: {
   readonly orenId: string;
   readonly correlationId: string;
   readonly triggerKind: TriggerKind;
@@ -36,7 +36,7 @@ export async function deliverExpressProposals(input: {
 }): Promise<void> {
   const reloadState = input.reloadState ?? (() => input.state);
   for (const proposal of input.proposals) {
-    if (proposal.type !== "ExpressToUser") continue;
+    if (proposal.type !== "ExpressToUser" && proposal.type !== "InitiateContact") continue;
     const state = reloadState();
     const proactive = input.triggerKind !== "foreground_user";
     const decision = evaluateReachability(reachabilityOf(state), input.now, proactive);
@@ -75,3 +75,6 @@ export async function deliverExpressProposals(input: {
     }
   }
 }
+
+/** @deprecated Use deliverContactProposals. */
+export const deliverExpressProposals = deliverContactProposals;

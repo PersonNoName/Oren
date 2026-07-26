@@ -58,6 +58,13 @@ export type Proposal =
   | { readonly type: "AdvanceThread"; readonly threadId: ThreadId; readonly summary: string }
   | { readonly type: "UpdateDisposition"; readonly disposition: string; readonly reason: string }
   | { readonly type: "ExpressToUser"; readonly text: string; readonly reason: string }
+  | {
+      readonly type: "InitiateContact";
+      readonly text: string;
+      readonly reason: string;
+      readonly urgency: "low" | "normal" | "high";
+      readonly channel: "panel";
+    }
   | { readonly type: "ScheduleWake"; readonly scheduleId: ScheduleId; readonly at: string; readonly purpose: string }
   | {
       readonly type: "Remember";
