@@ -128,6 +128,42 @@ describe("LifeRuntime panel", () => {
     }
   });
 
+  it("POST /api/message drains so inbox updates without an external drain call", async () => {
+    const path = tempDb();
+    const runtime = await LifeRuntime.create(path, cognitionThatExpresses("from panel post"), {
+      enablePanel: true,
+      now: () => DAY_NOW,
+      nextId: sequenceIds(),
+      embedder: new FakeEmbedder(),
+    });
+    try {
+      await runtime.initialize("oren-1", "person-1");
+      const url = runtime.panelUrl();
+      expect(url).toBeDefined();
+
+      const post = await fetch(`${url}/api/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "hi from panel" }),
+      });
+      expect(post.ok).toBe(true);
+
+      // Intentionally no runtime.drain() here — postMessage must have drained.
+      const res = await fetch(`${url}/api/snapshot`);
+      const snapshot = await res.json();
+      expect(snapshot.inbox).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "delivered",
+            text: "from panel post",
+          }),
+        ]),
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("enablePanel serves snapshot reflecting delivered message", async () => {
     const path = tempDb();
     const runtime = await LifeRuntime.create(path, cognitionThatExpresses("panel hello"), {

@@ -414,6 +414,7 @@ export class LifeRuntime {
             postMessage: async (text) => {
               const identity = runtimeRef!.requireIdentity();
               await runtimeRef!.receiveUserMessage(identity.orenId, identity.personId, text);
+              await runtimeRef!.drain();
             },
             updateReachability: async (policy, reason) => {
               runtimeRef!.updateReachabilityPolicy(policy, reason);
