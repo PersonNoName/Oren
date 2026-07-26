@@ -1,4 +1,5 @@
 import {
+  cp,
   mkdir,
   rm,
   symlink,
@@ -42,3 +43,8 @@ for (const [name, output] of packages) {
     }, null, 2)}\n`,
   );
 }
+
+// Panel serves HTML from a sibling `static/` directory next to compiled server.js.
+const panelStaticSrc = join(root, "packages/panel/src/static");
+const panelStaticDist = join(dist, "packages/panel/src/static");
+await cp(panelStaticSrc, panelStaticDist, { recursive: true });
