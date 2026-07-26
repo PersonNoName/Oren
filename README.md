@@ -64,6 +64,23 @@ Both commands print setup instructions and exit 0 when unconfigured.
   只有显式传入 `embedder`，或显式设置 `useProcessEmbeddingEnv: true`
   （`npm run smoke` 对真实模型路径会这样做）时才会解析真实 embedding 凭据。
 
+## Web 阅读（Phase 4）
+
+- `web.search` / `web.read`：受限检索与阅读；成功后写入 ObservationRecorded 并消耗 webQuotaRemaining。
+- 离线默认不注册真实 web；测试注入 ScriptedWebAdapter。
+- 启用真实路径：
+
+  ```bash
+  export OREN_WEB_SEARCH_PROVIDER=tavily
+  export TAVILY_API_KEY=...
+  # LifeRuntime 需 useProcessWebEnv: true（smoke 在配置齐全时开启）
+  ```
+
+- 自动化测试（`npm test`）永远离线：`LifeRuntime.create` 默认不读取
+  `OREN_WEB_SEARCH_PROVIDER` / `TAVILY_API_KEY`，即便它们在 shell 中已导出。
+  只有显式传入 `webPort`，或显式设置 `useProcessWebEnv: true`
+  （`npm run smoke` 在 web 凭据齐全时会对真实模型路径这样做）时才会解析真实 web 凭据。
+
 ## Architecture boundaries
 
 - `LifeActor` is the only writer of life-state events.

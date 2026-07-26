@@ -9,6 +9,7 @@ import type {
 } from "@oren/cognition";
 import type { Proposal } from "@oren/kernel";
 import { PiCognitionAdapter, resolveModelConfig } from "@oren/pi-cognition";
+import { resolveWebConfig } from "@oren/web";
 import { LifeRuntime } from "./life-runtime.js";
 
 export interface EpisodeRecord {
@@ -92,7 +93,12 @@ export async function runSmoke(
   // provider API key are intentionally exported. Automated tests always
   // inject `cognitionOverride`, so they never consult process.env for
   // embeddings and stay offline even if those variables happen to be set.
-  const runtimeOptions = { useProcessEmbeddingEnv: cognitionOverride === undefined };
+  const webConfig = resolveWebConfig(env);
+  const useProcessEnv = cognitionOverride === undefined;
+  const runtimeOptions = {
+    useProcessEmbeddingEnv: useProcessEnv,
+    useProcessWebEnv: useProcessEnv && webConfig.ok,
+  };
   const first = await LifeRuntime.create(databasePath, recorder, runtimeOptions);
   try {
     await first.initialize("oren-smoke", "person-smoke");
@@ -138,6 +144,18 @@ export async function runSmoke(
         return 1;
       }
       log(`memories recallable after restart: ${memories.length}`);
+      if (webConfig.ok && cognitionOverride === undefined) {
+        const webQuota = afterRestart.budgets.webQuotaRemaining ?? 8;
+        const webFacts = await second.recall("oren-smoke", {
+          kinds: ["external_fact"],
+          limit: 10,
+        });
+        if (webQuota < 8 || webFacts.length > 0) {
+          log(`web path verified: quotaRemaining=${webQuota} externalFacts=${webFacts.length}`);
+        } else {
+          log("web configured; no web usage observed in this smoke run");
+        }
+      }
       log("Oren smoke completed; restart replay matched");
       return 0;
     } finally {
