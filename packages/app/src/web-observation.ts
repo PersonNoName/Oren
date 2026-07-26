@@ -42,11 +42,15 @@ export function observationFromSearch(
 
 export function observationFromRead(
   result: { url: string; title?: string; text: string },
-): ReadObservation {
+): ReadObservation | null {
+  const excerpt = result.text.slice(0, WEB_READ_MAX_CHARS);
+  if (excerpt.trim().length === 0) {
+    return null;
+  }
   return {
     kind: "web_page",
     sourceUrl: result.url,
     ...(result.title !== undefined ? { title: result.title } : {}),
-    excerpt: result.text.slice(0, WEB_READ_MAX_CHARS),
+    excerpt,
   };
 }

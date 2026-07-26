@@ -56,6 +56,48 @@ async function readResponseText(response: Response, maxBytes: number): Promise<s
   return text;
 }
 
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 10;
+
+async function fetchWithSafeRedirects(
+  fetchFn: FetchFn,
+  initialUrl: string,
+  init: RequestInit,
+): Promise<{ response: Response; finalUrl: string }> {
+  let currentUrl = initialUrl;
+
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const response = await fetchFn(currentUrl, {
+      ...init,
+      redirect: "manual",
+    });
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers.get("location");
+      if (location === null || location.length === 0) {
+        throw new Error("Redirect response missing Location header");
+      }
+      const redirectTarget = new URL(location, currentUrl).href;
+      const safety = assertSafeHttpUrl(redirectTarget);
+      if (!safety.ok) {
+        throw new Error(safety.reason);
+      }
+      currentUrl = safety.href;
+      continue;
+    }
+
+    const finalUrl = response.url.length > 0 ? response.url : currentUrl;
+    const finalSafety = assertSafeHttpUrl(finalUrl);
+    if (!finalSafety.ok) {
+      throw new Error(finalSafety.reason);
+    }
+
+    return { response, finalUrl: finalSafety.href };
+  }
+
+  throw new Error("Too many redirects");
+}
+
 export class HttpWebAdapter implements WebPort {
   public constructor(
     private readonly options: {
@@ -100,7 +142,7 @@ export class HttpWebAdapter implements WebPort {
     }
 
     const fetchFn = this.options.fetchFn ?? fetch;
-    const response = await fetchFn(safety.href, {
+    const { response, finalUrl } = await fetchWithSafeRedirects(fetchFn, safety.href, {
       signal: AbortSignal.timeout(WEB_REQUEST_TIMEOUT_MS),
       headers: { "user-agent": "OrenWebReader/1.0" },
     });
@@ -110,6 +152,6 @@ export class HttpWebAdapter implements WebPort {
 
     const html = await readResponseText(response, WEB_READ_MAX_BYTES);
     const text = extractReadableText(html).slice(0, WEB_READ_MAX_CHARS);
-    return { url: safety.href, text };
+    return { url: finalUrl, text };
   }
 }

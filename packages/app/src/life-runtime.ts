@@ -328,11 +328,13 @@ export class LifeRuntime {
               const observation = observationFromRead(
                 outcome.output as unknown as ReadResult,
               );
-              actor.recordObservation(orenId, correlationId, {
-                ...observation,
-                retrievedAt: now(),
-                confidence: 0.7,
-              });
+              if (observation !== null) {
+                actor.recordObservation(orenId, correlationId, {
+                  ...observation,
+                  retrievedAt: now(),
+                  confidence: 0.7,
+                });
+              }
             }
             return outcome;
           },

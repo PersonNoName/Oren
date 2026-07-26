@@ -192,6 +192,43 @@ describe("LifeRuntime web integration", () => {
     }
   });
 
+  it("does not record an observation or spend quota for empty read results", async () => {
+    const databasePath = tempDb();
+    let readOutcome: CapabilityInvocationOutcome | undefined;
+    const webPort = new ScriptedWebAdapter({
+      search: () => ({ results: [] }),
+      read: (url) => ({ url, text: "" }),
+    });
+    const cognition: CognitionPort = {
+      async run(frame, capabilityPort, signal) {
+        const read = frame.capabilities.find(({ name }) => name === "web.read")!;
+        readOutcome = await capabilityPort.invoke({
+          orenId: frame.orenId,
+          descriptor: read,
+          arguments: { url: "https://example.com/empty" },
+          stateVersion: frame.stateVersion,
+          correlationId: frame.correlationId,
+        }, signal);
+        return completed("empty read");
+      },
+    };
+    const runtime = await LifeRuntime.create(databasePath, cognition, { webPort });
+    try {
+      await runtime.initialize("oren-1", "person-1");
+      await runtime.receiveUserMessage("oren-1", "person-1", "Read empty page");
+      await runtime.drain();
+
+      expect(readOutcome).toEqual({
+        kind: "completed",
+        output: { url: "https://example.com/empty", text: "" },
+      });
+      expect(runtime.inspect("oren-1").budgets.webQuotaRemaining).toBe(8);
+      expect(await runtime.recall("oren-1", { kinds: ["external_fact"] })).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("does not register web capabilities without an explicit opt-in", async () => {
     const databasePath = tempDb();
     let capabilityNames: readonly string[] = [];
