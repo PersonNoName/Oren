@@ -14,6 +14,7 @@ import {
   createInitialLifeState,
   Guard,
   LifeActor,
+  webQuotaRemaining,
   type CognitionJob,
   type LifeState,
 } from "@oren/kernel";
@@ -28,10 +29,21 @@ import {
 } from "@oren/memory";
 import { openDatabase, SqliteLifeRepository } from "@oren/storage";
 import { createTestCounterExtension } from "@oren/test-counter";
+import {
+  createWebExtension,
+  resolveWebConfig,
+  type ReadResult,
+  type SearchResult,
+  type WebPort,
+} from "@oren/web";
 import { CognitionWorker } from "./cognition-worker.js";
 import { EffectDispatcher } from "./effect-dispatcher.js";
 import { EpisodeCoordinator } from "./episode-coordinator.js";
 import { Scheduler } from "./scheduler.js";
+import {
+  observationFromRead,
+  observationFromSearch,
+} from "./web-observation.js";
 
 const DEFAULT_MAX_DRAIN_CYCLES = 64;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
@@ -57,6 +69,13 @@ export interface LifeRuntimeOptions {
    * explicitly (see `runSmoke`).
    */
   readonly useProcessEmbeddingEnv?: boolean;
+  readonly webPort?: WebPort;
+  /**
+   * Opt-in only: when true and no explicit `webPort` is given, resolve one
+   * from `process.env`. Defaults to false so tests stay offline even when web
+   * provider credentials are exported in the shell.
+   */
+  readonly useProcessWebEnv?: boolean;
 }
 
 export class LifeRuntime {
@@ -193,6 +212,11 @@ export class LifeRuntime {
       : undefined;
     const embedder = options.embedder
       ?? (resolvedEmbedding?.ok ? resolvedEmbedding.embedder : undefined);
+    const resolvedWeb = options.webPort === undefined && options.useProcessWebEnv === true
+      ? resolveWebConfig(process.env)
+      : undefined;
+    const webPort = options.webPort
+      ?? (resolvedWeb?.ok ? resolvedWeb.adapter : undefined);
     const memory = new SqliteMemoryIndex(db, {
       ...(embedder !== undefined ? { embedder } : {}),
       now: () => Date.parse(now()),
@@ -203,6 +227,7 @@ export class LifeRuntime {
       const businessExtension = (options.extensionFactory ?? createTestCounterExtension)();
       const memoryExtension = createMemoryRecallExtension(memory);
       extensions = [businessExtension, memoryExtension];
+      if (webPort !== undefined) extensions.push(createWebExtension(webPort));
       const registry = new ExtensionRegistry();
       for (const extension of extensions) {
         registry.register(extension);
@@ -261,19 +286,56 @@ export class LifeRuntime {
           };
         },
         {
-          invoke: (
+          invoke: async (
             { orenId, descriptor, arguments: arguments_, stateVersion, correlationId },
-          ) => runtimeGate.closed
-            ? Promise.resolve({ kind: "rejected", reason: "runtime_closed" })
-            : broker.invoke({
-                orenId,
-                correlationId,
-                capability: descriptor.name,
-                arguments: arguments_,
-                grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
-                stateVersion,
-                effectId: nextId(),
-              }),
+          ) => {
+            if (runtimeGate.closed) {
+              return { kind: "rejected", reason: "runtime_closed" };
+            }
+            const isWebCapability = descriptor.name === "web.search"
+              || descriptor.name === "web.read";
+            if (
+              isWebCapability
+              && webQuotaRemaining(repository.loadState(orenId)) < 1
+            ) {
+              return { kind: "rejected", reason: "web_quota_exhausted" };
+            }
+            const outcome = await broker.invoke({
+              orenId,
+              correlationId,
+              capability: descriptor.name,
+              arguments: arguments_,
+              grantIds: repository.loadGrants(orenId).map(({ grantId }) => grantId),
+              stateVersion,
+              effectId: nextId(),
+            });
+            if (outcome.kind !== "completed") return outcome;
+
+            if (descriptor.name === "web.search") {
+              const result = outcome.output as unknown as SearchResult;
+              const observation = observationFromSearch(
+                arguments_.query as string,
+                result.results,
+              );
+              if (observation !== null) {
+                actor.recordObservation(orenId, correlationId, {
+                  ...observation,
+                  retrievedAt: now(),
+                  confidence: 0.7,
+                });
+              }
+            } else if (descriptor.name === "web.read") {
+              const observation = observationFromRead(
+                outcome.output as unknown as ReadResult,
+              );
+              actor.recordObservation(orenId, correlationId, {
+                ...observation,
+                retrievedAt: now(),
+                confidence: 0.7,
+              });
+            }
+            return outcome;
+          },
         },
       );
       const coordinator = new EpisodeCoordinator(

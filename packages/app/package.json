@@ -10,6 +10,7 @@
     "@oren/memory": "*",
     "@oren/pi-cognition": "*",
     "@oren/storage": "*",
-    "@oren/test-counter": "*"
+    "@oren/test-counter": "*",
+    "@oren/web": "*"
   }
 }
