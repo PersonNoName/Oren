@@ -12,3 +12,4 @@ data/
 .worktrees/
 .superpowers/
 *.log
+*.tsbuildinfo
