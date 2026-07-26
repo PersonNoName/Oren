@@ -1,3 +1,4 @@
+export * from "./assertions.js";
 export * from "./clock.js";
 export * from "./scripted-cognition.js";
 export * from "./runner.js";

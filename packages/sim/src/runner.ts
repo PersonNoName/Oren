@@ -10,6 +10,10 @@ import { FakeEmbedder } from "@oren/memory";
 import { openDatabase, SqliteLifeRepository } from "@oren/storage";
 import { createTestCounterExtension } from "@oren/test-counter";
 import { ScriptedWebAdapter } from "@oren/web";
+import {
+  defaultAssertions,
+  type AssertionFn,
+} from "./assertions.js";
 import { VirtualClock } from "./clock.js";
 import type { SimStep } from "./steps.js";
 
@@ -36,45 +40,6 @@ export type SimReport = {
   }[];
 };
 
-type AssertionResult = { readonly ok: boolean; readonly detail?: string };
-
-type AssertionFn = (
-  args: Record<string, unknown> | undefined,
-  context: {
-    readonly checkpoints: ReadonlyMap<string, LifeState>;
-    readonly inspect: () => LifeState;
-  },
-) => AssertionResult;
-
-export class AssertionRegistry {
-  private readonly assertions = new Map<string, AssertionFn>();
-
-  public register(name: string, fn: AssertionFn): void {
-    this.assertions.set(name, fn);
-  }
-
-  public run(
-    name: string,
-    args: Record<string, unknown> | undefined,
-    context: {
-      readonly checkpoints: ReadonlyMap<string, LifeState>;
-      readonly inspect: () => LifeState;
-    },
-  ): AssertionResult {
-    const fn = this.assertions.get(name);
-    if (!fn) {
-      throw new Error(`Assertion not registered: ${name}`);
-    }
-    return fn(args, context);
-  }
-}
-
-function defaultAssertionRegistry(): AssertionRegistry {
-  const registry = new AssertionRegistry();
-  registry.register("ok", () => ({ ok: true }));
-  return registry;
-}
-
 function sequenceIds(prefix = "id"): () => string {
   let value = 0;
   return () => `${prefix}-${++value}`;
@@ -95,7 +60,7 @@ function createScriptedWebAdapter(): ScriptedWebAdapter {
 
 export class ScenarioRunner {
   public constructor(
-    private readonly assertions: AssertionRegistry = defaultAssertionRegistry(),
+    private readonly assertions: Readonly<Record<string, AssertionFn>> = defaultAssertions,
   ) {}
 
   public async run(scenario: ScenarioDefinition): Promise<SimReport> {
@@ -237,19 +202,23 @@ export class ScenarioRunner {
         return;
 
       case "assert": {
-        const result = this.assertions.run(step.name, step.args, {
-          checkpoints,
-          inspect: () => runtime.inspect(orenId),
-        });
-        assertions.push({
-          name: step.name,
-          ok: result.ok,
-          ...(result.detail !== undefined ? { detail: result.detail } : {}),
-        });
-        if (!result.ok) {
-          throw new Error(
-            result.detail ?? `Assertion failed: ${step.name}`,
-          );
+        const fn = this.assertions[step.name];
+        if (!fn) {
+          throw new Error(`Unknown assertion: ${step.name}`);
+        }
+        try {
+          await fn({
+            runtime,
+            orenId,
+            checkpoints,
+            clock,
+            args: step.args ?? {},
+          });
+          assertions.push({ name: step.name, ok: true });
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          assertions.push({ name: step.name, ok: false, detail });
+          throw new Error(detail);
         }
         return;
       }
