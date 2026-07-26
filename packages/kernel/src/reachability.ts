@@ -43,9 +43,30 @@ export function reachabilityOf(state: LifeState): ReachabilityPolicy {
   return state.reachability ?? DEFAULT_REACHABILITY;
 }
 
+function parseHhMm(hhmm: string): { hours: number; minutes: number } | undefined {
+  const parts = hhmm.split(":");
+  if (parts.length !== 2) return undefined;
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  if (
+    !Number.isFinite(hours)
+    || !Number.isFinite(minutes)
+    || hours < 0
+    || hours > 23
+    || minutes < 0
+    || minutes > 59
+  ) {
+    return undefined;
+  }
+  return { hours, minutes };
+}
+
 function parseMinutes(hhmm: string): number {
-  const [hours, minutes] = hhmm.split(":").map(Number);
-  return hours * 60 + minutes;
+  const parsed = parseHhMm(hhmm);
+  if (!parsed) {
+    throw new Error(`Invalid HH:MM time: ${hhmm}`);
+  }
+  return parsed.hours * 60 + parsed.minutes;
 }
 
 function utcMinutes(nowIso: string): number {
@@ -92,7 +113,10 @@ export function nextDeliverAt(
   const minutes = utcMinutes(nowIso);
   const start = parseMinutes(policy.quietHours.start);
   const end = parseMinutes(policy.quietHours.end);
-  const [endHours, endMinutes] = policy.quietHours.end.split(":").map(Number);
+  const endTime = parseHhMm(policy.quietHours.end);
+  if (!endTime) {
+    return nextUtcMidnight(nowIso);
+  }
   const date = new Date(nowIso);
   date.setUTCSeconds(0, 0);
   if (start > end) {
@@ -100,7 +124,7 @@ export function nextDeliverAt(
       date.setUTCDate(date.getUTCDate() + 1);
     }
   }
-  date.setUTCHours(endHours, endMinutes, 0, 0);
+  date.setUTCHours(endTime.hours, endTime.minutes, 0, 0);
   return date.toISOString();
 }
 

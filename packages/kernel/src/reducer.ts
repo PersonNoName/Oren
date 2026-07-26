@@ -157,22 +157,25 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
     case "MessageDeferred":
     case "MessageDeliveryFailed":
       return base;
-    case "GrantRevoked":
+    case "GrantRevoked": {
+      const payload = event.payload;
       return {
         ...base,
-        grantIds: state.grantIds.filter((id) => id !== event.payload.grantId),
+        grantIds: state.grantIds.filter((id) => id !== payload.grantId),
       };
+    }
     case "CommitmentUpserted": {
+      const payload = event.payload;
       const existing = commitmentsOf(state);
       const index = existing.findIndex(
-        (commitment) => commitment.commitmentId === event.payload.commitmentId,
+        (commitment) => commitment.commitmentId === payload.commitmentId,
       );
       const next: Commitment = {
-        commitmentId: event.payload.commitmentId,
-        goal: event.payload.goal,
-        status: event.payload.status,
-        nextStep: event.payload.nextStep,
-        mayAdvanceAutonomously: event.payload.mayAdvanceAutonomously,
+        commitmentId: payload.commitmentId,
+        goal: payload.goal,
+        status: payload.status,
+        nextStep: payload.nextStep,
+        mayAdvanceAutonomously: payload.mayAdvanceAutonomously,
       };
       const updated = index >= 0
         ? [...existing.slice(0, index), next, ...existing.slice(index + 1)]
@@ -183,9 +186,10 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
       };
     }
     case "CommitmentStatusChanged": {
+      const payload = event.payload;
       const existing = commitmentsOf(state);
       const index = existing.findIndex(
-        (commitment) => commitment.commitmentId === event.payload.commitmentId,
+        (commitment) => commitment.commitmentId === payload.commitmentId,
       );
       if (index < 0) {
         return base;
@@ -194,9 +198,9 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
       const updated = [...existing];
       updated[index] = {
         ...current,
-        status: event.payload.status,
-        ...(event.payload.nextStep !== undefined
-          ? { nextStep: event.payload.nextStep }
+        status: payload.status,
+        ...(payload.nextStep !== undefined
+          ? { nextStep: payload.nextStep }
           : {}),
       };
       return {

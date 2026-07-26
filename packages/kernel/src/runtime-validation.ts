@@ -75,7 +75,9 @@ function isDeliveryText(value: JsonValue | undefined): value is string {
 function isQuietHours(value: JsonValue | undefined): value is QuietHours {
   if (!isRecord(value)) return false;
   return hasExactKeys(value, ["start", "end", "timezone"])
+    && isString(value.start)
     && HH_MM_PATTERN.test(value.start)
+    && isString(value.end)
     && HH_MM_PATTERN.test(value.end)
     && value.timezone === "UTC";
 }
