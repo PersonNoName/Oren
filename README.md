@@ -81,6 +81,35 @@ Both commands print setup instructions and exit 0 when unconfigured.
   只有显式传入 `webPort`，或显式设置 `useProcessWebEnv: true`
   （`npm run smoke` 在 web 凭据齐全时会对真实模型路径这样做）时才会解析真实 web 凭据。
 
+## 消息渠道与生活面板（Phase 5）
+
+- `ExpressToUser` 由运行时自动投递或延后：`MessageDelivered` / `MessageDeferred` /
+  `MessageFailed` 写入生命史；主动分享受安静时段与每日频率帽门控（默认 UTC 22:00–08:00、
+  每日最多 3 次主动分享）；foreground 用户消息回应不受安静时段限制。
+- 最小共同承诺（`UpsertCommitment` / `UpdateCommitmentStatus`）可展示与纠错；
+  面板与 runtime 共享同一 `LifeState` 投影。
+- 面板默认不启动；仅 `127.0.0.1` loopback 监听。启用方式：
+
+  ```bash
+  export OREN_PANEL=1
+  # LifeRuntime 需 useProcessPanelEnv: true（smoke 在配置齐全时开启）
+  # 或显式 enablePanel: true
+  ```
+
+- 写 API（经面板 JSON 路由，均委托 `LifeRuntime` 受控方法）：
+
+  | 方法 | 路径 | 行为 |
+  |------|------|------|
+  | POST | `/api/message` | `{ text }` → `receiveUserMessage` |
+  | POST | `/api/reachability` | 策略快照 → `updateReachabilityPolicy` |
+  | POST | `/api/grants/:id/revoke` | `{ reason }` → `revokeGrant` |
+  | POST | `/api/commitments/:id` | `{ status, nextStep?, reason }` → `updateCommitmentStatus` |
+
+- 读：`GET /api/snapshot` 一次返回 inbox、attention、schedules、commitments、grants、
+  budgets、actionLedger、publicDiary。
+- 自动化测试（`npm test`）永远离线：默认不监听 HTTP；测试注入 `ScriptedChannelAdapter`
+  或 `enablePanel` 短集成测，不依赖外网。
+
 ## Architecture boundaries
 
 - `LifeActor` is the only writer of life-state events.

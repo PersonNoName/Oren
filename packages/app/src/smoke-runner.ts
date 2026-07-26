@@ -156,6 +156,19 @@ export async function runSmoke(
           log("web configured; no web usage observed in this smoke run");
         }
       }
+      const snapshot = second.getPanelSnapshot();
+      if (snapshot.inbox.length > 0) {
+        log(`panel inbox deliveries: ${snapshot.inbox.length}`);
+        for (const message of snapshot.inbox) {
+          log(`  delivery ${message.deliveryId} status=${message.status} proactive=${message.proactive}`);
+        }
+      }
+      if (snapshot.commitments.length > 0) {
+        log(`panel commitments: ${snapshot.commitments.length}`);
+        for (const commitment of snapshot.commitments) {
+          log(`  commitment ${commitment.commitmentId} status=${commitment.status} goal=${commitment.goal}`);
+        }
+      }
       log("Oren smoke completed; restart replay matched");
       return 0;
     } finally {
