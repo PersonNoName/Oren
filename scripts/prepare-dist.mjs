@@ -11,6 +11,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 const packageRoot = join(dist, "node_modules", "@oren");
 const packages = [
+  ["app", "packages/app"],
   ["cognition", "packages/cognition"],
   ["extensions", "packages/extensions"],
   ["kernel", "packages/kernel"],
@@ -20,6 +21,7 @@ const packages = [
   ["panel", "packages/panel"],
   ["pi-cognition", "packages/pi-cognition"],
   ["evals", "packages/evals"],
+  ["sim", "packages/sim"],
   ["storage", "packages/storage"],
   ["test-counter", "extensions/test-counter"],
 ];

@@ -110,6 +110,17 @@ Both commands print setup instructions and exit 0 when unconfigured.
 - 自动化测试（`npm test`）永远离线：默认不监听 HTTP；测试注入 `ScriptedChannelAdapter`
   或 `enablePanel` 短集成测，不依赖外网。
 
+## 闭环验收与模拟（Phase 6）
+
+- `npm run sim` — 离线多周闭环回放（`s-closure-weeks`）：自有线索、主动分享、
+  共同承诺、安静时段门控、网络故障注入；输出 `SimReport` JSON，`ok: true` 即通过。
+  无需模型凭据，CI 可跑。
+- 持续体验人工验收清单：
+  [`docs/superpowers/acceptance/phase6-continuous-experience-runbook.md`](docs/superpowers/acceptance/phase6-continuous-experience-runbook.md)
+  （需真实模型 + 可选 `OREN_PANEL=1`，不进 CI）。
+- 与 Phase 5 面板关系：sim 使用 `PanelInboxAdapter` 与脚本化 cognition 在内存中
+  验证闭环；人工 runbook 在真实模型 + 面板下勾选同等体验目标。
+
 ## Architecture boundaries
 
 - `LifeActor` is the only writer of life-state events.
