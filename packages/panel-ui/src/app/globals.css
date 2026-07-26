@@ -255,12 +255,6 @@ html, body {
   font-size: 0.875rem;
 }
 
-.chat-placeholder {
-  padding: 1rem;
-  color: var(--muted);
-  font-size: 0.875rem;
-}
-
 .detail-pane {
   flex: 1;
   overflow-y: auto;
