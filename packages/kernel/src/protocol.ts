@@ -26,6 +26,16 @@ export type MemoryKind =
 
 export type ObservationKind = "web_search_result" | "web_page";
 
+export type CommitmentStatus = "active" | "paused" | "done";
+
+export type Commitment = {
+  readonly commitmentId: string;
+  readonly goal: string;
+  readonly status: CommitmentStatus;
+  readonly nextStep: string;
+  readonly mayAdvanceAutonomously: boolean;
+};
+
 export type EpisodeInterruptionReason =
   | "foreground_user"
   | "shutdown"
@@ -53,7 +63,22 @@ export type Proposal =
       readonly confidence: number;
       readonly reason: string;
     }
-  | { readonly type: "Forget"; readonly memoryId: string; readonly reason: string };
+  | { readonly type: "Forget"; readonly memoryId: string; readonly reason: string }
+  | {
+      readonly type: "UpsertCommitment";
+      readonly commitmentId?: string;
+      readonly goal: string;
+      readonly status: CommitmentStatus;
+      readonly nextStep: string;
+      readonly mayAdvanceAutonomously: boolean;
+    }
+  | {
+      readonly type: "UpdateCommitmentStatus";
+      readonly commitmentId: string;
+      readonly status: CommitmentStatus;
+      readonly nextStep?: string;
+      readonly reason: string;
+    };
 
 export interface Effect {
   readonly effectId: EffectId;
@@ -139,7 +164,22 @@ export type CoreEvent =
       readonly reason: string;
       readonly code: string;
     }
-  | { readonly type: "GrantRevoked"; readonly grantId: GrantId; readonly reason: string };
+  | { readonly type: "GrantRevoked"; readonly grantId: GrantId; readonly reason: string }
+  | {
+      readonly type: "CommitmentUpserted";
+      readonly commitmentId: string;
+      readonly goal: string;
+      readonly status: CommitmentStatus;
+      readonly nextStep: string;
+      readonly mayAdvanceAutonomously: boolean;
+    }
+  | {
+      readonly type: "CommitmentStatusChanged";
+      readonly commitmentId: string;
+      readonly status: CommitmentStatus;
+      readonly nextStep?: string;
+      readonly reason: string;
+    };
 
 export type InboxCoreEvent =
   | Extract<CoreEvent, { type: "WakeDue" }>

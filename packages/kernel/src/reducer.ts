@@ -1,10 +1,32 @@
-import type { EventEnvelope } from "./protocol.js";
+import type { Commitment, EventEnvelope } from "./protocol.js";
 import type { LifeState } from "./state.js";
 import { reachabilityOf, utcDayKey } from "./reachability.js";
 import {
   canonicalizeEventEnvelope,
   hasValidLifeStateBudgets,
 } from "./runtime-validation.js";
+
+const MAX_COMMITMENTS = 32;
+
+function commitmentsOf(state: LifeState): Commitment[] {
+  return [...(state.commitments ?? [])];
+}
+
+function capCommitments(commitments: Commitment[]): Commitment[] {
+  if (commitments.length <= MAX_COMMITMENTS) {
+    return commitments;
+  }
+  let trimmed = [...commitments];
+  while (trimmed.length > MAX_COMMITMENTS) {
+    const doneIndex = trimmed.findIndex((commitment) => commitment.status === "done");
+    if (doneIndex >= 0) {
+      trimmed = [...trimmed.slice(0, doneIndex), ...trimmed.slice(doneIndex + 1)];
+      continue;
+    }
+    trimmed = trimmed.slice(1);
+  }
+  return trimmed;
+}
 
 export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeState {
   if (!hasValidLifeStateBudgets(state)) {
@@ -140,6 +162,48 @@ export function reduceLifeState(state: LifeState, event: EventEnvelope): LifeSta
         ...base,
         grantIds: state.grantIds.filter((id) => id !== event.payload.grantId),
       };
+    case "CommitmentUpserted": {
+      const existing = commitmentsOf(state);
+      const index = existing.findIndex(
+        (commitment) => commitment.commitmentId === event.payload.commitmentId,
+      );
+      const next: Commitment = {
+        commitmentId: event.payload.commitmentId,
+        goal: event.payload.goal,
+        status: event.payload.status,
+        nextStep: event.payload.nextStep,
+        mayAdvanceAutonomously: event.payload.mayAdvanceAutonomously,
+      };
+      const updated = index >= 0
+        ? [...existing.slice(0, index), next, ...existing.slice(index + 1)]
+        : [...existing, next];
+      return {
+        ...base,
+        commitments: capCommitments(updated),
+      };
+    }
+    case "CommitmentStatusChanged": {
+      const existing = commitmentsOf(state);
+      const index = existing.findIndex(
+        (commitment) => commitment.commitmentId === event.payload.commitmentId,
+      );
+      if (index < 0) {
+        return base;
+      }
+      const current = existing[index]!;
+      const updated = [...existing];
+      updated[index] = {
+        ...current,
+        status: event.payload.status,
+        ...(event.payload.nextStep !== undefined
+          ? { nextStep: event.payload.nextStep }
+          : {}),
+      };
+      return {
+        ...base,
+        commitments: updated,
+      };
+    }
     default:
       return base;
   }

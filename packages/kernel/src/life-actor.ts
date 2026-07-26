@@ -1,4 +1,5 @@
 import type {
+  CommitmentStatus,
   Effect,
   EpisodeInterruptionReason,
   EventEnvelope,
@@ -164,6 +165,23 @@ export class LifeActor {
             memoryId: proposal.memoryId,
             reason: proposal.reason,
           })];
+        case "UpsertCommitment":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "CommitmentUpserted",
+            commitmentId: proposal.commitmentId ?? this.nextId(),
+            goal: proposal.goal,
+            status: proposal.status,
+            nextStep: proposal.nextStep,
+            mayAdvanceAutonomously: proposal.mayAdvanceAutonomously,
+          })];
+        case "UpdateCommitmentStatus":
+          return [this.envelope(job.orenId, job.correlationId, {
+            type: "CommitmentStatusChanged",
+            commitmentId: proposal.commitmentId,
+            status: proposal.status,
+            reason: proposal.reason,
+            ...(proposal.nextStep !== undefined ? { nextStep: proposal.nextStep } : {}),
+          })];
         case "NoAction":
         case "ExpressToUser":
           return [];
@@ -314,6 +332,27 @@ export class LifeActor {
       : { type: "EpisodeInterrupted", episodeId: job.episodeId, reason: exit.reason };
     this.repository.commit(job.orenId, [
       this.envelope(job.orenId, job.correlationId, payload),
+    ]);
+  }
+
+  public updateCommitmentStatus(
+    orenId: string,
+    correlationId: string,
+    input: {
+      readonly commitmentId: string;
+      readonly status: CommitmentStatus;
+      readonly nextStep?: string;
+      readonly reason: string;
+    },
+  ): void {
+    this.repository.commit(orenId, [
+      this.envelope(orenId, correlationId, {
+        type: "CommitmentStatusChanged",
+        commitmentId: input.commitmentId,
+        status: input.status,
+        reason: input.reason,
+        ...(input.nextStep !== undefined ? { nextStep: input.nextStep } : {}),
+      }),
     ]);
   }
 

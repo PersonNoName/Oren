@@ -1,5 +1,6 @@
 import { canonicalizeJson, type JsonObject, type JsonValue } from "./json.js";
 import type {
+  CommitmentStatus,
   CoreEvent,
   Effect,
   EpisodeInterruptionReason,
@@ -39,6 +40,7 @@ const MAX_DELIVERY_TEXT_LENGTH = 8_192;
 const HH_MM_PATTERN = /^\d{2}:\d{2}$/;
 const DELIVERY_CAUSES = new Set<unknown>(["quiet_hours", "frequency_cap"]);
 const OBSERVATION_KINDS = new Set<unknown>(["web_search_result", "web_page"]);
+const COMMITMENT_STATUSES = new Set<unknown>(["active", "paused", "done"]);
 
 function hasKeysWithin(
   value: JsonObject,
@@ -97,6 +99,14 @@ function isReachabilityPolicy(value: JsonValue | undefined): value is Reachabili
     return false;
   }
   return true;
+}
+
+function isCommitmentStatus(value: JsonValue | undefined): value is CommitmentStatus {
+  return COMMITMENT_STATUSES.has(value);
+}
+
+function isBoolean(value: JsonValue | undefined): value is boolean {
+  return typeof value === "boolean";
 }
 
 function isRecord(value: JsonValue | undefined): value is JsonObject {
@@ -317,6 +327,48 @@ export function canonicalizeProposal(value: unknown): Proposal | undefined {
         && isNonemptyString(proposal.reason)
         ? { type: "Forget", memoryId: proposal.memoryId, reason: proposal.reason }
         : undefined;
+    case "UpsertCommitment": {
+      if (
+        !hasKeysWithin(
+          proposal,
+          ["type", "goal", "status", "nextStep", "mayAdvanceAutonomously"],
+          ["commitmentId"],
+        )
+        || !isNonemptyString(proposal.goal)
+        || !isCommitmentStatus(proposal.status)
+        || !isNonemptyString(proposal.nextStep)
+        || !isBoolean(proposal.mayAdvanceAutonomously)
+        || (proposal.commitmentId !== undefined && !isNonemptyString(proposal.commitmentId))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "UpsertCommitment",
+        goal: proposal.goal,
+        status: proposal.status,
+        nextStep: proposal.nextStep,
+        mayAdvanceAutonomously: proposal.mayAdvanceAutonomously,
+        ...(proposal.commitmentId !== undefined ? { commitmentId: proposal.commitmentId } : {}),
+      };
+    }
+    case "UpdateCommitmentStatus": {
+      if (
+        !hasKeysWithin(proposal, ["type", "commitmentId", "status", "reason"], ["nextStep"])
+        || !isNonemptyString(proposal.commitmentId)
+        || !isCommitmentStatus(proposal.status)
+        || !isNonemptyString(proposal.reason)
+        || (proposal.nextStep !== undefined && !isNonemptyString(proposal.nextStep))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "UpdateCommitmentStatus",
+        commitmentId: proposal.commitmentId,
+        status: proposal.status,
+        reason: proposal.reason,
+        ...(proposal.nextStep !== undefined ? { nextStep: proposal.nextStep } : {}),
+      };
+    }
     default:
       return undefined;
   }
@@ -621,6 +673,47 @@ export function canonicalizeCoreEvent(value: unknown): CoreEvent | undefined {
         && isNonemptyString(event.reason)
         ? { type: "GrantRevoked", grantId: event.grantId, reason: event.reason }
         : undefined;
+    case "CommitmentUpserted":
+      return hasExactKeys(event, [
+        "type",
+        "commitmentId",
+        "goal",
+        "status",
+        "nextStep",
+        "mayAdvanceAutonomously",
+      ])
+        && isNonemptyString(event.commitmentId)
+        && isNonemptyString(event.goal)
+        && isCommitmentStatus(event.status)
+        && isNonemptyString(event.nextStep)
+        && isBoolean(event.mayAdvanceAutonomously)
+        ? {
+            type: "CommitmentUpserted",
+            commitmentId: event.commitmentId,
+            goal: event.goal,
+            status: event.status,
+            nextStep: event.nextStep,
+            mayAdvanceAutonomously: event.mayAdvanceAutonomously,
+          }
+        : undefined;
+    case "CommitmentStatusChanged": {
+      if (
+        !hasKeysWithin(event, ["type", "commitmentId", "status", "reason"], ["nextStep"])
+        || !isNonemptyString(event.commitmentId)
+        || !isCommitmentStatus(event.status)
+        || !isNonemptyString(event.reason)
+        || (event.nextStep !== undefined && !isNonemptyString(event.nextStep))
+      ) {
+        return undefined;
+      }
+      return {
+        type: "CommitmentStatusChanged",
+        commitmentId: event.commitmentId,
+        status: event.status,
+        reason: event.reason,
+        ...(event.nextStep !== undefined ? { nextStep: event.nextStep } : {}),
+      };
+    }
     default:
       return undefined;
   }

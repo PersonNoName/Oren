@@ -51,6 +51,29 @@ export const ProposalSchema = Type.Union([
     memoryId: Type.String(),
     reason: Type.String(),
   }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("UpsertCommitment"),
+    commitmentId: Type.Optional(Type.String()),
+    goal: Type.String(),
+    status: Type.Union([
+      Type.Literal("active"),
+      Type.Literal("paused"),
+      Type.Literal("done"),
+    ]),
+    nextStep: Type.String(),
+    mayAdvanceAutonomously: Type.Boolean(),
+  }, { additionalProperties: false }),
+  Type.Object({
+    type: Type.Literal("UpdateCommitmentStatus"),
+    commitmentId: Type.String(),
+    status: Type.Union([
+      Type.Literal("active"),
+      Type.Literal("paused"),
+      Type.Literal("done"),
+    ]),
+    nextStep: Type.Optional(Type.String()),
+    reason: Type.String(),
+  }, { additionalProperties: false }),
 ]);
 
 export const CommitSchema = Type.Object({
