@@ -15,6 +15,7 @@ const packages = [
   ["extensions", "packages/extensions"],
   ["kernel", "packages/kernel"],
   ["memory", "packages/memory"],
+  ["web", "packages/web"],
   ["pi-cognition", "packages/pi-cognition"],
   ["evals", "packages/evals"],
   ["storage", "packages/storage"],
