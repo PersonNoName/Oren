@@ -66,7 +66,11 @@ export class ScenarioRunner {
   public async run(scenario: ScenarioDefinition): Promise<SimReport> {
     const orenId = scenario.orenId ?? "oren-1";
     const personId = scenario.personId ?? "person-1";
-    const assertions: SimReport["assertions"] = [];
+    const assertions: Array<{
+      readonly name: string;
+      readonly ok: boolean;
+      readonly detail?: string;
+    }> = [];
     const checkpoints = new Map<string, LifeState>();
     let stepsCompleted = 0;
 
@@ -109,7 +113,12 @@ export class ScenarioRunner {
       scenario.extensionFactories?.default ?? createTestCounterExtension
     );
 
-    const runtime = await LifeRuntime.create(dbPath, scenario.scripts.default, {
+    const defaultScript = scenario.scripts.default;
+    if (!defaultScript) {
+      throw new Error('Scenario requires scripts.default');
+    }
+
+    const runtime = await LifeRuntime.create(dbPath, defaultScript, {
       now: () => clock.now(),
       nextId,
       embedder: new FakeEmbedder(),
