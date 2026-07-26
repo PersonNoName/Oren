@@ -3,15 +3,17 @@
 import { useEffect, useRef } from "react";
 import { buildChatMessages, type LocalUserMessage } from "@/lib/chat-messages";
 import type { PanelSnapshot } from "@/lib/panel-types";
+import type { LiveUtterance } from "@/lib/panel-types";
 
 type Props = {
   inbox: PanelSnapshot["inbox"] | undefined;
   localUserMessages: readonly LocalUserMessage[];
+  liveUtterances: readonly LiveUtterance[];
 };
 
-export function ChatPane({ inbox, localUserMessages }: Props) {
+export function ChatPane({ inbox, localUserMessages, liveUtterances }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const messages = buildChatMessages(inbox ?? [], localUserMessages);
+  const messages = buildChatMessages(inbox ?? [], localUserMessages, liveUtterances);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });

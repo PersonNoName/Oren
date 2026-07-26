@@ -1,4 +1,4 @@
-import type { PanelSnapshot } from "./panel-types.js";
+import type { LiveUtterance, PanelSnapshot } from "./panel-types.js";
 
 export type LocalUserMessage = {
   readonly id: string;
@@ -20,13 +20,14 @@ export type ChatMessage =
       readonly id: string;
       readonly text: string;
       readonly at: string;
-      readonly status: "deferred" | "failed";
+      readonly status: "interrupted" | "deferred" | "failed";
       readonly deliveryId: string;
     };
 
 export function buildChatMessages(
   inbox: PanelSnapshot["inbox"],
   localUserMessages: readonly LocalUserMessage[],
+  liveUtterances: readonly LiveUtterance[] = [],
 ): ChatMessage[] {
   const userMessages: ChatMessage[] = localUserMessages.map((msg) => ({
     kind: "user",
@@ -55,5 +56,17 @@ export function buildChatMessages(
     };
   });
 
-  return [...userMessages, ...inboxMessages].sort((a, b) => a.at.localeCompare(b.at));
+  const historical = [...userMessages, ...inboxMessages]
+    .sort((a, b) => a.at.localeCompare(b.at));
+  const knownIds = new Set(historical.map(({ id }) => id));
+  const live: ChatMessage[] = liveUtterances
+    .filter(({ messageId, text }) => !knownIds.has(messageId) && text.length > 0)
+    .map((utterance) => ({
+      kind: "oren",
+      id: utterance.messageId,
+      text: utterance.text,
+      at: "9999-12-31T23:59:59.999Z",
+      deliveryId: utterance.messageId,
+    }));
+  return [...historical, ...live];
 }

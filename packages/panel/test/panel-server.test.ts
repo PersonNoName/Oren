@@ -5,6 +5,7 @@ import {
   type PanelHandlers,
 } from "@oren/panel";
 import type { ReachabilityPolicy } from "@oren/kernel";
+import type { SpeechEvent } from "@oren/channel";
 
 const noopHandlers: PanelHandlers = {
   getSnapshot: () => minimalSnapshot(),
@@ -15,6 +16,43 @@ const noopHandlers: PanelHandlers = {
 };
 
 describe("createPanelServer", () => {
+  it("streams speech events over SSE and unsubscribes on disconnect", async () => {
+    let listener: ((event: SpeechEvent) => void) | undefined;
+    let subscribers = 0;
+    const server = await createPanelServer({
+      ...noopHandlers,
+      subscribeSpeech(next) {
+        listener = next;
+        subscribers += 1;
+        return () => {
+          subscribers -= 1;
+        };
+      },
+    });
+    const controller = new AbortController();
+    const response = await fetch(`${server.url}/api/speech-events`, {
+      signal: controller.signal,
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    listener?.({
+      type: "speech.delta",
+      messageId: "message-1",
+      text: "你",
+    });
+    const chunk = await reader.read();
+    expect(new TextDecoder().decode(chunk.value)).toContain(
+      'data: {"type":"speech.delta","messageId":"message-1","text":"你"}',
+    );
+    controller.abort();
+    await reader.cancel().catch(() => undefined);
+    for (let attempt = 0; attempt < 20 && subscribers > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(subscribers).toBe(0);
+    await server.close();
+  });
+
   it("serves snapshot on loopback only", async () => {
     const server = await createPanelServer({
       getSnapshot: () => minimalSnapshot(),

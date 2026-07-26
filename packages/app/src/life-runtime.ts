@@ -439,8 +439,16 @@ export class LifeRuntime {
       );
       let runtimeRef: LifeRuntime | undefined;
       const panelServer = panelEnabled
-        ? await createPanelServer({
+          ? await createPanelServer({
             getSnapshot: () => runtimeRef!.getPanelSnapshot(),
+            ...(
+              channelPort instanceof PanelInboxAdapter
+                ? {
+                    subscribeSpeech: (listener) =>
+                      channelPort.subscribeSpeech(listener),
+                  }
+                : {}
+            ),
             postMessage: async (text) => {
               const identity = runtimeRef!.requireIdentity();
               await runtimeRef!.receiveUserMessage(identity.orenId, identity.personId, text);

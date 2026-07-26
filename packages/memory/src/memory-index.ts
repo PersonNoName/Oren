@@ -174,6 +174,20 @@ export class SqliteMemoryIndex implements MemoryPort {
         }
         return;
       }
+      case "AssistantMessageDelivered":
+        await this.upsertEntry({
+          memoryId: `mem:${envelope.eventId}`,
+          orenId: envelope.orenId,
+          kind: "oren_expression",
+          text: payload.text,
+          sourceEventId: envelope.eventId,
+          occurredAt: envelope.occurredAt,
+          confidence: null,
+          reviewCondition: null,
+          threadId: null,
+          recallability: "active",
+        });
+        return;
       case "MemoryRemembered":
         await this.upsertEntry({
           memoryId: payload.memoryId,

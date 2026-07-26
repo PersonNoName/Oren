@@ -22,12 +22,29 @@ export type ReachabilityPolicy = {
   readonly proactiveCountToday: number;
 };
 
+export type SpeechEvent =
+  | { readonly type: "speech.started"; readonly episodeId: string; readonly messageId: string }
+  | { readonly type: "speech.delta"; readonly messageId: string; readonly text: string }
+  | {
+      readonly type: "speech.completed";
+      readonly messageId: string;
+      readonly status: "complete" | "interrupted";
+    };
+
+export type LiveUtterance = {
+  readonly messageId: string;
+  readonly episodeId: string;
+  readonly text: string;
+  readonly status: "streaming" | "complete" | "interrupted";
+};
+
 export type PanelSnapshot = {
   readonly inbox: ReadonlyArray<{
     deliveryId: string;
     text: string;
     reason: string;
-    status: "delivered" | "deferred" | "failed";
+    status: "delivered" | "interrupted" | "deferred" | "failed";
+    source?: "foreground" | "proactive";
     proactive?: boolean;
     deferUntil?: string;
     at: string;
