@@ -1,254 +1,270 @@
 import { describe, expect, it } from "vitest";
+import type {
+  CognitionEvent,
+  StreamingCognitionPort,
+} from "@oren/cognition";
+import type {
+  ForegroundSpeechPort,
+  SpeechEvent,
+} from "@oren/channel";
+import {
+  Conductor,
+} from "@oren/cognition";
+import {
+  createInitialLifeState,
+  Guard,
+  LifeActor,
+  reduceLifeState,
+  type CognitionJob,
+  type EventEnvelope,
+  type LifeRepositoryPort,
+} from "@oren/kernel";
 import { EpisodeCoordinator } from "../src/index.js";
 
-describe("EpisodeCoordinator", () => {
-  it("aborts an idle episode before starting foreground cognition", async () => {
-    const transitions: string[] = [];
-    const coordinator = new EpisodeCoordinator(async (job, signal) => {
-      transitions.push(`start:${job.triggerKind}`);
-      await new Promise<void>((resolve) => signal.addEventListener("abort", () => {
-        transitions.push(`abort:${job.triggerKind}`);
-        resolve();
-      }, { once: true }));
-    });
-
-    void coordinator.start({
-      orenId: "oren-1",
-      episodeId: "background",
-      baseStateVersion: 1,
-      triggerKind: "health_check",
-      correlationId: "corr-background",
-    });
-    await coordinator.start({
-      orenId: "oren-1",
-      episodeId: "foreground",
-      baseStateVersion: 2,
-      triggerKind: "foreground_user",
-      correlationId: "corr-foreground",
-    });
-
-    expect(transitions.slice(0, 3)).toEqual([
-      "start:health_check",
-      "abort:health_check",
-      "start:foreground_user",
-    ]);
-  });
-
-  it("awaits aborted cleanup before running the deterministic highest-priority pending job", async () => {
-    const transitions: string[] = [];
-    let releaseCleanup!: () => void;
-    const cleanup = new Promise<void>((resolve) => {
-      releaseCleanup = resolve;
-    });
-    const coordinator = new EpisodeCoordinator(async (job, signal) => {
-      transitions.push(`start:${job.episodeId}`);
-      if (job.episodeId === "background") {
-        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
-        transitions.push(`cleanup:${String(signal.reason)}`);
-        await cleanup;
-      }
-    });
-
-    await coordinator.start(job("background", "health_check"));
-    const wake = coordinator.start(job("wake", "scheduled_wake"));
-    const effect = coordinator.start(job("effect", "effect_result"));
-    await Promise.resolve();
-    expect(transitions).toEqual([
-      "start:background",
-      "cleanup:trigger_priority",
-    ]);
-
-    releaseCleanup();
-    await effect;
-    expect(transitions).toEqual([
-      "start:background",
-      "cleanup:trigger_priority",
-      "start:effect",
-    ]);
-    await wake;
-    expect(transitions.at(-1)).toBe("start:wake");
-  });
-
-  it("queues lower-priority durable work instead of dropping it", async () => {
-    const transitions: string[] = [];
-    let releaseForeground!: () => void;
-    const foregroundDone = new Promise<void>((resolve) => {
-      releaseForeground = resolve;
-    });
-    const coordinator = new EpisodeCoordinator(async (candidate) => {
-      transitions.push(candidate.episodeId);
-      if (candidate.episodeId === "foreground") await foregroundDone;
-    });
-
-    await coordinator.start(job("foreground", "foreground_user"));
-    const background = coordinator.start(job("background", "health_check"));
-    await Promise.resolve();
-    expect(transitions).toEqual(["foreground"]);
-
-    releaseForeground();
-    await background;
-    expect(transitions).toEqual(["foreground", "background"]);
-  });
-
-  it("contains an aborted episode rejection and still starts its foreground replacement", async () => {
-    const transitions: string[] = [];
-    const coordinator = new EpisodeCoordinator(async (candidate, signal) => {
-      transitions.push(`start:${candidate.episodeId}`);
-      if (candidate.episodeId === "background") {
-        await new Promise<void>((_resolve, reject) => {
-          signal.addEventListener("abort", () => reject(new Error("cleanup failed")), { once: true });
-        });
-      }
-    });
-
-    await coordinator.start(job("background", "health_check"));
-    await expect(coordinator.start(job("foreground", "foreground_user"))).resolves.toBeUndefined();
-    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
-    expect(transitions).toEqual(["start:background", "start:foreground"]);
-  });
-
-  it("allows different Orens to run concurrently", async () => {
-    const active = new Set<string>();
-    let observedConcurrent = false;
-    let release!: () => void;
-    const done = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const coordinator = new EpisodeCoordinator(async (candidate) => {
-      active.add(candidate.orenId);
-      observedConcurrent ||= active.size === 2;
-      await done;
-      active.delete(candidate.orenId);
-    });
-
-    await coordinator.start(job("episode-a", "foreground_user", "oren-a"));
-    await coordinator.start(job("episode-b", "foreground_user", "oren-b"));
-    expect(observedConcurrent).toBe(true);
-    release();
-    await Promise.all([
-      coordinator.waitForIdle("oren-a"),
-      coordinator.waitForIdle("oren-b"),
-    ]);
-  });
-
-  it("installs the active slot before a run callback can reentrantly enqueue work", async () => {
-    let active = 0;
-    let maximumActive = 0;
-    let releaseFirst!: () => void;
-    const firstDone = new Promise<void>((resolve) => {
-      releaseFirst = resolve;
-    });
-    let coordinator!: EpisodeCoordinator;
-    coordinator = new EpisodeCoordinator(async (candidate) => {
-      active += 1;
-      maximumActive = Math.max(maximumActive, active);
-      if (candidate.episodeId === "first") {
-        void coordinator.start(job("second", "health_check"));
-        await firstDone;
-      }
-      active -= 1;
-    });
-
-    await coordinator.start(job("first", "health_check"));
-    expect(maximumActive).toBe(1);
-    releaseFirst();
-    await coordinator.waitForIdle("oren-1");
-    expect(maximumActive).toBe(1);
-  });
-
-  it("shutdown aborts active work and durably closes pending and new jobs without cognition", async () => {
-    const cognition: string[] = [];
-    const closed: Array<{ episodeId: string; reason: unknown }> = [];
-    const coordinator = new EpisodeCoordinator(
-      async (candidate, signal) => {
-        cognition.push(candidate.episodeId);
-        if (candidate.episodeId === "active") {
-          await new Promise<void>((resolve) => {
-            signal.addEventListener("abort", () => resolve(), { once: true });
-          });
-        }
+describe("episode lifecycle coordinator", () => {
+  it("delivers foreground speech and completes without a commit", async () => {
+    const harness = actorHarness();
+    const speech = speechHarness();
+    const cognition = scripted([
+      { type: "speech.started", utteranceId: "message-1" },
+      { type: "speech.delta", utteranceId: "message-1", text: "你好" },
+      { type: "speech.completed", utteranceId: "message-1" },
+      {
+        type: "episode.completed",
+        reason: "stop",
+        usage: { totalTokens: 3 },
       },
-      async (candidate, signal) => {
-        closed.push({ episodeId: candidate.episodeId, reason: signal.reason });
+    ]);
+    const coordinator = coordinatorFor(harness, cognition, speech.port);
+
+    await coordinator.run(job("foreground_user"), new AbortController().signal);
+
+    expect(speech.events).toEqual([
+      {
+        type: "speech.started",
+        episodeId: "episode-1",
+        messageId: "message-1",
       },
-    );
-
-    await coordinator.start(job("active", "health_check"));
-    void coordinator.start(job("pending-a", "health_check"));
-    void coordinator.start(job("pending-b", "scheduled_wake"));
-
-    await expect(coordinator.interrupt("oren-1", "shutdown")).resolves.toBeUndefined();
-    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
-    await expect(coordinator.start(job("after-shutdown", "foreground_user"))).resolves.toBeUndefined();
-    await expect(coordinator.waitForIdle("oren-1")).resolves.toBeUndefined();
-
-    expect(cognition).toEqual(["active"]);
-    expect(closed).toEqual([
-      { episodeId: "pending-b", reason: "shutdown" },
-      { episodeId: "pending-a", reason: "shutdown" },
-      { episodeId: "after-shutdown", reason: "shutdown" },
+      { type: "speech.delta", messageId: "message-1", text: "你好" },
+      {
+        type: "speech.completed",
+        messageId: "message-1",
+        status: "complete",
+      },
+    ]);
+    expect(harness.events.map(({ payload }) => payload.type)).toEqual([
+      "AssistantMessageDelivered",
+      "CognitionCompleted",
     ]);
   });
 
-  it("requires explicit resume before cognition starts after shutdown", async () => {
-    const cognition: string[] = [];
-    const closed: string[] = [];
-    const coordinator = new EpisodeCoordinator(
-      async (candidate) => {
-        cognition.push(candidate.episodeId);
+  it("keeps delivered speech when a later commit is rejected", async () => {
+    const harness = actorHarness(true);
+    const speech = speechHarness();
+    const cognition: StreamingCognitionPort = {
+      stream(_frame, handlers) {
+        return (async function* (): AsyncIterable<CognitionEvent> {
+          yield { type: "speech.started", utteranceId: "message-1" };
+          yield { type: "speech.delta", utteranceId: "message-1", text: "先回答。" };
+          yield { type: "speech.completed", utteranceId: "message-1" };
+          const receipt = await handlers.submitCommit({
+            commitId: "commit-1",
+            proposals: [{
+              type: "AdvanceThread",
+              threadId: "thread-1",
+              summary: "later",
+            }],
+          }, new AbortController().signal);
+          yield { type: "commit.resolved", receipt };
+          yield {
+            type: "episode.completed",
+            reason: "stop",
+            usage: { totalTokens: 4 },
+          };
+        })();
       },
-      async (candidate) => {
-        closed.push(candidate.episodeId);
-      },
-    );
+    };
+    const coordinator = coordinatorFor(harness, cognition, speech.port);
 
-    await coordinator.interrupt("oren-1", "shutdown");
-    await coordinator.start(job("closed", "health_check"));
-    coordinator.resume("oren-1");
-    await coordinator.start(job("resumed", "health_check"));
-    await coordinator.waitForIdle("oren-1");
+    await coordinator.run(job("foreground_user"), new AbortController().signal);
 
-    expect(closed).toEqual(["closed"]);
-    expect(cognition).toEqual(["resumed"]);
+    expect(harness.events.map(({ payload }) => payload.type)).toEqual([
+      "AssistantMessageDelivered",
+      "CognitionCommitRejected",
+      "CognitionCompleted",
+    ]);
   });
 
-  it("a non-shutdown interruption preserves queued work", async () => {
-    const transitions: string[] = [];
-    const coordinator = new EpisodeCoordinator(async (candidate, signal) => {
-      transitions.push(`start:${candidate.episodeId}`);
-      if (candidate.episodeId === "active") {
-        await new Promise<void>((resolve) => {
-          signal.addEventListener("abort", () => {
-            transitions.push(`abort:${String(signal.reason)}`);
-            resolve();
-          }, { once: true });
-        });
-      }
+  it("records partial foreground speech as interrupted on abort", async () => {
+    const harness = actorHarness();
+    const speech = speechHarness();
+    const coordinator = coordinatorFor(harness, scripted([
+      { type: "speech.started", utteranceId: "message-1" },
+      { type: "speech.delta", utteranceId: "message-1", text: "说到一半" },
+      { type: "episode.aborted", usage: { totalTokens: 2 } },
+    ]), speech.port);
+
+    await coordinator.run(job("foreground_user"), new AbortController().signal);
+
+    expect(speech.events.at(-1)).toEqual({
+      type: "speech.completed",
+      messageId: "message-1",
+      status: "interrupted",
     });
+    expect(harness.events.map(({ payload }) => payload.type)).toEqual([
+      "AssistantMessageDelivered",
+      "EpisodeInterrupted",
+    ]);
+    expect(harness.events[0]?.payload).toMatchObject({ status: "interrupted" });
+  });
 
-    await coordinator.start(job("active", "health_check"));
-    void coordinator.start(job("queued", "health_check"));
-    await coordinator.interrupt("oren-1", "cognition_abort");
-    await coordinator.waitForIdle("oren-1");
+  it("suppresses raw background speech", async () => {
+    const harness = actorHarness();
+    const speech = speechHarness();
+    const coordinator = coordinatorFor(harness, scripted([
+      { type: "speech.started", utteranceId: "private-1" },
+      { type: "speech.delta", utteranceId: "private-1", text: "不应直接展示" },
+      { type: "speech.completed", utteranceId: "private-1" },
+      {
+        type: "episode.completed",
+        reason: "stop",
+        usage: { totalTokens: 3 },
+      },
+    ]), speech.port);
 
-    expect(transitions).toEqual([
-      "start:active",
-      "abort:cognition_abort",
-      "start:queued",
+    await coordinator.run(job("effect_result"), new AbortController().signal);
+
+    expect(speech.events).toEqual([]);
+    expect(harness.events.map(({ payload }) => payload.type)).toEqual([
+      "CognitionCompleted",
+    ]);
+  });
+
+  it("fails malformed speech ordering instead of persisting a blank message", async () => {
+    const harness = actorHarness();
+    const speech = speechHarness();
+    const coordinator = coordinatorFor(harness, scripted([
+      { type: "speech.delta", utteranceId: "missing", text: "orphan" },
+      {
+        type: "episode.completed",
+        reason: "stop",
+        usage: { totalTokens: 1 },
+      },
+    ]), speech.port);
+
+    await coordinator.run(job("foreground_user"), new AbortController().signal);
+
+    expect(speech.events).toEqual([]);
+    expect(harness.events.map(({ payload }) => payload.type)).toEqual([
+      "CognitionFailed",
     ]);
   });
 });
 
-function job(
-  episodeId: string,
-  triggerKind: "foreground_user" | "effect_result" | "scheduled_wake" | "health_check",
-  orenId = "oren-1",
-) {
+function job(triggerKind: CognitionJob["triggerKind"]): CognitionJob {
   return {
-    orenId,
-    episodeId,
-    baseStateVersion: 1,
+    orenId: "oren-1",
+    episodeId: "episode-1",
+    baseStateVersion: 2,
     triggerKind,
-    correlationId: `corr:${episodeId}`,
-  } as const;
+    correlationId: "corr-1",
+  };
+}
+
+function scripted(events: readonly CognitionEvent[]): StreamingCognitionPort {
+  return {
+    stream() {
+      return (async function* (): AsyncIterable<CognitionEvent> {
+        for (const event of events) yield event;
+      })();
+    },
+  };
+}
+
+function speechHarness(): {
+  readonly events: SpeechEvent[];
+  readonly port: ForegroundSpeechPort;
+} {
+  const events: SpeechEvent[] = [];
+  return {
+    events,
+    port: {
+      async startSpeech(input) {
+        events.push({ type: "speech.started", ...input });
+      },
+      async appendSpeech(input) {
+        events.push({ type: "speech.delta", ...input });
+      },
+      async completeSpeech(input) {
+        events.push({ type: "speech.completed", ...input });
+      },
+    },
+  };
+}
+
+function actorHarness(rejectFirstCommit = false) {
+  let state = {
+    ...createInitialLifeState("oren-1", "person-1"),
+    version: 2,
+  };
+  const events: EventEnvelope[] = [];
+  let rejected = false;
+  const apply = (accepted: readonly EventEnvelope[]) => {
+    events.push(...accepted);
+    state = accepted.reduce(reduceLifeState, state);
+  };
+  const repository: LifeRepositoryPort = {
+    loadState: () => state,
+    loadEvents: () => events,
+    commit: (_orenId, accepted) => apply(accepted),
+    commitIfVersion: (_orenId, expectedVersion, accepted) => {
+      if (
+        rejectFirstCommit
+        && !rejected
+        && accepted[0]?.payload.type === "CognitionCommitAccepted"
+      ) {
+        rejected = true;
+        return false;
+      }
+      if (state.version !== expectedVersion) return false;
+      apply(accepted);
+      return true;
+    },
+    commitInbox: () => false,
+    commitDeliverInbox: () => false,
+  };
+  let id = 0;
+  return {
+    actor: new LifeActor(
+      repository,
+      () => `event-${++id}`,
+      () => "2026-07-26T00:00:00.000Z",
+    ),
+    events,
+    get state() {
+      return state;
+    },
+  };
+}
+
+function coordinatorFor(
+  harness: ReturnType<typeof actorHarness>,
+  cognition: StreamingCognitionPort,
+  speech: ForegroundSpeechPort,
+): EpisodeCoordinator {
+  return new EpisodeCoordinator(
+    cognition,
+    new Conductor(),
+    harness.actor,
+    new Guard(),
+    (candidate) => ({
+      state: harness.state,
+      correlationId: candidate.correlationId,
+      trigger: { kind: candidate.triggerKind, summary: "test" },
+      capabilities: [],
+      maxSteps: 8,
+    }),
+    { invoke: async () => ({ kind: "rejected", reason: "unused" }) },
+    speech,
+  );
 }

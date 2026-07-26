@@ -18,6 +18,31 @@ describe("ScriptedChannelAdapter", () => {
 });
 
 describe("PanelInboxAdapter", () => {
+  it("publishes ordered speech events and retains a completed utterance", async () => {
+    const port = new PanelInboxAdapter(() => "2026-07-26T12:00:00.000Z");
+    const observed: unknown[] = [];
+    const unsubscribe = port.subscribeSpeech((event) => observed.push(event));
+
+    await port.startSpeech({ episodeId: "e1", messageId: "m1" });
+    await port.appendSpeech({ messageId: "m1", text: "你" });
+    await port.appendSpeech({ messageId: "m1", text: "好" });
+    await port.completeSpeech({ messageId: "m1", status: "complete" });
+
+    expect(observed).toEqual([
+      { type: "speech.started", episodeId: "e1", messageId: "m1" },
+      { type: "speech.delta", messageId: "m1", text: "你" },
+      { type: "speech.delta", messageId: "m1", text: "好" },
+      { type: "speech.completed", messageId: "m1", status: "complete" },
+    ]);
+    expect(port.liveMessages.get("m1")).toEqual({
+      episodeId: "e1",
+      messageId: "m1",
+      text: "你好",
+      status: "complete",
+    });
+    unsubscribe();
+  });
+
   it("stores messages with deliveredAt", async () => {
     const port = new PanelInboxAdapter(() => "2026-07-26T12:00:00.000Z");
     const r = await port.deliver({
