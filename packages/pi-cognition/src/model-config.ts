@@ -1,4 +1,5 @@
 // packages/pi-cognition/src/model-config.ts
+import { existsSync } from "node:fs";
 import {
   getModels,
   getProviders,
@@ -6,6 +7,12 @@ import {
   type Model,
 } from "@earendil-works/pi-ai";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import {
+  findOrenConfigPath,
+  loadOrenConfigFile,
+  OREN_CONFIG_ENV,
+  type OrenFileConfig,
+} from "./oren-config-file.js";
 
 export const MODEL_PROVIDER_ENV = "OREN_MODEL_PROVIDER";
 export const MODEL_ID_ENV = "OREN_MODEL_ID";
@@ -53,20 +60,58 @@ export type ModelConfigResult =
   | { readonly ok: false; readonly kind: "unconfigured"; readonly reason: string }
   | { readonly ok: false; readonly kind: "invalid"; readonly reason: string };
 
+export type ResolveModelConfigOptions = {
+  readonly configPath?: string;
+  readonly searchFrom?: string;
+  readonly loadFile?: boolean;
+};
+
+function loadFileConfig(
+  env: Readonly<Record<string, string | undefined>>,
+  options?: ResolveModelConfigOptions,
+): { readonly ok: true; readonly config?: OrenFileConfig } | ModelConfigResult {
+  const explicit = options?.configPath ?? env[OREN_CONFIG_ENV]?.trim();
+  if (explicit) {
+    if (!existsSync(explicit)) {
+      return {
+        ok: false,
+        kind: "invalid",
+        reason: `OREN_CONFIG path does not exist: ${explicit}`,
+      };
+    }
+    const loadResult = loadOrenConfigFile(explicit);
+    if (!loadResult.ok) return loadResult;
+    return { ok: true, config: loadResult.config };
+  }
+
+  const found = findOrenConfigPath(options?.searchFrom ?? process.cwd());
+  if (!found) return { ok: true };
+
+  const loadResult = loadOrenConfigFile(found);
+  if (!loadResult.ok) return loadResult;
+  return { ok: true, config: loadResult.config };
+}
+
 export function resolveModelConfig(
   env: Readonly<Record<string, string | undefined>>,
+  options?: ResolveModelConfigOptions,
 ): ModelConfigResult {
-  const provider = env[MODEL_PROVIDER_ENV]?.trim();
-  const modelId = env[MODEL_ID_ENV]?.trim();
+  let fileConfig: OrenFileConfig | undefined;
+
+  if (options?.loadFile !== false) {
+    const loaded = loadFileConfig(env, options);
+    if (!loaded.ok) return loaded;
+    fileConfig = loaded.config;
+  }
+
+  const provider = env[MODEL_PROVIDER_ENV]?.trim() || fileConfig?.model.provider;
+  const modelId = env[MODEL_ID_ENV]?.trim() || fileConfig?.model.id;
   if (!provider || !modelId) {
-    const missing = [
-      !provider ? MODEL_PROVIDER_ENV : null,
-      !modelId ? MODEL_ID_ENV : null,
-    ].filter((name): name is string => name !== null);
     return {
       ok: false,
       kind: "unconfigured",
-      reason: `Real-model mode is disabled. Set ${missing.join(" and ")} `
+      reason: `Real-model mode is disabled. Set ${MODEL_PROVIDER_ENV} and ${MODEL_ID_ENV}, `
+        + `or model.provider and model.id in oren.json `
         + `(plus the provider's API key env var) to enable it.`,
     };
   }
@@ -106,7 +151,7 @@ export function resolveModelConfig(
     };
   }
 
-  const streamFn: StreamFn = (streamModel, context, options) =>
-    streamSimple(streamModel, context, { ...options, apiKey });
+  const streamFn: StreamFn = (streamModel, context, streamOptions) =>
+    streamSimple(streamModel, context, { ...streamOptions, apiKey });
   return { ok: true, model, streamFn };
 }
