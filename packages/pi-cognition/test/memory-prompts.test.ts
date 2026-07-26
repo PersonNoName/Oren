@@ -40,7 +40,7 @@ describe("memory prompts", () => {
     expect(prompt).toContain("Remember");
     expect(prompt).toContain("ReviseBelief");
     expect(prompt).toContain("Forget");
-    expect(prompt).toContain("memory.recall");
+    expect(prompt).toContain("memory_recall");
   });
 
   it("user prompt renders memory pins with memoryId", () => {

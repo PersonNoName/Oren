@@ -55,6 +55,23 @@ function getApiKeyEnvVarNames(provider: string): readonly string[] {
   return PROVIDER_API_KEY_ENV_VARS[provider] ?? [];
 }
 
+function findOtherProviderKeysPresent(
+  env: Readonly<Record<string, string | undefined>>,
+  configuredProvider: string,
+): readonly string[] {
+  const hints: string[] = [];
+  for (const [provider, names] of Object.entries(PROVIDER_API_KEY_ENV_VARS)) {
+    if (provider === configuredProvider) continue;
+    const present = names.filter(
+      (name) => typeof env[name] === "string" && env[name]!.length > 0,
+    );
+    if (present.length > 0) {
+      hints.push(`${provider} via ${present.join("/")}`);
+    }
+  }
+  return hints;
+}
+
 export type ModelConfigResult =
   | { readonly ok: true; readonly model: Model<any>; readonly streamFn: StreamFn }
   | { readonly ok: false; readonly kind: "unconfigured"; readonly reason: string }
@@ -146,11 +163,16 @@ export function resolveModelConfig(
     (value): value is string => typeof value === "string" && value.length > 0,
   );
   if (!apiKey) {
+    const otherKeys = findOtherProviderKeysPresent(env, knownProvider);
+    const mismatchHint = otherKeys.length > 0
+      ? ` Other provider key(s) are set (${otherKeys.join(", ")}), but provider is "${provider}"`
+        + ` — update oren.json / ${MODEL_PROVIDER_ENV} or set ${keyNames.join(" / ")}.`
+      : "";
     return {
       ok: false,
       kind: "invalid",
       reason: keyNames.length > 0
-        ? `Missing API key for provider "${provider}". Set one of: ${keyNames.join(", ")}.`
+        ? `Missing API key for provider "${provider}". Set one of: ${keyNames.join(", ")}.${mismatchHint}`
         : `Provider "${provider}" has no known API key env var in pi-ai.`,
     };
   }

@@ -1,4 +1,5 @@
 import type { CognitionOutcome, LifeFrame } from "@oren/cognition";
+import { formatEffectResultSummary } from "@oren/cognition";
 import { canonicalizeProposal, type CapabilityDescriptor } from "@oren/kernel";
 import type { RecordedInvocation, Scenario } from "./harness.js";
 
@@ -270,12 +271,25 @@ export function allScenarios(): readonly Scenario[] {
       frame: frame({
         trigger: {
           kind: "effect_result",
-          summary: "test.increment 完成：计数器现在是 1（effect-eval-1 回执已确认）。",
+          summary: formatEffectResultSummary({
+            capability: "test.increment",
+            effectId: "effect-eval-1",
+            status: "completed",
+            receipt: { value: 1 },
+          }),
         },
         attention: { focus: "计数器加一", threadIds: ["counter"] },
       }),
       capabilityScript: () => ({ kind: "rejected", reason: "no further capability needed" }),
-      assert: completedWithValidProposals,
+      assert: (outcome, invocations) => {
+        const durableCalls = invocations.filter(
+          ({ capability }) => capability === "test.increment",
+        );
+        if (durableCalls.length > 0) {
+          return ["effect_result must not re-invoke durable test.increment"];
+        }
+        return completedWithValidProposals(outcome);
+      },
     },
     {
       id: "s05-nothing-to-do",

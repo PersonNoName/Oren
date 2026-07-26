@@ -3,6 +3,7 @@ import { PanelInboxAdapter, ScriptedChannelAdapter, type ChannelPort } from "@or
 import {
   Conductor,
   ScriptedCognitionAdapter,
+  resolveTriggerSummary,
   type CognitionPort,
 } from "@oren/cognition";
 import {
@@ -184,6 +185,12 @@ export class LifeRuntime {
                 summary: "Understand the counter lifecycle",
               },
               {
+                type: "Remember",
+                text: "判断：该计数器用于演示持久效应与回执续接",
+                kind: "oren_judgment",
+                confidence: 0.7,
+              },
+              {
                 type: "ScheduleWake",
                 scheduleId: "counter-follow-up",
                 at: FUTURE_WAKE,
@@ -296,10 +303,18 @@ export class LifeRuntime {
           const newRecords = repository.loadEventRecordsAfter(memory.cursor());
           if (newRecords.length > 0) await memory.project(newRecords);
           const pins = await recallPinsWithFallback(memory, job.orenId, state.attention.currentFocus);
+          const events = repository.loadEvents(job.orenId);
           return {
             state,
             correlationId: job.correlationId,
-            trigger: { kind: job.triggerKind, summary: job.correlationId },
+            trigger: {
+              kind: job.triggerKind,
+              summary: resolveTriggerSummary({
+                triggerKind: job.triggerKind,
+                correlationId: job.correlationId,
+                events,
+              }),
+            },
             capabilities: registry.listCapabilities(),
             maxSteps: 8,
             memoryPins: pins.map((entry) => ({

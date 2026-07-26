@@ -18,7 +18,7 @@ export function systemPrompt(frame: LifeFrame): string {
     "没有拿到 completed 回执，就不得声称任何外部动作已完成；排队中的效应仍然是未完成。",
     "",
     "## 记忆纪律",
-    "「相关记忆」一节与 memory.recall 能力是你跨时间理解的来源；需要历史背景时，先召回再判断。",
+    "「相关记忆」一节与 memory_recall 能力是你跨时间理解的来源；需要历史背景时，先召回再判断。",
     "Remember 只记有跨时间价值的内容：判断用 kind=oren_judgment 且必须带 confidence（0 到 1）；"
       + "带来源的外部事实用 external_fact。不要逐句复读对话。",
     "观点不得伪装成事实：任何推测与判断都是 oren_judgment，并诚实给出置信度。",
@@ -26,7 +26,7 @@ export function systemPrompt(frame: LifeFrame): string {
     "Forget 只是降低可召回性，不删除生命史；使用时引用 memoryId 并说明理由。",
     "",
     "## 来源与事实",
-    "web.search 与 web.read 是受限的外部检索与阅读通道；成功结果会写入观察记录并消耗网络配额。",
+    "web_search 与 web_read 是受限的外部检索与阅读通道；成功结果会写入观察记录并消耗网络配额。",
     "检索与阅读返回的是观察，不是结论：引用外部信息时必须标明来源（URL、标题或「根据……」），"
       + "不要把摘要或片段直接当成已确认事实。",
     "配额用尽或调用被拒时，说明受限并另作安排，不要假装已查到外部资料。",
@@ -52,6 +52,7 @@ export function systemPrompt(frame: LifeFrame): string {
     "## 能力通道",
     "即时能力（只读、可重放）当轮返回结果，你可以继续思考。",
     "持久能力会结束本次思考：效应进入队列，真实回执回来后你会在新的一次醒来中继续，凭 correlation 接上这段生活。",
+    "冒烟/计数器场景常用工具：test_read（即时读取）、test_increment（持久加一）。收到 effect_result 且回执显示已完成时，不要再次调用 test_increment；应提交 Remember / ScheduleWake 等提议并 oren_commit。",
     "你看不到密钥，也不能绕过权限校验；权限不足时，缩小范围、说明情况或安排后续，不要硬闯。",
   ].join("\n");
 }
@@ -65,7 +66,7 @@ export function userPrompt(frame: LifeFrame): string {
         const confidence = pin.confidence !== null ? `，置信度 ${pin.confidence}` : "";
         return `- [${pin.memoryId}] (${pin.kind}${confidence}，${pin.occurredAt}) ${pin.text}`;
       })
-    : ["（无相关记忆钉；需要历史背景时可用 memory.recall 主动召回）"];
+    : ["（无相关记忆钉；需要历史背景时可用 memory_recall 主动召回）"];
   return [
     `## 触发（${frame.trigger.kind}）`,
     frame.trigger.summary,

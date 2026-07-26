@@ -27,6 +27,12 @@ function scriptedCognition() {
       kind: "completed",
       proposals: [
         { type: "AdvanceThread", threadId: "smoke", summary: "Counter incremented" },
+        {
+          type: "Remember",
+          text: "判断：该计数器用于 smoke 垂直切片验证",
+          kind: "oren_judgment",
+          confidence: 0.8,
+        },
         { type: "ScheduleWake", scheduleId: "smoke-wake", at: FUTURE_WAKE, purpose: "Revisit" },
       ],
       usage: { totalTokens: 7 },
