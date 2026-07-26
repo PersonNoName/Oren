@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Oren Panel</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 48rem; margin: 1rem auto; padding: 0 1rem; line-height: 1.5; }
+    section { margin-bottom: 2rem; }
+    h1 { font-size: 1.25rem; }
+    h2 { font-size: 1rem; margin-bottom: 0.5rem; }
+    ul { padding-left: 1.25rem; }
+    li { margin-bottom: 0.25rem; }
+    form { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+    input, select, button, textarea { font: inherit; }
+    textarea { width: 100%; min-height: 3rem; }
+    .empty { color: #666; font-style: italic; }
+    pre { background: #f4f4f4; padding: 0.5rem; overflow-x: auto; font-size: 0.875rem; }
+  </style>
+</head>
+<body>
+  <h1>Oren Life Panel</h1>
+
+  <section id="inbox">
+    <h2>Inbox</h2>
+    <ul id="inbox-list"></ul>
+  </section>
+
+  <section id="commitments">
+    <h2>Commitments</h2>
+    <ul id="commitments-list"></ul>
+  </section>
+
+  <section id="grants">
+    <h2>Grants</h2>
+    <ul id="grants-list"></ul>
+  </section>
+
+  <section id="budgets">
+    <h2>Budgets</h2>
+    <pre id="budgets-view"></pre>
+  </section>
+
+  <section id="ledger">
+    <h2>Action Ledger</h2>
+    <ul id="ledger-list"></ul>
+  </section>
+
+  <section>
+    <h2>Send Message</h2>
+    <form id="message-form">
+      <textarea name="text" placeholder="Message to Oren" required></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Update Commitment</h2>
+    <form id="commitment-form">
+      <input name="commitmentId" placeholder="Commitment ID" required>
+      <select name="status">
+        <option value="active">active</option>
+        <option value="paused">paused</option>
+        <option value="done">done</option>
+      </select>
+      <input name="nextStep" placeholder="Next step (optional)">
+      <input name="reason" placeholder="Reason" required>
+      <button type="submit">Update</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Revoke Grant</h2>
+    <form id="revoke-form">
+      <input name="grantId" placeholder="Grant ID" required>
+      <input name="reason" placeholder="Reason" required>
+      <button type="submit">Revoke</button>
+    </form>
+  </section>
+
+  <script>
+    function el(id) { return document.getElementById(id); }
+
+    function renderList(container, items, renderItem) {
+      container.innerHTML = "";
+      if (!items || items.length === 0) {
+        const li = document.createElement("li");
+        li.className = "empty";
+        li.textContent = "None";
+        container.appendChild(li);
+        return;
+      }
+      for (const item of items) {
+        const li = document.createElement("li");
+        li.innerHTML = renderItem(item);
+        container.appendChild(li);
+      }
+    }
+
+    async function loadSnapshot() {
+      const res = await fetch("/api/snapshot");
+      const snap = await res.json();
+
+      renderList(el("inbox-list"), snap.inbox, (m) =>
+        `<strong>${m.status}</strong> ${m.text} <em>(${m.reason})</em> <small>${m.at}</small>`
+      );
+
+      renderList(el("commitments-list"), snap.commitments, (c) =>
+        `<strong>${c.commitmentId}</strong> [${c.status}] ${c.goal} — ${c.nextStep}`
+      );
+
+      renderList(el("grants-list"), snap.grants, (g) =>
+        `<strong>${g.grantId}</strong> ${g.capabilityPattern} ${g.revoked ? "(revoked)" : ""}`
+      );
+
+      el("budgets-view").textContent = JSON.stringify(snap.budgets, null, 2);
+
+      renderList(el("ledger-list"), snap.actionLedger, (e) =>
+        `${e.at}: ${e.summary}`
+      );
+    }
+
+    el("message-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      await fetch("/api/message", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: fd.get("text") }),
+      });
+      e.target.reset();
+      await loadSnapshot();
+    });
+
+    el("commitment-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const id = fd.get("commitmentId");
+      const body = {
+        status: fd.get("status"),
+        reason: fd.get("reason"),
+      };
+      const nextStep = fd.get("nextStep");
+      if (nextStep) body.nextStep = nextStep;
+      await fetch(`/api/commitments/${encodeURIComponent(id)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      e.target.reset();
+      await loadSnapshot();
+    });
+
+    el("revoke-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const grantId = fd.get("grantId");
+      await fetch(`/api/grants/${encodeURIComponent(grantId)}/revoke`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: fd.get("reason") }),
+      });
+      e.target.reset();
+      await loadSnapshot();
+    });
+
+    loadSnapshot();
+  </script>
+</body>
+</html>
