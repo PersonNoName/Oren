@@ -1,0 +1,17 @@
+{
+  "name": "@oren/sim",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@oren/app": "*",
+    "@oren/channel": "*",
+    "@oren/cognition": "*",
+    "@oren/extensions": "*",
+    "@oren/kernel": "*",
+    "@oren/memory": "*",
+    "@oren/storage": "*",
+    "@oren/test-counter": "*",
+    "@oren/web": "*"
+  }
+}
