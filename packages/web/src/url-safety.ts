@@ -76,6 +76,10 @@ function parseIpv4MappedIpv6(addr: string): number[] | null {
 function isUnsafeIpv6(addr: string): string | null {
   const lower = stripIpv6Brackets(addr).toLowerCase();
 
+  if (!lower.includes(":")) {
+    return null;
+  }
+
   const mappedIpv4 = parseIpv4MappedIpv6(lower);
   if (mappedIpv4 !== null && isPrivateOrLocalIpv4(mappedIpv4)) {
     return "private or local IP address is not allowed";

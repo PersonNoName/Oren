@@ -8,6 +8,15 @@ describe("assertSafeHttpUrl", () => {
   });
 
   it.each([
+    "https://fc00.com/",
+    "https://fd00.com/",
+    "https://fe80.com/",
+  ])("allows DNS hostname that resembles IPv6 prefix %s", (raw) => {
+    const result = assertSafeHttpUrl(raw);
+    expect(result).toEqual({ ok: true, href: raw });
+  });
+
+  it.each([
     "http://127.0.0.1/",
     "http://192.168.0.1/",
     "http://10.0.0.2/",
