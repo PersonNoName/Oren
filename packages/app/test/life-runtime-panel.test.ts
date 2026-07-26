@@ -2,7 +2,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PanelInboxAdapter } from "@oren/channel";
-import type { CognitionOutcome, CognitionPort } from "@oren/cognition";
+import { ScriptedCognitionAdapter, type CognitionOutcome, type CognitionPort } from "@oren/cognition";
 import { FakeEmbedder } from "@oren/memory";
 import {
   createInitialLifeState,
@@ -36,6 +36,49 @@ function cognitionThatExpresses(text: string): CognitionPort {
       };
     },
   };
+}
+
+/** Durable test.increment on user message; ExpressToUser only after effect_result (needs drain). */
+function cognitionExpressingAfterDurableEffect(text: string): CognitionPort {
+  return new ScriptedCognitionAdapter(async (frame, capabilityPort, signal) => {
+    if (frame.trigger.kind === "foreground_user") {
+      const increment = frame.capabilities.find(({ name }) => name === "test.increment");
+      if (!increment) {
+        return {
+          kind: "failed",
+          message: "test.increment capability missing",
+          usage: { totalTokens: 0 },
+        };
+      }
+      const pending = await capabilityPort.invoke({
+        orenId: frame.orenId,
+        descriptor: increment,
+        arguments: { by: 1 },
+        stateVersion: frame.stateVersion,
+        correlationId: frame.correlationId,
+      }, signal);
+      if (pending.kind !== "waiting_for_effect") {
+        return {
+          kind: "failed",
+          message: "expected durable effect before express",
+          usage: { totalTokens: 0 },
+        };
+      }
+      return { ...pending, usage: { totalTokens: 0 } };
+    }
+    if (frame.trigger.kind === "effect_result") {
+      return {
+        kind: "completed",
+        proposals: [{ type: "ExpressToUser", text, reason: "after durable effect" }],
+        usage: { totalTokens: 0 },
+      };
+    }
+    return {
+      kind: "completed",
+      proposals: [{ type: "NoAction", reason: "unexpected trigger" }],
+      usage: { totalTokens: 0 },
+    };
+  });
 }
 
 function envelope(
@@ -128,14 +171,18 @@ describe("LifeRuntime panel", () => {
     }
   });
 
-  it("POST /api/message drains so inbox updates without an external drain call", async () => {
+  it("POST /api/message drains durable work before response (no external drain)", async () => {
     const path = tempDb();
-    const runtime = await LifeRuntime.create(path, cognitionThatExpresses("from panel post"), {
-      enablePanel: true,
-      now: () => DAY_NOW,
-      nextId: sequenceIds(),
-      embedder: new FakeEmbedder(),
-    });
+    const runtime = await LifeRuntime.create(
+      path,
+      cognitionExpressingAfterDurableEffect("from panel post"),
+      {
+        enablePanel: true,
+        now: () => DAY_NOW,
+        nextId: sequenceIds(),
+        embedder: new FakeEmbedder(),
+      },
+    );
     try {
       await runtime.initialize("oren-1", "person-1");
       const url = runtime.panelUrl();
@@ -148,6 +195,7 @@ describe("LifeRuntime panel", () => {
       });
       expect(post.ok).toBe(true);
 
+      // Cognition ends in waiting_for_effect; ExpressToUser needs drainToFixedPoint.
       // Intentionally no runtime.drain() here — postMessage must have drained.
       const res = await fetch(`${url}/api/snapshot`);
       const snapshot = await res.json();
