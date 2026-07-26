@@ -4,9 +4,16 @@ import { join } from "node:path";
 import { PanelInboxAdapter } from "@oren/channel";
 import type { CognitionOutcome, CognitionPort } from "@oren/cognition";
 import { FakeEmbedder } from "@oren/memory";
-import { Guard } from "@oren/kernel";
+import {
+  createInitialLifeState,
+  Guard,
+  type EventEnvelope,
+  type LifeState,
+} from "@oren/kernel";
+import { openDatabase, SqliteLifeRepository } from "@oren/storage";
 import { describe, expect, it } from "vitest";
 import { LifeRuntime } from "../src/index.js";
+import { buildPanelSnapshot } from "../src/panel-snapshot.js";
 
 const DAY_NOW = "2026-07-26T12:00:00.000Z";
 
@@ -27,6 +34,40 @@ function cognitionThatExpresses(text: string): CognitionPort {
         proposals: [{ type: "ExpressToUser", text, reason: "reply" }],
         usage: { totalTokens: 0 },
       };
+    },
+  };
+}
+
+function envelope(
+  eventId: string,
+  orenId: string,
+  correlationId: string,
+  payload: EventEnvelope["payload"],
+  occurredAt = DAY_NOW,
+): EventEnvelope {
+  return {
+    eventId,
+    orenId,
+    schemaVersion: 1,
+    occurredAt,
+    recordedAt: occurredAt,
+    source: "life-runtime-panel-test",
+    causationId: null,
+    correlationId,
+    payload,
+  };
+}
+
+function stateWithAutonomy(
+  orenId = "oren-1",
+  personId = "person-1",
+): LifeState {
+  return {
+    ...createInitialLifeState(orenId, personId),
+    budgets: {
+      autonomyRemaining: 32,
+      interactionMaxSteps: 8,
+      commitmentRemaining: {},
     },
   };
 }
@@ -145,6 +186,98 @@ describe("LifeRuntime panel", () => {
       );
     } finally {
       await runtime.close();
+    }
+  });
+
+  it("getPanelSnapshot inbox includes delivered after ExpressToUser delivery", async () => {
+    const path = tempDb();
+    const runtime = await LifeRuntime.create(path, cognitionThatExpresses("event hello"), {
+      now: () => DAY_NOW,
+      nextId: sequenceIds(),
+      embedder: new FakeEmbedder(),
+    });
+    try {
+      await runtime.initialize("oren-1", "person-1");
+      await runtime.receiveUserMessage("oren-1", "person-1", "hi");
+      await runtime.drain();
+
+      const snapshot = runtime.getPanelSnapshot();
+      expect(snapshot.inbox).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "delivered",
+            text: "event hello",
+          }),
+        ]),
+      );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("buildPanelSnapshot projects delivered inbox from events without adapter", () => {
+    const path = tempDb();
+    const repository = new SqliteLifeRepository(openDatabase(path), () => DAY_NOW);
+    const state = stateWithAutonomy();
+    repository.initialize(state);
+    repository.commit("oren-1", [
+      envelope("delivered", "oren-1", "corr-1", {
+        type: "MessageDelivered",
+        deliveryId: "delivery-event-only",
+        text: "from events",
+        reason: "reply",
+        channel: "panel",
+        proactive: false,
+      }),
+    ]);
+    try {
+      const snapshot = buildPanelSnapshot(repository, "oren-1", state);
+      expect(snapshot.inbox).toEqual([
+        expect.objectContaining({
+          deliveryId: "delivery-event-only",
+          status: "delivered",
+          text: "from events",
+        }),
+      ]);
+    } finally {
+      repository.close();
+    }
+  });
+
+  it("buildPanelSnapshot suppresses deferred row after later delivery for same id", () => {
+    const path = tempDb();
+    const repository = new SqliteLifeRepository(openDatabase(path), () => DAY_NOW);
+    const state = stateWithAutonomy();
+    repository.initialize(state);
+    const deliveryId = "delivery-defer-then-deliver";
+    repository.commit("oren-1", [
+      envelope("deferred", "oren-1", "corr-1", {
+        type: "MessageDeferred",
+        deliveryId,
+        text: "delayed hello",
+        reason: "progress",
+        deferUntil: DAY_NOW,
+        cause: "quiet_hours",
+      }),
+      envelope("delivered", "oren-1", "corr-1", {
+        type: "MessageDelivered",
+        deliveryId,
+        text: "delayed hello",
+        reason: "progress",
+        channel: "panel",
+        proactive: true,
+      }),
+    ]);
+    try {
+      const snapshot = buildPanelSnapshot(repository, "oren-1", state);
+      expect(snapshot.inbox).toHaveLength(1);
+      expect(snapshot.inbox[0]).toMatchObject({
+        deliveryId,
+        status: "delivered",
+        text: "delayed hello",
+      });
+    } finally {
+      repository.close();
     }
   });
 });

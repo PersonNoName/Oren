@@ -69,6 +69,19 @@ describe("evaluateReachability", () => {
     expect(d.action).toBe("defer");
     if (d.action === "defer") expect(d.cause).toBe("frequency_cap");
   });
+
+  it("defers all proactive when maxProactivePerDay is zero", () => {
+    const noProactive = {
+      ...base,
+      quietHours: null,
+      maxProactivePerDay: 0,
+      proactiveDayKey: null,
+      proactiveCountToday: 0,
+    };
+    const d = evaluateReachability(noProactive, "2026-07-26T12:00:00.000Z", true);
+    expect(d.action).toBe("defer");
+    if (d.action === "defer") expect(d.cause).toBe("frequency_cap");
+  });
 });
 
 describe("delivery + policy events", () => {

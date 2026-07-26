@@ -9,6 +9,15 @@ import type { SqliteLifeRepository } from "@oren/storage";
 
 const ACTION_LEDGER_LIMIT = 20;
 
+type InboxRow = PanelSnapshot["inbox"][number];
+type InboxStatus = InboxRow["status"];
+
+const INBOX_STATUS_RANK: Record<InboxStatus, number> = {
+  deferred: 1,
+  failed: 2,
+  delivered: 3,
+};
+
 function summarizeEvent(event: EventEnvelope): string | undefined {
   const payload = event.payload;
   switch (payload.type) {
@@ -23,6 +32,90 @@ function summarizeEvent(event: EventEnvelope): string | undefined {
   }
 }
 
+function mergeInboxRow(existing: InboxRow | undefined, incoming: InboxRow): InboxRow {
+  if (!existing) return incoming;
+  const existingRank = INBOX_STATUS_RANK[existing.status];
+  const incomingRank = INBOX_STATUS_RANK[incoming.status];
+  if (incomingRank > existingRank) return incoming;
+  if (incomingRank < existingRank) return existing;
+  return incoming.at >= existing.at ? incoming : existing;
+}
+
+function inboxRowFromEvent(event: EventEnvelope): InboxRow | undefined {
+  const payload = event.payload;
+  if (payload.type === "MessageDelivered") {
+    return {
+      deliveryId: payload.deliveryId,
+      text: payload.text,
+      reason: payload.reason,
+      status: "delivered",
+      proactive: payload.proactive,
+      at: event.occurredAt,
+    };
+  }
+  if (payload.type === "MessageDeferred") {
+    return {
+      deliveryId: payload.deliveryId,
+      text: payload.text,
+      reason: payload.reason,
+      status: "deferred",
+      deferUntil: payload.deferUntil,
+      at: event.occurredAt,
+    };
+  }
+  if (payload.type === "MessageDeliveryFailed") {
+    return {
+      deliveryId: payload.deliveryId,
+      text: payload.text,
+      reason: payload.reason,
+      status: "failed",
+      at: event.occurredAt,
+    };
+  }
+  return undefined;
+}
+
+function buildInboxFromEvents(events: readonly EventEnvelope[]): Map<string, InboxRow> {
+  const byDeliveryId = new Map<string, InboxRow>();
+  for (const event of events) {
+    const row = inboxRowFromEvent(event);
+    if (row === undefined) continue;
+    byDeliveryId.set(
+      row.deliveryId,
+      mergeInboxRow(byDeliveryId.get(row.deliveryId), row),
+    );
+  }
+  return byDeliveryId;
+}
+
+function overlayAdapterMessages(
+  byDeliveryId: Map<string, InboxRow>,
+  inboxAdapter?: PanelInboxAdapter,
+): void {
+  for (const message of inboxAdapter?.messages ?? []) {
+    const existing = byDeliveryId.get(message.deliveryId);
+    const adapterRow: InboxRow = {
+      deliveryId: message.deliveryId,
+      text: message.text,
+      reason: message.reason,
+      status: "delivered",
+      proactive: message.proactive,
+      at: message.deliveredAt,
+    };
+    if (existing?.status === "delivered") {
+      byDeliveryId.set(message.deliveryId, {
+        ...existing,
+        text: adapterRow.text,
+        reason: adapterRow.reason,
+        at: adapterRow.at,
+        ...(message.proactive !== undefined ? { proactive: message.proactive } : {}),
+      });
+    } else if (existing === undefined) {
+      byDeliveryId.set(message.deliveryId, adapterRow);
+    }
+  }
+}
+
 export function buildPanelSnapshot(
   repository: SqliteLifeRepository,
   orenId: string,
@@ -31,37 +124,8 @@ export function buildPanelSnapshot(
 ): PanelSnapshot {
   const events = repository.loadEvents(orenId);
 
-  const inboxFromAdapter = (inboxAdapter?.messages ?? []).map((message) => ({
-    deliveryId: message.deliveryId,
-    text: message.text,
-    reason: message.reason,
-    status: "delivered" as const,
-    proactive: message.proactive,
-    at: message.deliveredAt,
-  }));
-
-  const inboxFromEvents: Array<PanelSnapshot["inbox"][number]> = [];
-  for (const event of events) {
-    const payload = event.payload;
-    if (payload.type === "MessageDeferred") {
-      inboxFromEvents.push({
-        deliveryId: payload.deliveryId,
-        text: payload.text,
-        reason: payload.reason,
-        status: "deferred",
-        deferUntil: payload.deferUntil,
-        at: event.occurredAt,
-      });
-    } else if (payload.type === "MessageDeliveryFailed") {
-      inboxFromEvents.push({
-        deliveryId: payload.deliveryId,
-        text: payload.text,
-        reason: payload.reason,
-        status: "failed",
-        at: event.occurredAt,
-      });
-    }
-  }
+  const inboxByDeliveryId = buildInboxFromEvents(events);
+  overlayAdapterMessages(inboxByDeliveryId, inboxAdapter);
 
   const publicDiary = events.flatMap((event) => {
     const payload = event.payload;
@@ -89,7 +153,7 @@ export function buildPanelSnapshot(
   }));
 
   return {
-    inbox: [...inboxFromAdapter, ...inboxFromEvents],
+    inbox: [...inboxByDeliveryId.values()],
     attention: state.attention,
     commitments: state.commitments ?? [],
     budgets: state.budgets,

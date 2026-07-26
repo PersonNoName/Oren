@@ -265,10 +265,10 @@ export class CognitionWorker {
           }
           if (this.onCognitionAccepted) {
             try {
-              // Delivery is best-effort after accept; proposals stay committed.
               await this.onCognitionAccepted(activeJob, outcome.proposals);
-            } catch (error) {
-              fail(`Delivery orchestration failed: ${errorMessage(error)}`);
+            } catch {
+              // Delivery is best-effort after accept; episode already completed.
+              return;
             }
           }
           return;

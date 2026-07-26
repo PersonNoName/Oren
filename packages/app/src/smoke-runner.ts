@@ -98,6 +98,7 @@ export async function runSmoke(
   const runtimeOptions = {
     useProcessEmbeddingEnv: useProcessEnv,
     useProcessWebEnv: useProcessEnv && webConfig.ok,
+    useProcessPanelEnv: useProcessEnv && env.OREN_PANEL === "1",
   };
   const first = await LifeRuntime.create(databasePath, recorder, runtimeOptions);
   try {

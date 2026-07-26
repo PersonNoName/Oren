@@ -663,6 +663,42 @@ describe("CognitionWorker", () => {
     });
   });
 
+  it("does not record CognitionFailed when onCognitionAccepted throws after accept", async () => {
+    const harness = actorHarness({
+      ...createInitialLifeState("oren-1", "person-1"),
+      version: 2,
+    });
+    const worker = new CognitionWorker(
+      {
+        run: async () => ({
+          kind: "completed",
+          proposals: [{ type: "NoAction", reason: "noop" }],
+          usage: { totalTokens: 0 },
+        }),
+      },
+      new Conductor(),
+      harness.actor,
+      new Guard(),
+      (candidate) => ({
+        state: harness.state,
+        correlationId: candidate.correlationId,
+        trigger: { kind: candidate.triggerKind, summary: "test" },
+        capabilities: [],
+        maxSteps: 1,
+      }),
+      { invoke: async () => ({ kind: "rejected", reason: "not used" }) },
+      async () => {
+        throw new Error("delivery exploded");
+      },
+    );
+
+    await worker.run(job("foreground_user"), new AbortController().signal);
+
+    expect(harness.events.map((event) => event.payload.type)).toEqual([
+      "CognitionCompleted",
+    ]);
+  });
+
   it("contains a durable terminal callback failure after attempting closure", async () => {
     let attempts = 0;
     const actor = {

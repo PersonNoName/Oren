@@ -136,6 +136,13 @@ export function evaluateReachability(
   if (!proactive) {
     return { action: "deliver" };
   }
+  if (policy.maxProactivePerDay <= 0) {
+    return {
+      action: "defer",
+      cause: "frequency_cap",
+      deferUntil: nextDeliverAt(policy, nowIso, "frequency_cap"),
+    };
+  }
   const dayKey = utcDayKey(nowIso);
   if (
     policy.proactiveDayKey === dayKey
