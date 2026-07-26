@@ -343,10 +343,44 @@ export class SqliteLifeRepository {
     }
   }
 
-  public loadGrants(orenId: string): Grant[] {
+  public loadGrants(orenId: string, options?: { readonly includeRevoked?: boolean }): Grant[] {
+    if (options?.includeRevoked === true) {
+      return this.db.prepare(`
+        SELECT grant_json, revoked_at FROM grants WHERE oren_id = ?
+      `).all(orenId).map((row) => {
+        const grant = JSON.parse(String(row.grant_json)) as Grant;
+        return { ...grant, revoked: row.revoked_at !== null };
+      });
+    }
     return this.db.prepare(`
       SELECT grant_json FROM grants WHERE oren_id = ? AND revoked_at IS NULL
     `).all(orenId).map((row) => JSON.parse(String(row.grant_json)) as Grant);
+  }
+
+  public listSchedulesForOren(orenId: string): Array<{
+    readonly scheduleId: string;
+    readonly dueAt: string;
+    readonly purpose: string;
+  }> {
+    return this.db.prepare(`
+      SELECT schedule_id, due_at, purpose
+      FROM schedules
+      WHERE oren_id = ?
+        AND delivered_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM schedule_quarantine
+          WHERE schedule_quarantine.schedule_id = schedules.schedule_id
+        )
+      ORDER BY due_at
+    `).all(orenId).flatMap((row) => {
+      const dueAt = canonicalizeInstant(String(row.due_at));
+      if (!dueAt) return [];
+      return [{
+        scheduleId: String(row.schedule_id),
+        dueAt,
+        purpose: String(row.purpose),
+      }];
+    });
   }
 
   public revokeGrant(orenId: string, grantId: string, revokedAtIso: string): boolean {

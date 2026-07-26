@@ -41,6 +41,23 @@
     <pre id="budgets-view"></pre>
   </section>
 
+  <section id="reachability">
+    <h2>Reachability</h2>
+    <pre id="reachability-view"></pre>
+    <form id="reachability-form">
+      <label>
+        Max proactive per day
+        <input name="maxProactivePerDay" type="number" min="0" required>
+      </label>
+      <label>
+        <input name="disableQuietHours" type="checkbox">
+        Disable quiet hours
+      </label>
+      <input name="reason" placeholder="Reason" required>
+      <button type="submit">Update</button>
+    </form>
+  </section>
+
   <section id="ledger">
     <h2>Action Ledger</h2>
     <ul id="ledger-list"></ul>
@@ -115,6 +132,11 @@
 
       el("budgets-view").textContent = JSON.stringify(snap.budgets, null, 2);
 
+      el("reachability-view").textContent = JSON.stringify(snap.reachability, null, 2);
+      const reachForm = el("reachability-form");
+      reachForm.maxProactivePerDay.value = snap.reachability.maxProactivePerDay;
+      reachForm.disableQuietHours.checked = snap.reachability.quietHours === null;
+
       renderList(el("ledger-list"), snap.actionLedger, (e) =>
         `${e.at}: ${e.summary}`
       );
@@ -159,6 +181,25 @@
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ reason: fd.get("reason") }),
+      });
+      e.target.reset();
+      await loadSnapshot();
+    });
+
+    el("reachability-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const res = await fetch("/api/snapshot");
+      const snap = await res.json();
+      const policy = {
+        ...snap.reachability,
+        maxProactivePerDay: Number(fd.get("maxProactivePerDay")),
+        quietHours: fd.get("disableQuietHours") === "on" ? null : snap.reachability.quietHours,
+      };
+      await fetch("/api/reachability", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ policy, reason: fd.get("reason") }),
       });
       e.target.reset();
       await loadSnapshot();

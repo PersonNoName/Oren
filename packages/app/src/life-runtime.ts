@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ScriptedChannelAdapter, type ChannelPort } from "@oren/channel";
+import { PanelInboxAdapter, ScriptedChannelAdapter, type ChannelPort } from "@oren/channel";
 import {
   Conductor,
   ScriptedCognitionAdapter,
@@ -18,6 +18,7 @@ import {
   webQuotaRemaining,
   type CognitionJob,
   type ClaimedInboxItem,
+  type CommitmentStatus,
   type LifeState,
 } from "@oren/kernel";
 import {
@@ -30,6 +31,11 @@ import {
   type RecallQuery,
 } from "@oren/memory";
 import { openDatabase, SqliteLifeRepository } from "@oren/storage";
+import type { ReachabilityPolicyInput } from "@oren/kernel";
+import {
+  createPanelServer,
+  type PanelServer,
+} from "@oren/panel";
 import { createTestCounterExtension } from "@oren/test-counter";
 import {
   createWebExtension,
@@ -42,6 +48,7 @@ import { CognitionWorker } from "./cognition-worker.js";
 import { deliverExpressProposals, findDeferredMessage } from "./delivery.js";
 import { EffectDispatcher } from "./effect-dispatcher.js";
 import { EpisodeCoordinator } from "./episode-coordinator.js";
+import { buildPanelSnapshot } from "./panel-snapshot.js";
 import { Scheduler } from "./scheduler.js";
 import {
   observationFromRead,
@@ -80,6 +87,13 @@ export interface LifeRuntimeOptions {
    */
   readonly useProcessWebEnv?: boolean;
   readonly channelPort?: ChannelPort;
+  readonly enablePanel?: boolean;
+  /**
+   * Opt-in only: when true and `enablePanel` is not set, `OREN_PANEL=1` enables
+   * the loopback life panel server.
+   */
+  readonly useProcessPanelEnv?: boolean;
+  readonly panelPort?: number;
 }
 
 export class LifeRuntime {
@@ -104,6 +118,8 @@ export class LifeRuntime {
     private readonly shutdownGraceMs: number,
     private readonly runtimeGate: { closed: boolean },
     private readonly channelPort: ChannelPort,
+    private readonly panelServer: PanelServer | undefined,
+    private readonly nextCorrelationId: () => string,
   ) {
     const identities = repository.listLifeIdentities();
     if (identities.length > 1) {
@@ -222,7 +238,11 @@ export class LifeRuntime {
       : undefined;
     const webPort = options.webPort
       ?? (resolvedWeb?.ok ? resolvedWeb.adapter : undefined);
-    const channelPort = options.channelPort ?? new ScriptedChannelAdapter();
+    const panelEnabled = options.enablePanel === true
+      || (options.useProcessPanelEnv === true && process.env.OREN_PANEL === "1");
+    const channelPort = panelEnabled && options.channelPort === undefined
+      ? new PanelInboxAdapter(now)
+      : (options.channelPort ?? new ScriptedChannelAdapter());
     const memory = new SqliteMemoryIndex(db, {
       ...(embedder !== undefined ? { embedder } : {}),
       now: () => Date.parse(now()),
@@ -372,7 +392,26 @@ export class LifeRuntime {
           acceptingWork: () => !runtimeGate.closed,
         },
       );
-      return new LifeRuntime(
+      let runtimeRef: LifeRuntime | undefined;
+      const panelServer = panelEnabled
+        ? await createPanelServer({
+            getSnapshot: () => runtimeRef!.getPanelSnapshot(),
+            postMessage: async (text) => {
+              const identity = runtimeRef!.requireIdentity();
+              await runtimeRef!.receiveUserMessage(identity.orenId, identity.personId, text);
+            },
+            updateReachability: async (policy, reason) => {
+              runtimeRef!.updateReachabilityPolicy(policy, reason);
+            },
+            revokeGrant: async (grantId, reason) => {
+              runtimeRef!.revokeGrant(grantId, reason);
+            },
+            updateCommitment: async (commitmentId, body) => {
+              runtimeRef!.updateCommitmentStatus(commitmentId, body);
+            },
+          }, { port: options.panelPort ?? 0 })
+        : undefined;
+      const runtime = new LifeRuntime(
         repository,
         actor,
         coordinator,
@@ -385,7 +424,11 @@ export class LifeRuntime {
         shutdownGraceMs,
         runtimeGate,
         channelPort,
+        panelServer,
+        () => nextId(),
       );
+      runtimeRef = runtime;
+      return runtime;
     } catch (primaryError) {
       const cleanupErrors: unknown[] = [];
       for (const extension of extensions.slice(0, activatedCount)) {
@@ -491,6 +534,62 @@ export class LifeRuntime {
     this.assertOpen();
     const records = this.repository.loadEventRecordsAfter(0);
     await this.memory.rebuild(() => records);
+  }
+
+  public panelUrl(): string | undefined {
+    return this.panelServer?.url;
+  }
+
+  public getPanelSnapshot() {
+    this.assertOpen();
+    const identity = this.requireIdentity();
+    const state = this.repository.loadState(identity.orenId);
+    const inboxAdapter = this.channelPort instanceof PanelInboxAdapter
+      ? this.channelPort
+      : undefined;
+    return buildPanelSnapshot(this.repository, identity.orenId, state, inboxAdapter);
+  }
+
+  public updateReachabilityPolicy(
+    policy: ReachabilityPolicyInput,
+    reason: string,
+  ): void {
+    this.assertOpen();
+    const identity = this.requireIdentity();
+    this.actor.updateReachabilityPolicy(
+      identity.orenId,
+      this.nextCorrelationId(),
+      policy,
+      reason,
+    );
+  }
+
+  public revokeGrant(grantId: string, reason: string): void {
+    this.assertOpen();
+    const identity = this.requireIdentity();
+    this.repository.revokeGrant(identity.orenId, grantId, this.now());
+    this.actor.revokeGrant(
+      identity.orenId,
+      this.nextCorrelationId(),
+      grantId,
+      reason,
+    );
+  }
+
+  public updateCommitmentStatus(
+    commitmentId: string,
+    body: {
+      readonly status: CommitmentStatus;
+      readonly nextStep?: string;
+      readonly reason: string;
+    },
+  ): void {
+    this.assertOpen();
+    const identity = this.requireIdentity();
+    this.actor.updateCommitmentStatus(identity.orenId, this.nextCorrelationId(), {
+      commitmentId,
+      ...body,
+    });
   }
 
   public close(): Promise<void> {
@@ -653,6 +752,9 @@ export class LifeRuntime {
       for (const extension of this.extensions) {
         await extension.deactivate();
       }
+      if (this.panelServer !== undefined) {
+        await this.panelServer.close();
+      }
     } finally {
       this.repository.close();
       this.closed = true;
@@ -678,6 +780,11 @@ export class LifeRuntime {
         `LifeRuntime identity conflict: expected ${this.identity.orenId}/${this.identity.personId}`,
       );
     }
+  }
+
+  private requireIdentity(): RuntimeIdentity {
+    if (!this.identity) throw new Error("LifeRuntime has not been initialized");
+    return this.identity;
   }
 
   private assertOpen(): void {
