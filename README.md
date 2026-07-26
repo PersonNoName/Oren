@@ -63,14 +63,20 @@ Both commands print setup instructions and exit 0 when unconfigured.
 
 ## Daily use
 
-Keep a local life running with the loopback panel (real model required):
+Keep a local life running with the loopback panel API (real model required):
 
 ```bash
 set -a && source .env && set +a
 npm run start
 ```
 
-Open the printed `http://127.0.0.1:7465/` URL (or `OREN_PANEL_PORT`). Message Oren from the panel. Ctrl+C stops cleanly. Database defaults to `~/.oren/life.db` (`OREN_DB` to override).
+The process prints `http://127.0.0.1:7465/` (API + legacy HTML). Recommended UI:
+
+```bash
+npm run panel-ui
+```
+
+Open `http://localhost:3000`. Point `PANEL_URL` at a non-default panel port if needed (e.g. `PANEL_URL=http://127.0.0.1:9001 npm run panel-ui`). Ctrl+C stops each process cleanly. Database defaults to `~/.oren/life.db` (`OREN_DB` to override).
 
 ## 记忆（Phase 3）
 
